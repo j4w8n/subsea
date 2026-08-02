@@ -12,7 +12,12 @@ pub struct Label {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Instruction {
+    Add { src: Operand, dst: Operand },
     Copy { src: Operand, dst: Operand },
+    Div { divisor: Operand },
+    Jmp { target: String },
+    Mul { src: Operand, dst: Operand },
+    Sub { src: Operand, dst: Operand },
     Syscall,
 }
 

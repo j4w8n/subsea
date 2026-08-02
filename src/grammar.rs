@@ -22,14 +22,19 @@ pub enum Token {
     Star,
     Text(String),
 
+    Add,
     Ampersand,
     Comma,
     Copy,
+    Div,
     Directive(String),
+    Jmp,
     Literal,
+    Mul,
     Period,
     Pointer(String),
     Register(String),
+    Sub,
     Syscall,
 }
 

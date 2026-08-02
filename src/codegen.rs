@@ -13,10 +13,24 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
 
         for instruction in &label.instructions {
             match instruction {
+                Instruction::Add { src, dst } => {
+                    emit_binary_instruction(&mut asm, "add", src, dst)?;
+                }
                 Instruction::Copy { src, dst } => {
-                    let src = emit_operand(src)?;
-                    let dst = emit_operand(dst)?;
-                    asm.push_str(&format!("  mov {dst}, {src}\n"));
+                    emit_binary_instruction(&mut asm, "mov", src, dst)?;
+                }
+                Instruction::Div { divisor } => {
+                    let divisor = emit_operand(divisor)?;
+                    asm.push_str(&format!("  div {divisor}\n"));
+                }
+                Instruction::Jmp { target } => {
+                    asm.push_str(&format!("  jmp {target}\n"));
+                }
+                Instruction::Mul { src, dst } => {
+                    emit_binary_instruction(&mut asm, "imul", src, dst)?;
+                }
+                Instruction::Sub { src, dst } => {
+                    emit_binary_instruction(&mut asm, "sub", src, dst)?;
                 }
                 Instruction::Syscall => asm.push_str("  syscall\n"),
             }
@@ -26,6 +40,19 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     }
 
     Ok(asm)
+}
+
+fn emit_binary_instruction(
+    asm: &mut String,
+    opcode: &str,
+    src: &Operand,
+    dst: &Operand,
+) -> Result<(), String> {
+    let src = emit_operand(src)?;
+    let dst = emit_operand(dst)?;
+    asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
+
+    Ok(())
 }
 
 fn emit_operand(operand: &Operand) -> Result<String, String> {

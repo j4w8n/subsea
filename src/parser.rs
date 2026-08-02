@@ -71,17 +71,48 @@ impl Parser {
 
     fn parse_instruction(&mut self) -> Result<Instruction, String> {
         match self.advance() {
+            Some(Token::Add) => {
+                let (src, dst) = self.parse_binary_operands("add")?;
+                Ok(Instruction::Add { src, dst })
+            }
             Some(Token::Copy) => {
-                let src = self.parse_operand()?;
-                self.expect(Token::Comma, "Expected ',' after copy source operand")?;
-                let dst = self.parse_operand()?;
-
+                let (src, dst) = self.parse_binary_operands("copy")?;
                 Ok(Instruction::Copy { src, dst })
+            }
+            Some(Token::Div) => {
+                let divisor = self.parse_operand()?;
+                Ok(Instruction::Div { divisor })
+            }
+            Some(Token::Jmp) => match self.advance() {
+                Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
+                Some(token) => Err(format!("Expected jump target label, found {token:?}")),
+                None => Err(String::from(
+                    "Expected jump target label, found end of input",
+                )),
+            },
+            Some(Token::Mul) => {
+                let (src, dst) = self.parse_binary_operands("mul")?;
+                Ok(Instruction::Mul { src, dst })
+            }
+            Some(Token::Sub) => {
+                let (src, dst) = self.parse_binary_operands("sub")?;
+                Ok(Instruction::Sub { src, dst })
             }
             Some(Token::Syscall) => Ok(Instruction::Syscall),
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
+    }
+
+    fn parse_binary_operands(&mut self, instruction: &str) -> Result<(Operand, Operand), String> {
+        let src = self.parse_operand()?;
+        self.expect(
+            Token::Comma,
+            &format!("Expected ',' after {instruction} source operand"),
+        )?;
+        let dst = self.parse_operand()?;
+
+        Ok((src, dst))
     }
 
     fn parse_operand(&mut self) -> Result<Operand, String> {
