@@ -117,13 +117,41 @@ impl Parser {
 
     fn parse_operand(&mut self) -> Result<Operand, String> {
         match self.advance() {
+            Some(Token::Ampersand) => match self.advance() {
+                Some(Token::Ident(name)) => Ok(Operand::Pointer(name)),
+                Some(Token::Register(name)) => Err(format!(
+                    "Cannot take the address of register {name}; expected a label after '&'"
+                )),
+                Some(Token::NumberLiteral(value)) => Err(format!(
+                    "Cannot take the address of immediate value {value}; expected a label after '&'"
+                )),
+                Some(Token::LBracket) => Err(String::from(
+                    "Cannot take the address of a dereference; '&[...]' is invalid syntax",
+                )),
+                Some(token) => Err(format!("Expected label after '&', found {token:?}")),
+                None => Err(String::from("Expected label after '&', found end of input")),
+            },
+            Some(Token::LBracket) => {
+                let operand = self.parse_operand()?;
+                self.expect(Token::RBracket, "Expected ']' after memory operand")?;
+
+                Ok(Operand::Dereference(Box::new(operand)))
+            }
             Some(Token::NumberLiteral(value)) => value
                 .parse::<i64>()
                 .map(Operand::Immediate)
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
             Some(Token::Ident(name)) => Ok(Operand::Ident(name)),
-            Some(Token::Pointer(name)) => Ok(Operand::Pointer(name)),
+            Some(Token::Pointer(name)) => {
+                if is_register_name(&name) {
+                    Err(format!(
+                        "Cannot take the address of register {name}; expected a label after '&'"
+                    ))
+                } else {
+                    Ok(Operand::Pointer(name))
+                }
+            }
             Some(token) => Err(format!("Expected operand, found {token:?}")),
             None => Err(String::from("Expected operand, found end of input")),
         }
@@ -150,4 +178,78 @@ impl Parser {
     fn is_at_end(&self) -> bool {
         self.position >= self.tokens.len()
     }
+}
+
+fn is_register_name(s: &str) -> bool {
+    matches!(
+        s,
+        "rax"
+            | "rbx"
+            | "rcx"
+            | "rdx"
+            | "rdi"
+            | "rsi"
+            | "rbp"
+            | "rsp"
+            | "eax"
+            | "ebx"
+            | "ecx"
+            | "edx"
+            | "edi"
+            | "esi"
+            | "ebp"
+            | "esp"
+            | "ax"
+            | "bx"
+            | "cx"
+            | "dx"
+            | "di"
+            | "si"
+            | "bp"
+            | "sp"
+            | "al"
+            | "bl"
+            | "cl"
+            | "dl"
+            | "ah"
+            | "bh"
+            | "ch"
+            | "dh"
+            | "dil"
+            | "sil"
+            | "bpl"
+            | "spl"
+            | "r8"
+            | "r9"
+            | "r10"
+            | "r11"
+            | "r12"
+            | "r13"
+            | "r14"
+            | "r15"
+            | "r8d"
+            | "r9d"
+            | "r10d"
+            | "r11d"
+            | "r12d"
+            | "r13d"
+            | "r14d"
+            | "r15d"
+            | "r8w"
+            | "r9w"
+            | "r10w"
+            | "r11w"
+            | "r12w"
+            | "r13w"
+            | "r14w"
+            | "r15w"
+            | "r8b"
+            | "r9b"
+            | "r10b"
+            | "r11b"
+            | "r12b"
+            | "r13b"
+            | "r14b"
+            | "r15b"
+    )
 }

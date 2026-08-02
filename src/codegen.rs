@@ -17,7 +17,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     emit_binary_instruction(&mut asm, "add", src, dst)?;
                 }
                 Instruction::Copy { src, dst } => {
-                    emit_binary_instruction(&mut asm, "mov", src, dst)?;
+                    emit_copy_instruction(&mut asm, src, dst)?;
                 }
                 Instruction::Div { divisor } => {
                     let divisor = emit_operand(divisor)?;
@@ -55,11 +55,35 @@ fn emit_binary_instruction(
     Ok(())
 }
 
+fn emit_copy_instruction(asm: &mut String, src: &Operand, dst: &Operand) -> Result<(), String> {
+    if let Operand::Pointer(name) = src {
+        let dst = emit_operand(dst)?;
+        asm.push_str(&format!("  lea {dst}, [rip + {name}]\n"));
+
+        Ok(())
+    } else {
+        emit_binary_instruction(asm, "mov", src, dst)
+    }
+}
+
 fn emit_operand(operand: &Operand) -> Result<String, String> {
+    match operand {
+        Operand::Dereference(inner) => Ok(format!("[{}]", emit_address_operand(inner)?)),
+        Operand::Immediate(value) => Ok(value.to_string()),
+        Operand::Register(name) => Ok(name.clone()),
+        Operand::Ident(name) => Ok(name.clone()),
+        Operand::Pointer(name) => Err(format!(
+            "Pointer operand &{name} is only supported as the source of copy"
+        )),
+    }
+}
+
+fn emit_address_operand(operand: &Operand) -> Result<String, String> {
     match operand {
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
         Operand::Ident(name) => Ok(name.clone()),
-        Operand::Pointer(name) => Err(format!("Pointer operand &{name} is not supported yet")),
+        Operand::Dereference(_) => Err(String::from("Nested dereference is not supported yet")),
+        Operand::Pointer(name) => Err(format!("Pointer operand &{name} cannot be dereferenced")),
     }
 }

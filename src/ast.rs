@@ -23,6 +23,7 @@ pub enum Instruction {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
+    Dereference(Box<Operand>),
     Immediate(i64),
     Register(String),
     Ident(String),
