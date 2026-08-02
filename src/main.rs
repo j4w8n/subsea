@@ -50,7 +50,7 @@ fn compile_to_asm(source_path: &str) -> Result<String, String> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut chars = source.chars().peekable();
 
-    while let Some(next_token) = get_next_token(&mut chars) {
+    while let Some(next_token) = get_next_token(&mut chars)? {
         tokens.push(next_token);
     }
 

@@ -2,7 +2,7 @@ use crate::grammar::Token;
 use std::iter::Peekable;
 use std::str::Chars;
 
-pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
+pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, String> {
     loop {
         match chars.peek() {
             Some(c) if c.is_whitespace() => {
@@ -43,7 +43,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
                         }
 
                         if !closed {
-                            panic!("Unterminated multiline comment");
+                            return Err(String::from("Unterminated multiline comment"));
                         }
                     }
                     _ => break,
@@ -54,7 +54,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
     }
 
     let char = chars.next();
-    match char {
+    let token = match char {
         Some('.') => match chars.peek() {
             Some(&c) if is_ident_start(c) => {
                 let mut s = String::new();
@@ -111,13 +111,13 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
             let mut value = String::new();
             while let Some(next_char) = chars.next() {
                 if next_char == '"' {
-                    return Some(Token::Text(value));
+                    return Ok(Some(Token::Text(value)));
                 } else {
                     value.push(next_char);
                 }
             }
 
-            panic!("Unterminated string literal");
+            return Err(String::from("Unterminated string literal"));
         }
         Some(c) if c.is_ascii_digit() => {
             let num_str = lex_number(c, chars);
@@ -149,11 +149,10 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
             }
         }
         None => None,
-        _ => {
-            eprintln!("Error: Unknown character {:?}", char.unwrap());
-            None
-        }
-    }
+        Some(char) => return Err(format!("Unknown character {char:?}")),
+    };
+
+    Ok(token)
 }
 
 fn is_ident_start(c: char) -> bool {
