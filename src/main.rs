@@ -1,4 +1,4 @@
-use std::{fs, process};
+use std::{env, fs, process};
 
 pub mod ast;
 pub mod codegen;
@@ -14,51 +14,58 @@ use crate::lexer::get_next_token;
 use crate::parser::Parser;
 
 fn main() {
-    let source_result = fs::read_to_string("./main.ss");
+    let args: Vec<String> = env::args().collect();
 
-    if let Ok(source) = source_result {
-        println!("{source}");
-
-        let mut tokens: Vec<Token> = Vec::new();
-
-        let mut chars = source.chars().peekable();
-
-        while let Some(next_token) = get_next_token(&mut chars) {
-            tokens.push(next_token);
-        }
-
-        println!("Tokens: {:?}\n", tokens);
-
-        let mut parser = Parser::new(tokens);
-        match parser.parse_program() {
-            Ok(program) => {
-                println!("AST: {program:#?}\n");
-
-                match emit_x86_64_linux_asm(&program) {
-                    Ok(asm) => {
-                        println!("Assembly:\n{asm}");
-
-                        match build_executable(&asm) {
-                            Ok(output) => {
-                                println!("Wrote assembly: {}", output.asm_path.display());
-                                println!("Wrote object: {}", output.object_path.display());
-                                println!("Wrote executable: {}", output.executable_path.display());
-
-                                match run_executable(&output.executable_path) {
-                                    Ok(status) => {
-                                        println!("Program exited with: {status}");
-                                        process::exit(status.code().unwrap_or(1));
-                                    }
-                                    Err(error) => eprintln!("Run error: {error}"),
-                                }
-                            }
-                            Err(error) => eprintln!("Build error: {error}"),
-                        }
-                    }
-                    Err(error) => eprintln!("Codegen error: {error}"),
-                }
-            }
-            Err(error) => eprintln!("Parse error: {error}"),
-        }
+    if args.len() != 3 {
+        print_usage_and_exit();
     }
+
+    let command = &args[1];
+    let source_path = &args[2];
+
+    match command.as_str() {
+        "emit-asm" => match compile_to_asm(source_path) {
+            Ok(asm) => print!("{asm}"),
+            Err(error) => exit_with_error(error),
+        },
+        "build" => match compile_to_asm(source_path).and_then(|asm| build_executable(&asm)) {
+            Ok(output) => println!("Wrote executable: {}", output.executable_path.display()),
+            Err(error) => exit_with_error(error),
+        },
+        "run" => match compile_to_asm(source_path).and_then(|asm| build_executable(&asm)) {
+            Ok(output) => match run_executable(&output.executable_path) {
+                Ok(status) => process::exit(status.code().unwrap_or(1)),
+                Err(error) => exit_with_error(error),
+            },
+            Err(error) => exit_with_error(error),
+        },
+        _ => print_usage_and_exit(),
+    }
+}
+
+fn compile_to_asm(source_path: &str) -> Result<String, String> {
+    let source = fs::read_to_string(source_path)
+        .map_err(|error| format!("Failed to read {source_path:?}: {error}"))?;
+
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut chars = source.chars().peekable();
+
+    while let Some(next_token) = get_next_token(&mut chars) {
+        tokens.push(next_token);
+    }
+
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program()?;
+
+    emit_x86_64_linux_asm(&program)
+}
+
+fn exit_with_error(error: String) -> ! {
+    eprintln!("Error: {error}");
+    process::exit(1);
+}
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("Usage: subsea <run|build|emit-asm> <file.ss>");
+    process::exit(1);
 }
