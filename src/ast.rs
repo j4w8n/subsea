@@ -23,9 +23,29 @@ pub enum Instruction {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
-    Dereference(Box<Operand>),
+    Dereference(Address),
     Immediate(i64),
     Register(String),
     Ident(String),
     Pointer(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Address {
+    pub first: AddressTerm,
+    pub rest: Vec<(AddressOperator, AddressTerm)>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum AddressTerm {
+    Immediate(i64),
+    Register(String),
+    ScaledRegister { register: String, scale: i64 },
+    Ident(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum AddressOperator {
+    Add,
+    Subtract,
 }

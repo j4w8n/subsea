@@ -1,4 +1,4 @@
-use crate::ast::{Instruction, Label, Operand, Program};
+use crate::ast::{Address, AddressOperator, AddressTerm, Instruction, Label, Operand, Program};
 use crate::grammar::Token;
 
 pub struct Parser {
@@ -132,10 +132,10 @@ impl Parser {
                 None => Err(String::from("Expected label after '&', found end of input")),
             },
             Some(Token::LBracket) => {
-                let operand = self.parse_operand()?;
+                let address = self.parse_address()?;
                 self.expect(Token::RBracket, "Expected ']' after memory operand")?;
 
-                Ok(Operand::Dereference(Box::new(operand)))
+                Ok(Operand::Dereference(address))
             }
             Some(Token::NumberLiteral(value)) => value
                 .parse::<i64>()
@@ -154,6 +154,92 @@ impl Parser {
             }
             Some(token) => Err(format!("Expected operand, found {token:?}")),
             None => Err(String::from("Expected operand, found end of input")),
+        }
+    }
+
+    fn parse_address(&mut self) -> Result<Address, String> {
+        let first = self.parse_address_term()?;
+        let mut rest = Vec::new();
+
+        while matches!(self.peek(), Some(Token::Plus | Token::Minus)) {
+            let operator = match self.advance() {
+                Some(Token::Plus) => AddressOperator::Add,
+                Some(Token::Minus) => AddressOperator::Subtract,
+                _ => unreachable!(),
+            };
+
+            rest.push((operator, self.parse_address_term()?));
+        }
+
+        Ok(Address { first, rest })
+    }
+
+    fn parse_address_term(&mut self) -> Result<AddressTerm, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value)) => {
+                if matches!(self.peek(), Some(Token::Star)) {
+                    return Err(String::from(
+                        "Only registers can be scaled in memory operands",
+                    ));
+                }
+
+                value
+                    .parse::<i64>()
+                    .map(AddressTerm::Immediate)
+                    .map_err(|_| format!("Invalid integer literal {value:?}"))
+            }
+            Some(Token::Register(name)) => {
+                if matches!(self.peek(), Some(Token::Star)) {
+                    self.advance();
+
+                    let scale = self.parse_address_scale()?;
+                    Ok(AddressTerm::ScaledRegister {
+                        register: name,
+                        scale,
+                    })
+                } else {
+                    Ok(AddressTerm::Register(name))
+                }
+            }
+            Some(Token::Ident(name)) => {
+                if matches!(self.peek(), Some(Token::Star)) {
+                    return Err(String::from(
+                        "Only registers can be scaled in memory operands",
+                    ));
+                }
+
+                Ok(AddressTerm::Ident(name))
+            }
+            Some(Token::LBracket) => Err(String::from("Nested dereference is not supported yet")),
+            Some(Token::Ampersand | Token::Pointer(_)) => Err(String::from(
+                "Address-of syntax is not valid inside a memory operand",
+            )),
+            Some(token) => Err(format!("Expected address term, found {token:?}")),
+            None => Err(String::from("Expected address term, found end of input")),
+        }
+    }
+
+    fn parse_address_scale(&mut self) -> Result<i64, String> {
+        let scale = match self.advance() {
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<i64>()
+                .map_err(|_| format!("Invalid address scale {value:?}"))?,
+            Some(token) => {
+                return Err(format!("Expected address scale after '*', found {token:?}"));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected address scale after '*', found end of input",
+                ));
+            }
+        };
+
+        if matches!(scale, 1 | 2 | 4 | 8) {
+            Ok(scale)
+        } else {
+            Err(format!(
+                "Invalid address scale {scale}; expected one of 1, 2, 4, or 8"
+            ))
         }
     }
 

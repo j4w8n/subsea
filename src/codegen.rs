@@ -1,4 +1,4 @@
-use crate::ast::{Instruction, Operand, Program};
+use crate::ast::{Address, AddressOperator, AddressTerm, Instruction, Operand, Program};
 
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     let mut asm = String::new();
@@ -68,7 +68,7 @@ fn emit_copy_instruction(asm: &mut String, src: &Operand, dst: &Operand) -> Resu
 
 fn emit_operand(operand: &Operand) -> Result<String, String> {
     match operand {
-        Operand::Dereference(inner) => Ok(format!("[{}]", emit_address_operand(inner)?)),
+        Operand::Dereference(address) => Ok(format!("[{}]", emit_address(address))),
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
         Operand::Ident(name) => Ok(name.clone()),
@@ -78,12 +78,26 @@ fn emit_operand(operand: &Operand) -> Result<String, String> {
     }
 }
 
-fn emit_address_operand(operand: &Operand) -> Result<String, String> {
-    match operand {
-        Operand::Immediate(value) => Ok(value.to_string()),
-        Operand::Register(name) => Ok(name.clone()),
-        Operand::Ident(name) => Ok(name.clone()),
-        Operand::Dereference(_) => Err(String::from("Nested dereference is not supported yet")),
-        Operand::Pointer(name) => Err(format!("Pointer operand &{name} cannot be dereferenced")),
+fn emit_address(address: &Address) -> String {
+    let mut value = emit_address_term(&address.first);
+
+    for (operator, term) in &address.rest {
+        match operator {
+            AddressOperator::Add => value.push_str(" + "),
+            AddressOperator::Subtract => value.push_str(" - "),
+        }
+
+        value.push_str(&emit_address_term(term));
+    }
+
+    value
+}
+
+fn emit_address_term(term: &AddressTerm) -> String {
+    match term {
+        AddressTerm::Immediate(value) => value.to_string(),
+        AddressTerm::Register(name) => name.clone(),
+        AddressTerm::ScaledRegister { register, scale } => format!("{register} * {scale}"),
+        AddressTerm::Ident(name) => name.clone(),
     }
 }
