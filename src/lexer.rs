@@ -1,0 +1,215 @@
+use crate::grammar::Token;
+use std::iter::Peekable;
+use std::str::Chars;
+
+pub fn get_next_token(chars: &mut Peekable<Chars>) -> Option<Token> {
+    loop {
+        match chars.peek() {
+            Some(c) if c.is_whitespace() => {
+                chars.next();
+            }
+            Some('/') => {
+                let mut clone = chars.clone();
+                clone.next();
+
+                match clone.peek() {
+                    Some('/') => {
+                        // skip single-line comments
+                        chars.next(); // /
+                        chars.next(); // /
+
+                        while let Some(&next_char) = chars.peek() {
+                            if next_char == '\n' {
+                                break;
+                            }
+                            chars.next();
+                        }
+                    }
+                    Some('*') => {
+                        // skip multi-line comments
+                        chars.next(); // /
+                        chars.next(); // *
+
+                        let mut prev_was_star = false;
+                        let mut closed = false;
+
+                        while let Some(next_char) = chars.next() {
+                            if prev_was_star && next_char == '/' {
+                                closed = true;
+                                break;
+                            }
+
+                            prev_was_star = next_char == '*';
+                        }
+
+                        if !closed {
+                            panic!("Unterminated multiline comment");
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let char = chars.next();
+    match char {
+        Some('.') => match chars.peek() {
+            Some(&c) if is_ident_start(c) => {
+                let mut s = String::new();
+                s.push(chars.next().unwrap());
+                while let Some(&next_char) = chars.peek() {
+                    if is_ident_continue(next_char) {
+                        s.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                Some(Token::Directive(s))
+            }
+            _ => Some(Token::Period),
+        },
+        Some('&') => match chars.peek() {
+            Some(&c) if is_ident_start(c) => {
+                let mut s = String::new();
+                s.push(chars.next().unwrap());
+                while let Some(&next_char) = chars.peek() {
+                    if is_ident_continue(next_char) {
+                        s.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                Some(Token::Pointer(s))
+            }
+            _ => Some(Token::Ampersand),
+        },
+        Some('+') => Some(Token::Plus),
+        Some('-') => Some(Token::Minus),
+        Some('*') => Some(Token::Star),
+        Some('/') => Some(Token::Slash),
+        Some('=') => Some(Token::Equals),
+        Some('(') => Some(Token::LParen),
+        Some(')') => Some(Token::RParen),
+        Some('{') => Some(Token::LBrace),
+        Some('}') => Some(Token::RBrace),
+        Some('[') => Some(Token::LBracket),
+        Some(']') => Some(Token::RBracket),
+        Some('$') => Some(Token::Dollar),
+        Some('%') => Some(Token::Percent),
+        Some(':') => {
+            if chars.peek() == Some(&':') {
+                chars.next();
+                Some(Token::DoubleColon)
+            } else {
+                Some(Token::Colon)
+            }
+        }
+        Some(',') => Some(Token::Comma),
+        Some('"') => {
+            let mut value = String::new();
+            while let Some(next_char) = chars.next() {
+                if next_char == '"' {
+                    return Some(Token::Text(value));
+                } else {
+                    value.push(next_char);
+                }
+            }
+
+            panic!("Unterminated string literal");
+        }
+        Some(c) if c.is_ascii_digit() => {
+            let num_str = lex_number(c, chars);
+            Some(Token::NumberLiteral(num_str))
+        }
+        Some(c) if is_ident_start(c) => {
+            let mut s = String::from(c);
+
+            while let Some(&next_char) = chars.peek() {
+                if is_ident_continue(next_char) {
+                    s.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+
+            match s.as_str() {
+                "true" => Some(Token::Bool(true)),
+                "false" => Some(Token::Bool(false)),
+                "copy" => Some(Token::Copy),
+                "syscall" => Some(Token::Syscall),
+                register if is_register(register) => Some(Token::Register(s)),
+                _ => Some(Token::Ident(s)),
+            }
+        }
+        None => None,
+        _ => {
+            eprintln!("Error: Unknown character {:?}", char.unwrap());
+            None
+        }
+    }
+}
+
+fn is_ident_start(c: char) -> bool {
+    c == '_' || c.is_alphabetic()
+}
+
+fn is_ident_continue(c: char) -> bool {
+    c == '_' || c.is_alphanumeric()
+}
+
+fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut num_str = String::from(first);
+
+    while let Some(&c) = chars.peek() {
+        if c.is_ascii_digit() {
+            num_str.push(chars.next().unwrap());
+        } else {
+            break;
+        }
+    }
+
+    if let Some(&'.') = chars.peek() {
+        let mut clone = chars.clone();
+        clone.next();
+
+        if let Some(next_after_dot) = clone.peek() {
+            if next_after_dot.is_ascii_digit() {
+                num_str.push(chars.next().unwrap());
+
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() {
+                        num_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    num_str
+}
+
+fn is_register(s: &str) -> bool {
+    matches!(
+        s,
+        "rax"
+            | "rbx"
+            | "rcx"
+            | "rdx"
+            | "rdi"
+            | "rsi"
+            | "rbp"
+            | "rsp"
+            | "r8"
+            | "r9"
+            | "r10"
+            | "r11"
+            | "r12"
+            | "r13"
+            | "r14"
+            | "r15"
+    )
+}
