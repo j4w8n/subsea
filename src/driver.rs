@@ -2,11 +2,18 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::time::{Duration, Instant};
 
 pub struct BuildOutput {
     pub asm_path: PathBuf,
     pub object_path: PathBuf,
     pub executable_path: PathBuf,
+    pub timings: BuildTimings,
+}
+
+pub struct BuildTimings {
+    pub assemble: Duration,
+    pub link: Duration,
 }
 
 pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOutput, String> {
@@ -30,6 +37,7 @@ pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOu
 
     fs::write(&asm_path, asm).map_err(|error| format!("Failed to write assembly: {error}"))?;
 
+    let assemble_started = Instant::now();
     run_command(
         Command::new("as")
             .arg(&asm_path)
@@ -38,7 +46,9 @@ pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOu
         "assembler",
         "as",
     )?;
+    let assemble = assemble_started.elapsed();
 
+    let link_started = Instant::now();
     run_command(
         Command::new("ld")
             .arg(&object_path)
@@ -47,11 +57,13 @@ pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOu
         "linker",
         "ld",
     )?;
+    let link = link_started.elapsed();
 
     Ok(BuildOutput {
         asm_path,
         object_path,
         executable_path,
+        timings: BuildTimings { assemble, link },
     })
 }
 
