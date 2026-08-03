@@ -27,6 +27,7 @@ pub enum Token {
     Comma,
     Copy,
     Directive(String),
+    Exit,
     Idiv,
     Imul,
     Jmp,

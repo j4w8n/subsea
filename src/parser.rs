@@ -82,6 +82,10 @@ impl Parser {
                 let (src, dst) = self.parse_binary_operands("copy")?;
                 Ok(Instruction::Copy { src, dst })
             }
+            Some(Token::Exit) => {
+                let code = self.parse_exit_code()?;
+                Ok(Instruction::Exit { code })
+            }
             Some(Token::Idiv) => {
                 let divisor = self.parse_operand()?;
                 Ok(Instruction::Idiv { divisor })
@@ -151,6 +155,23 @@ impl Parser {
             }
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
+        }
+    }
+
+    fn parse_exit_code(&mut self) -> Result<u8, String> {
+        let code = match self.advance() {
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<u16>()
+                .map_err(|_| format!("Invalid exit code {value:?}"))?,
+            Some(Token::Minus) => return Err(String::from("Exit code must be between 0 and 255")),
+            Some(token) => return Err(format!("Expected exit code, found {token:?}")),
+            None => return Err(String::from("Expected exit code, found end of input")),
+        };
+
+        if code <= 255 {
+            Ok(code as u8)
+        } else {
+            Err(String::from("Exit code must be between 0 and 255"))
         }
     }
 

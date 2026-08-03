@@ -14,6 +14,7 @@ pub struct Label {
 pub enum Instruction {
     Add { src: Operand, dst: Operand },
     Copy { src: Operand, dst: Operand },
+    Exit { code: u8 },
     Idiv { divisor: Operand },
     Imul { src: Operand, dst: Operand },
     Jmp { target: String },

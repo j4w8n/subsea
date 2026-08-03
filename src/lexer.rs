@@ -146,6 +146,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "false" => Some(Token::Bool(false)),
                 "add" => Some(Token::Add),
                 "copy" => Some(Token::Copy),
+                "exit" => Some(Token::Exit),
                 "idiv" => Some(Token::Idiv),
                 "imul" => Some(Token::Imul),
                 "jmp" => Some(Token::Jmp),

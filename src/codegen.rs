@@ -25,6 +25,11 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Copy { src, dst } => {
                     emit_copy_instruction(&mut asm, src, dst)?;
                 }
+                Instruction::Exit { code } => {
+                    asm.push_str("  mov rax, 60\n");
+                    asm.push_str(&format!("  mov rdi, {code}\n"));
+                    asm.push_str("  syscall\n");
+                }
                 Instruction::Idiv { divisor } => {
                     let divisor = emit_operand(divisor)?;
                     asm.push_str(&format!("  idiv {divisor}\n"));
