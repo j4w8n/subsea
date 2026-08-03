@@ -18,11 +18,17 @@ pub enum Instruction {
     Imul { src: Operand, dst: Operand },
     Jmp { target: String },
     LetString { name: String, value: String },
-    Print { name: String },
+    Print { target: PrintTarget },
     Sub { src: Operand, dst: Operand },
     Syscall,
     Udiv { divisor: Operand },
     Umul { src: Operand, dst: Operand },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum PrintTarget {
+    Binding(String),
+    Literal(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]

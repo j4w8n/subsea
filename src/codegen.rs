@@ -1,5 +1,5 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, Program,
+    Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, PrintTarget, Program,
 };
 use std::collections::HashMap;
 
@@ -36,15 +36,8 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
                 Instruction::LetString { .. } => {}
-                Instruction::Print { name } => {
-                    let string = strings
-                        .get(&(label.name.clone(), name.clone()))
-                        .ok_or_else(|| {
-                            format!(
-                                "Cannot print unknown string binding {name:?} in label {:?}",
-                                label.name
-                            )
-                        })?;
+                Instruction::Print { target } => {
+                    let string = resolve_print_target(&strings, &label.name, target)?;
 
                     emit_print_instruction(&mut asm, string);
                 }
@@ -78,31 +71,72 @@ fn collect_string_bindings(
     program: &Program,
 ) -> Result<HashMap<(String, String), StringBinding>, String> {
     let mut strings = HashMap::new();
+    let mut literal_index = 0;
 
     for label in &program.labels {
         for instruction in &label.instructions {
-            if let Instruction::LetString { name, value } = instruction {
-                let key = (label.name.clone(), name.clone());
+            match instruction {
+                Instruction::LetString { name, value } => {
+                    let key = (label.name.clone(), name.clone());
 
-                if strings.contains_key(&key) {
-                    return Err(format!(
-                        "String binding {name:?} is already defined in label {:?}",
-                        label.name
-                    ));
+                    if strings.contains_key(&key) {
+                        return Err(format!(
+                            "String binding {name:?} is already defined in label {:?}",
+                            label.name
+                        ));
+                    }
+
+                    strings.insert(
+                        key,
+                        StringBinding {
+                            asm_label: format!(".Lstr_{}_{}", label.name, name),
+                            value: value.clone(),
+                        },
+                    );
                 }
+                Instruction::Print {
+                    target: PrintTarget::Literal(value),
+                } => {
+                    let name = format!("$print_literal_{literal_index}");
+                    literal_index += 1;
 
-                strings.insert(
-                    key,
-                    StringBinding {
-                        asm_label: format!(".Lstr_{}_{}", label.name, name),
-                        value: value.clone(),
-                    },
-                );
+                    strings.insert(
+                        (label.name.clone(), name),
+                        StringBinding {
+                            asm_label: format!(".Lstr_{}_literal_{}", label.name, literal_index),
+                            value: value.clone(),
+                        },
+                    );
+                }
+                _ => {}
             }
         }
     }
 
     Ok(strings)
+}
+
+fn resolve_print_target<'a>(
+    strings: &'a HashMap<(String, String), StringBinding>,
+    label_name: &str,
+    target: &PrintTarget,
+) -> Result<&'a StringBinding, String> {
+    match target {
+        PrintTarget::Binding(name) => strings
+            .get(&(label_name.to_string(), name.clone()))
+            .ok_or_else(|| {
+                format!("Cannot print unknown string binding {name:?} in label {label_name:?}")
+            }),
+        PrintTarget::Literal(value) => strings
+            .values()
+            .find(|string| {
+                string.value == *value
+                    && string
+                        .asm_label
+                        .starts_with(&format!(".Lstr_{label_name}_literal_"))
+            })
+            .ok_or_else(|| String::from("Internal error: missing print literal")),
+    }
 }
 
 fn emit_rodata(asm: &mut String, strings: &HashMap<(String, String), StringBinding>) {

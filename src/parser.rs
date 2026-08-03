@@ -1,5 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, Program,
+    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, PrintTarget,
+    Program,
 };
 use crate::grammar::Token;
 
@@ -122,12 +123,17 @@ impl Parser {
                 }
             }
             Some(Token::Print) => match self.advance() {
-                Some(Token::Ident(name)) => Ok(Instruction::Print { name }),
+                Some(Token::Ident(name)) => Ok(Instruction::Print {
+                    target: PrintTarget::Binding(name),
+                }),
+                Some(Token::Text(value)) => Ok(Instruction::Print {
+                    target: PrintTarget::Literal(value),
+                }),
                 Some(token) => Err(format!(
-                    "Expected binding name after print, found {token:?}"
+                    "Expected binding name or string literal after print, found {token:?}"
                 )),
                 None => Err(String::from(
-                    "Expected binding name after print, found end of input",
+                    "Expected binding name or string literal after print, found end of input",
                 )),
             },
             Some(Token::Sub) => {
