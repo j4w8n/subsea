@@ -1,14 +1,15 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, PrintTarget, Program,
+    Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, PrintPart, Program,
 };
 use std::collections::HashMap;
 
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     let strings = collect_string_bindings(program)?;
+    let mut literal_indexes = HashMap::new();
     let mut asm = String::new();
 
     asm.push_str(".intel_syntax noprefix\n");
-    emit_rodata(&mut asm, &strings);
+    emit_rodata(&mut asm, &strings.all);
     asm.push_str(".section .text\n");
     asm.push_str(".global _start\n\n");
     asm.push_str("_start:\n");
@@ -41,10 +42,13 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
                 Instruction::LetString { .. } => {}
-                Instruction::Print { target } => {
-                    let string = resolve_print_target(&strings, &label.name, target)?;
+                Instruction::Print { parts } => {
+                    for part in parts {
+                        let string =
+                            resolve_print_part(&strings, &mut literal_indexes, &label.name, part)?;
 
-                    emit_print_instruction(&mut asm, string);
+                        emit_print_instruction(&mut asm, string);
+                    }
                 }
                 Instruction::Sub { src, dst } => {
                     emit_binary_instruction(&mut asm, "sub", src, dst)?;
@@ -72,11 +76,17 @@ struct StringBinding {
     value: String,
 }
 
-fn collect_string_bindings(
-    program: &Program,
-) -> Result<HashMap<(String, String), StringBinding>, String> {
-    let mut strings = HashMap::new();
-    let mut literal_index = 0;
+struct StringTable {
+    all: Vec<StringBinding>,
+    bindings: HashMap<(String, String), StringBinding>,
+    literals: HashMap<(String, usize), StringBinding>,
+}
+
+fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
+    let mut all = Vec::new();
+    let mut bindings = HashMap::new();
+    let mut literals = HashMap::new();
+    let mut literal_indexes = HashMap::new();
 
     for label in &program.labels {
         for instruction in &label.instructions {
@@ -84,72 +94,80 @@ fn collect_string_bindings(
                 Instruction::LetString { name, value } => {
                     let key = (label.name.clone(), name.clone());
 
-                    if strings.contains_key(&key) {
+                    if bindings.contains_key(&key) {
                         return Err(format!(
                             "String binding {name:?} is already defined in label {:?}",
                             label.name
                         ));
                     }
 
-                    strings.insert(
-                        key,
-                        StringBinding {
-                            asm_label: format!(".Lstr_{}_{}", label.name, name),
-                            value: value.clone(),
-                        },
-                    );
-                }
-                Instruction::Print {
-                    target: PrintTarget::Literal(value),
-                } => {
-                    let name = format!("$print_literal_{literal_index}");
-                    literal_index += 1;
+                    let binding = StringBinding {
+                        asm_label: format!(".Lstr_{}_{}", label.name, name),
+                        value: value.clone(),
+                    };
 
-                    strings.insert(
-                        (label.name.clone(), name),
-                        StringBinding {
-                            asm_label: format!(".Lstr_{}_literal_{}", label.name, literal_index),
-                            value: value.clone(),
-                        },
-                    );
+                    all.push(binding.clone());
+                    bindings.insert(key, binding);
+                }
+                Instruction::Print { parts } => {
+                    for part in parts {
+                        if let PrintPart::Literal(value) = part {
+                            let index = literal_indexes.entry(label.name.clone()).or_insert(0);
+                            *index += 1;
+
+                            let binding = StringBinding {
+                                asm_label: format!(".Lstr_{}_literal_{}", label.name, index),
+                                value: value.clone(),
+                            };
+
+                            all.push(binding.clone());
+                            literals.insert((label.name.clone(), *index), binding);
+                        }
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    Ok(strings)
+    Ok(StringTable {
+        all,
+        bindings,
+        literals,
+    })
 }
 
-fn resolve_print_target<'a>(
-    strings: &'a HashMap<(String, String), StringBinding>,
+fn resolve_print_part<'a>(
+    strings: &'a StringTable,
+    literal_indexes: &mut HashMap<String, usize>,
     label_name: &str,
-    target: &PrintTarget,
+    part: &PrintPart,
 ) -> Result<&'a StringBinding, String> {
-    match target {
-        PrintTarget::Binding(name) => strings
+    match part {
+        PrintPart::Binding(name) => strings
+            .bindings
             .get(&(label_name.to_string(), name.clone()))
             .ok_or_else(|| {
                 format!("Cannot print unknown string binding {name:?} in label {label_name:?}")
             }),
-        PrintTarget::Literal(value) => strings
-            .values()
-            .find(|string| {
-                string.value == *value
-                    && string
-                        .asm_label
-                        .starts_with(&format!(".Lstr_{label_name}_literal_"))
-            })
-            .ok_or_else(|| String::from("Internal error: missing print literal")),
+        PrintPart::Literal(_) => {
+            let index = literal_indexes.entry(label_name.to_string()).or_insert(0);
+            *index += 1;
+
+            strings
+                .literals
+                .get(&(label_name.to_string(), *index))
+                .ok_or_else(|| String::from("Internal error: missing print literal"))
+        }
     }
 }
 
-fn emit_rodata(asm: &mut String, strings: &HashMap<(String, String), StringBinding>) {
+fn emit_rodata(asm: &mut String, strings: &[StringBinding]) {
     if strings.is_empty() {
         return;
     }
 
-    let mut bindings: Vec<_> = strings.values().collect();
+    let mut bindings: Vec<_> = strings.iter().collect();
     bindings.sort_by(|left, right| left.asm_label.cmp(&right.asm_label));
 
     asm.push_str(".section .rodata\n");

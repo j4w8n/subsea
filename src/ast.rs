@@ -19,7 +19,7 @@ pub enum Instruction {
     Imul { src: Operand, dst: Operand },
     Jmp { target: String },
     LetString { name: String, value: String },
-    Print { target: PrintTarget },
+    Print { parts: Vec<PrintPart> },
     Sub { src: Operand, dst: Operand },
     Syscall,
     Udiv { divisor: Operand },
@@ -27,7 +27,7 @@ pub enum Instruction {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum PrintTarget {
+pub enum PrintPart {
     Binding(String),
     Literal(String),
 }

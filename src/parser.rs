@@ -1,5 +1,5 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, PrintTarget,
+    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, PrintPart,
     Program,
 };
 use crate::grammar::Token;
@@ -128,11 +128,9 @@ impl Parser {
             }
             Some(Token::Print) => match self.advance() {
                 Some(Token::Ident(name)) => Ok(Instruction::Print {
-                    target: PrintTarget::Binding(name),
+                    parts: vec![PrintPart::Binding(name)],
                 }),
-                Some(Token::Text(value)) => Ok(Instruction::Print {
-                    target: PrintTarget::Literal(value),
-                }),
+                Some(Token::Text(value)) => self.parse_print_literal(value),
                 Some(token) => Err(format!(
                     "Expected binding name or string literal after print, found {token:?}"
                 )),
@@ -156,6 +154,55 @@ impl Parser {
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
+    }
+
+    fn parse_print_literal(&mut self, value: String) -> Result<Instruction, String> {
+        if !matches!(self.peek(), Some(Token::Comma)) {
+            return Ok(Instruction::Print {
+                parts: vec![PrintPart::Literal(value)],
+            });
+        }
+
+        let mut args = Vec::new();
+        while matches!(self.peek(), Some(Token::Comma)) {
+            self.advance();
+
+            match self.advance() {
+                Some(Token::Ident(name)) => args.push(name),
+                Some(token) => {
+                    return Err(format!(
+                        "Expected binding name after print format comma, found {token:?}"
+                    ));
+                }
+                None => {
+                    return Err(String::from(
+                        "Expected binding name after print format comma, found end of input",
+                    ));
+                }
+            }
+        }
+
+        let literal_parts = split_format_literal(&value)?;
+        if literal_parts.len() != args.len() + 1 {
+            return Err(format!(
+                "Print format expected {} argument(s), found {}",
+                literal_parts.len().saturating_sub(1),
+                args.len()
+            ));
+        }
+
+        let mut parts = Vec::new();
+        for (index, literal) in literal_parts.into_iter().enumerate() {
+            if !literal.is_empty() {
+                parts.push(PrintPart::Literal(literal));
+            }
+
+            if let Some(arg) = args.get(index) {
+                parts.push(PrintPart::Binding(arg.clone()));
+            }
+        }
+
+        Ok(Instruction::Print { parts })
     }
 
     fn parse_exit_code(&mut self) -> Result<u8, String> {
@@ -378,6 +425,35 @@ fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
             "Invalid memory width {name:?}; expected i8, i16, i32, i64, u8, u16, u32, or u64"
         )),
     }
+}
+
+fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars().peekable();
+
+    while let Some(char) = chars.next() {
+        match char {
+            '{' => match chars.peek() {
+                Some('}') => {
+                    chars.next();
+                    parts.push(current);
+                    current = String::new();
+                }
+                _ => {
+                    return Err(String::from(
+                        "Only '{}' print format placeholders are supported",
+                    ));
+                }
+            },
+            '}' => return Err(String::from("Unmatched '}' in print format string")),
+            _ => current.push(char),
+        }
+    }
+
+    parts.push(current);
+
+    Ok(parts)
 }
 
 fn is_register_name(s: &str) -> bool {
