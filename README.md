@@ -64,6 +64,12 @@ target/subsea/main
 
 When `-o` is used, the assembly and object files are still written under `target/subsea`, and the executable is written to the requested output path.
 
+Use `--timings` or `-t` with `build` to show build times for various phases of the process.
+
+```sh
+subsea build main.ss -t
+```
+
 ## Source Structure
 
 A program starts with an entry directive and label target:
