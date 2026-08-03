@@ -106,13 +106,87 @@ Currently supported instructions:
 copy src, dst
 add src, dst
 sub src, dst
-mul src, dst
-div operand
+umul src, dst
+imul src, dst
+udiv operand
+idiv operand
 jmp label
 syscall
 ```
 
-Note: `div` intentionally follows x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
+`i` means signed integer and `u` means unsigned integer.
+
+`umul` and `imul` currently emit two-operand `imul`, because the low half of integer multiplication is the same for signed and unsigned multiplication.
+
+`udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
+
+Negative immediate operands are supported:
+
+```ss
+copy -1, rax
+add -8, rsp
+sub -1, rax
+```
+
+## Width Rules
+
+Subsea currently rejects mixed-width register operations. These are invalid:
+
+```ss
+copy rax, eax
+copy eax, rax
+add eax, rax
+imul ax, eax
+```
+
+Memory/register operations infer width from the register:
+
+```ss
+copy [addr], rax  // 64-bit load
+copy rax, [addr]  // 64-bit store
+copy [addr], eax  // 32-bit load
+copy eax, [addr]  // 32-bit store
+```
+
+Ambiguous or unsupported memory moves are rejected:
+
+```ss
+copy 5, [addr]      // no explicit memory width
+copy [rax], [rbx]   // memory-to-memory copy is not supported
+```
+
+Use explicit memory widths when the compiler cannot infer the width:
+
+```ss
+copy 5, [addr]:u8
+copy -1, [addr]:i8
+copy 500, [addr]:u16
+copy -500, [addr]:i16
+copy 100000, [addr]:u32
+copy -100000, [addr]:i32
+copy 100000, [addr]:u64
+copy -100000, [addr]:i64
+```
+
+Memory width annotations lower to pointer-sized assembly operands:
+
+```ss
+copy 5, [rax]:u8
+copy -1, [rax]:i64
+```
+
+```asm
+mov byte ptr [rax], 5
+mov qword ptr [rax], -1
+```
+
+When both a register and an explicit memory width are present, their widths must match:
+
+```ss
+copy rax, [addr]:u64  // valid
+copy eax, [addr]:u32  // valid
+copy rax, [addr]:u32  // invalid
+```
 
 ## Registers
 
