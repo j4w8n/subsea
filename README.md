@@ -90,10 +90,24 @@ Subsea supports a small first abstraction for defining and printing string messa
 ```ss
 let message = "Hello World!\n"
 print message
+
 print "Printed directly!\n"
+
+let name = "Subsea"
+let kind = "lang"
+print "Hello, {} {}\n", name, kind
 ```
 
 String bindings are currently label-local. `print message` can print a string declared with `let` in the same label block. `print "..."` prints literal text directly.
+
+Formatted printing supports `{}` placeholders with string bindings:
+
+```ss
+let name = "Subsea"
+print "Hello, {}\n", name
+```
+
+Each `{}` consumes one following binding argument. The number of placeholders must match the number of arguments. Format specifiers like `{x}` or `{i64}` are not supported yet.
 
 Supported string escapes:
 
