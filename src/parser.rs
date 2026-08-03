@@ -96,6 +96,40 @@ impl Parser {
                     "Expected jump target label, found end of input",
                 )),
             },
+            Some(Token::Let) => {
+                let name = match self.advance() {
+                    Some(Token::Ident(name)) => name,
+                    Some(token) => {
+                        return Err(format!("Expected binding name after let, found {token:?}"));
+                    }
+                    None => {
+                        return Err(String::from(
+                            "Expected binding name after let, found end of input",
+                        ));
+                    }
+                };
+
+                self.expect(Token::Equals, "Expected '=' after binding name")?;
+
+                match self.advance() {
+                    Some(Token::Text(value)) => Ok(Instruction::LetString { name, value }),
+                    Some(token) => Err(format!(
+                        "Expected string literal after '=', found {token:?}"
+                    )),
+                    None => Err(String::from(
+                        "Expected string literal after '=', found end of input",
+                    )),
+                }
+            }
+            Some(Token::Print) => match self.advance() {
+                Some(Token::Ident(name)) => Ok(Instruction::Print { name }),
+                Some(token) => Err(format!(
+                    "Expected binding name after print, found {token:?}"
+                )),
+                None => Err(String::from(
+                    "Expected binding name after print, found end of input",
+                )),
+            },
             Some(Token::Sub) => {
                 let (src, dst) = self.parse_binary_operands("sub")?;
                 Ok(Instruction::Sub { src, dst })

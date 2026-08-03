@@ -110,10 +110,17 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         Some('"') => {
             let mut value = String::new();
             while let Some(next_char) = chars.next() {
-                if next_char == '"' {
-                    return Ok(Some(Token::Text(value)));
-                } else {
-                    value.push(next_char);
+                match next_char {
+                    '"' => return Ok(Some(Token::Text(value))),
+                    '\\' => match chars.next() {
+                        Some('n') => value.push('\n'),
+                        Some('t') => value.push('\t'),
+                        Some('"') => value.push('"'),
+                        Some('\\') => value.push('\\'),
+                        Some(escaped) => return Err(format!("Unknown string escape \\{escaped}")),
+                        None => return Err(String::from("Unterminated string escape")),
+                    },
+                    _ => value.push(next_char),
                 }
             }
 
@@ -142,6 +149,8 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "idiv" => Some(Token::Idiv),
                 "imul" => Some(Token::Imul),
                 "jmp" => Some(Token::Jmp),
+                "let" => Some(Token::Let),
+                "print" => Some(Token::Print),
                 "sub" => Some(Token::Sub),
                 "syscall" => Some(Token::Syscall),
                 "udiv" => Some(Token::Udiv),

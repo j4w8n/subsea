@@ -1,11 +1,15 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, Program,
 };
+use std::collections::HashMap;
 
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
+    let strings = collect_string_bindings(program)?;
     let mut asm = String::new();
 
     asm.push_str(".intel_syntax noprefix\n");
+    emit_rodata(&mut asm, &strings);
+    asm.push_str(".section .text\n");
     asm.push_str(".global _start\n\n");
     asm.push_str("_start:\n");
     asm.push_str(&format!("  jmp {}\n\n", program.entry));
@@ -31,6 +35,19 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Jmp { target } => {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
+                Instruction::LetString { .. } => {}
+                Instruction::Print { name } => {
+                    let string = strings
+                        .get(&(label.name.clone(), name.clone()))
+                        .ok_or_else(|| {
+                            format!(
+                                "Cannot print unknown string binding {name:?} in label {:?}",
+                                label.name
+                            )
+                        })?;
+
+                    emit_print_instruction(&mut asm, string);
+                }
                 Instruction::Sub { src, dst } => {
                     emit_binary_instruction(&mut asm, "sub", src, dst)?;
                 }
@@ -49,6 +66,82 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     }
 
     Ok(asm)
+}
+
+#[derive(Clone)]
+struct StringBinding {
+    asm_label: String,
+    value: String,
+}
+
+fn collect_string_bindings(
+    program: &Program,
+) -> Result<HashMap<(String, String), StringBinding>, String> {
+    let mut strings = HashMap::new();
+
+    for label in &program.labels {
+        for instruction in &label.instructions {
+            if let Instruction::LetString { name, value } = instruction {
+                let key = (label.name.clone(), name.clone());
+
+                if strings.contains_key(&key) {
+                    return Err(format!(
+                        "String binding {name:?} is already defined in label {:?}",
+                        label.name
+                    ));
+                }
+
+                strings.insert(
+                    key,
+                    StringBinding {
+                        asm_label: format!(".Lstr_{}_{}", label.name, name),
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(strings)
+}
+
+fn emit_rodata(asm: &mut String, strings: &HashMap<(String, String), StringBinding>) {
+    if strings.is_empty() {
+        return;
+    }
+
+    let mut bindings: Vec<_> = strings.values().collect();
+    bindings.sort_by(|left, right| left.asm_label.cmp(&right.asm_label));
+
+    asm.push_str(".section .rodata\n");
+
+    for string in bindings {
+        asm.push_str(&format!("{}:\n", string.asm_label));
+
+        if string.value.is_empty() {
+            asm.push_str("  .byte 0\n");
+        } else {
+            let bytes = string
+                .value
+                .as_bytes()
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            asm.push_str(&format!("  .byte {bytes}\n"));
+        }
+    }
+
+    asm.push('\n');
+}
+
+fn emit_print_instruction(asm: &mut String, string: &StringBinding) {
+    asm.push_str("  mov rax, 1\n");
+    asm.push_str("  mov rdi, 1\n");
+    asm.push_str(&format!("  lea rsi, [rip + {}]\n", string.asm_label));
+    asm.push_str(&format!("  mov rdx, {}\n", string.value.len()));
+    asm.push_str("  syscall\n");
 }
 
 fn emit_binary_instruction(

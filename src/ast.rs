@@ -17,6 +17,8 @@ pub enum Instruction {
     Idiv { divisor: Operand },
     Imul { src: Operand, dst: Operand },
     Jmp { target: String },
+    LetString { name: String, value: String },
+    Print { name: String },
     Sub { src: Operand, dst: Operand },
     Syscall,
     Udiv { divisor: Operand },
