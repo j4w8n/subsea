@@ -24,18 +24,11 @@ main: {
   let message = "Hello World!\n"
   print message
 
-  copy 60, rax
-  copy 0, rdi
-  syscall
+  exit 0
 }
 ```
 
-This prints `Hello World!` and exits the program with status code `0` using the Linux x86-64 `exit` syscall:
-
-```text
-rax = 60  syscall number for exit
-rdi = 0   exit status
-```
+This prints `Hello World!` and exits the program with status code `0`. The entry label does not have to be `main`, but is subsea's best practice.
 
 ## CLI
 
@@ -86,9 +79,7 @@ main: {
   let message = "Hello World!\n"
   print message
 
-  copy 60, rax
-  copy 0, rdi
-  syscall
+  exit 0
 }
 ```
 
@@ -99,9 +90,10 @@ Subsea supports a small first abstraction for defining and printing string messa
 ```ss
 let message = "Hello World!\n"
 print message
+print "Printed directly!\n"
 ```
 
-String bindings are currently label-local. `print message` can print a string declared with `let` in the same label block.
+String bindings are currently label-local. `print message` can print a string declared with `let` in the same label block. `print "..."` prints literal text directly.
 
 Supported string escapes:
 
@@ -118,6 +110,21 @@ Supported string escapes:
 rax rdi rsi rdx
 ```
 
+## Assembly-like Syntax
+
+Subsea allows you to directly work with memory and registers, along with supporting other common operations.
+
+```ss
+.entry main
+
+// This program immediately exits with an exit code of `0`
+main: {
+  copy 60, rax   // store the "exit" syscall
+  copy 0, rdi    // store the exit status code
+  syscall        // execute the syscall
+}
+```
+
 ## Operand Order
 
 Subsea uses source-first, destination-second instruction syntax:
@@ -128,7 +135,7 @@ add 5, rax
 sub 1, rax
 ```
 
-The destination is the operand that changes.
+For example, you can read the first line as "copy the value 10 to register rax". The destination is the operand that changes.
 
 ## Instructions
 
@@ -143,6 +150,7 @@ imul src, dst
 udiv operand
 idiv operand
 jmp label
+exit code
 syscall
 ```
 
@@ -151,6 +159,13 @@ syscall
 `umul` and `imul` currently emit two-operand `imul`, because the low half of integer multiplication is the same for signed and unsigned multiplication.
 
 `udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
+
+`exit <code>` lowers to the Linux x86-64 `exit` syscall. Exit codes must be between `0` and `255`:
+
+```ss
+exit 0
+exit 1
+```
 
 Negative immediate operands are supported:
 
