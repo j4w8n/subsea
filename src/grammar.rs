@@ -26,16 +26,18 @@ pub enum Token {
     Ampersand,
     Comma,
     Copy,
-    Div,
     Directive(String),
+    Idiv,
+    Imul,
     Jmp,
     Literal,
-    Mul,
     Period,
     Pointer(String),
     Register(String),
     Sub,
     Syscall,
+    Udiv,
+    Umul,
 }
 
 #[derive(Debug, PartialEq, Clone)]

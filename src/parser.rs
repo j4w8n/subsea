@@ -1,4 +1,6 @@
-use crate::ast::{Address, AddressOperator, AddressTerm, Instruction, Label, Operand, Program};
+use crate::ast::{
+    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, Program,
+};
 use crate::grammar::Token;
 
 pub struct Parser {
@@ -79,9 +81,13 @@ impl Parser {
                 let (src, dst) = self.parse_binary_operands("copy")?;
                 Ok(Instruction::Copy { src, dst })
             }
-            Some(Token::Div) => {
+            Some(Token::Idiv) => {
                 let divisor = self.parse_operand()?;
-                Ok(Instruction::Div { divisor })
+                Ok(Instruction::Idiv { divisor })
+            }
+            Some(Token::Imul) => {
+                let (src, dst) = self.parse_binary_operands("imul")?;
+                Ok(Instruction::Imul { src, dst })
             }
             Some(Token::Jmp) => match self.advance() {
                 Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
@@ -90,15 +96,19 @@ impl Parser {
                     "Expected jump target label, found end of input",
                 )),
             },
-            Some(Token::Mul) => {
-                let (src, dst) = self.parse_binary_operands("mul")?;
-                Ok(Instruction::Mul { src, dst })
-            }
             Some(Token::Sub) => {
                 let (src, dst) = self.parse_binary_operands("sub")?;
                 Ok(Instruction::Sub { src, dst })
             }
             Some(Token::Syscall) => Ok(Instruction::Syscall),
+            Some(Token::Udiv) => {
+                let divisor = self.parse_operand()?;
+                Ok(Instruction::Udiv { divisor })
+            }
+            Some(Token::Umul) => {
+                let (src, dst) = self.parse_binary_operands("umul")?;
+                Ok(Instruction::Umul { src, dst })
+            }
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
@@ -134,9 +144,20 @@ impl Parser {
             Some(Token::LBracket) => {
                 let address = self.parse_address()?;
                 self.expect(Token::RBracket, "Expected ']' after memory operand")?;
+                let width = self.parse_optional_memory_width()?;
 
-                Ok(Operand::Dereference(address))
+                Ok(Operand::Dereference { address, width })
             }
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) => value
+                    .parse::<i64>()
+                    .map(|value| Operand::Immediate(-value))
+                    .map_err(|_| format!("Invalid integer literal -{value}")),
+                Some(token) => Err(format!("Expected number after '-', found {token:?}")),
+                None => Err(String::from(
+                    "Expected number after '-', found end of input",
+                )),
+            },
             Some(Token::NumberLiteral(value)) => value
                 .parse::<i64>()
                 .map(Operand::Immediate)
@@ -154,6 +175,22 @@ impl Parser {
             }
             Some(token) => Err(format!("Expected operand, found {token:?}")),
             None => Err(String::from("Expected operand, found end of input")),
+        }
+    }
+
+    fn parse_optional_memory_width(&mut self) -> Result<Option<MemoryWidth>, String> {
+        if !matches!(self.peek(), Some(Token::Colon)) {
+            return Ok(None);
+        }
+
+        self.advance();
+
+        match self.advance() {
+            Some(Token::Ident(name)) => parse_memory_width(&name).map(Some),
+            Some(token) => Err(format!("Expected memory width after ':', found {token:?}")),
+            None => Err(String::from(
+                "Expected memory width after ':', found end of input",
+            )),
         }
     }
 
@@ -263,6 +300,22 @@ impl Parser {
 
     fn is_at_end(&self) -> bool {
         self.position >= self.tokens.len()
+    }
+}
+
+fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
+    match name {
+        "i8" => Ok(MemoryWidth::I8),
+        "i16" => Ok(MemoryWidth::I16),
+        "i32" => Ok(MemoryWidth::I32),
+        "i64" => Ok(MemoryWidth::I64),
+        "u8" => Ok(MemoryWidth::U8),
+        "u16" => Ok(MemoryWidth::U16),
+        "u32" => Ok(MemoryWidth::U32),
+        "u64" => Ok(MemoryWidth::U64),
+        _ => Err(format!(
+            "Invalid memory width {name:?}; expected i8, i16, i32, i64, u8, u16, u32, or u64"
+        )),
     }
 }
 

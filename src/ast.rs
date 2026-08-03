@@ -14,20 +14,37 @@ pub struct Label {
 pub enum Instruction {
     Add { src: Operand, dst: Operand },
     Copy { src: Operand, dst: Operand },
-    Div { divisor: Operand },
+    Idiv { divisor: Operand },
+    Imul { src: Operand, dst: Operand },
     Jmp { target: String },
-    Mul { src: Operand, dst: Operand },
     Sub { src: Operand, dst: Operand },
     Syscall,
+    Udiv { divisor: Operand },
+    Umul { src: Operand, dst: Operand },
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
-    Dereference(Address),
+    Dereference {
+        address: Address,
+        width: Option<MemoryWidth>,
+    },
     Immediate(i64),
     Register(String),
     Ident(String),
     Pointer(String),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MemoryWidth {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
 }
 
 #[derive(Debug, PartialEq, Clone)]
