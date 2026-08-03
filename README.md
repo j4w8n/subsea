@@ -21,13 +21,16 @@ On many Linux systems these are available through the `binutils` package.
 .entry main
 
 main: {
+  let message = "Hello World!\n"
+  print message
+
   copy 60, rax
   copy 0, rdi
   syscall
 }
 ```
 
-This exits the program with status code `0` using the Linux x86-64 `exit` syscall:
+This prints `Hello World!` and exits the program with status code `0` using the Linux x86-64 `exit` syscall:
 
 ```text
 rax = 60  syscall number for exit
@@ -80,10 +83,39 @@ Labels contain instruction blocks:
 
 ```ss
 main: {
+  let message = "Hello World!\n"
+  print message
+
   copy 60, rax
   copy 0, rdi
   syscall
 }
+```
+
+## Strings And Printing
+
+Subsea supports a small first abstraction for defining and printing string messages:
+
+```ss
+let message = "Hello World!\n"
+print message
+```
+
+String bindings are currently label-local. `print message` can print a string declared with `let` in the same label block.
+
+Supported string escapes:
+
+```text
+\n
+\t
+\"
+\\
+```
+
+`print` lowers to the Linux x86-64 `write` syscall and clobbers syscall registers:
+
+```text
+rax rdi rsi rdx
 ```
 
 ## Operand Order
