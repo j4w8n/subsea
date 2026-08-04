@@ -89,9 +89,9 @@ main: {
 }
 ```
 
-## Strings And Printing
+## Bindings And Printing
 
-Subsea supports a small first abstraction for defining and printing string messages:
+Subsea supports a small first abstraction for defining and printing compile-time bindings:
 
 ```ss
 let message = "Hello World!\n"
@@ -99,14 +99,34 @@ print message
 
 print "Printed directly!\n"
 
+let count = 3
+print count
+
+let byte_count:u8 = 3
+print "count = {}\n", byte_count
+
 let name = "Subsea"
 let kind = "lang"
 print "Hello, {} {}\n", name, kind
 ```
 
-String bindings are currently label-local. `print message` can print a string declared with `let` in the same label block. `print "..."` prints literal text directly.
+Bindings are currently label-local. `print message` can print a binding declared with `let` in the same label block. `print "..."` prints literal text directly.
 
-Formatted printing supports `{}` placeholders with string bindings:
+Integer bindings can also be used as immediate operands:
+
+```ss
+let count = 3
+copy count, rax
+```
+
+Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
+
+```ss
+let byte_count:u8 = 3
+let offset:i16 = -8
+```
+
+Formatted printing supports `{}` placeholders with bindings:
 
 ```ss
 let name = "Subsea"
@@ -253,6 +273,18 @@ When both a register and an explicit memory width are present, their widths must
 copy rax, [addr]:u64  // valid
 copy eax, [addr]:u32  // valid
 copy rax, [addr]:u32  // invalid
+```
+
+Immediate values and integer bindings must fit the destination width:
+
+```ss
+copy 255, al      // valid
+copy -1, al       // valid
+copy 256, al      // invalid
+copy 66000, ax    // invalid
+
+let count:u8 = 255
+copy count, al    // valid
 ```
 
 ## Registers
