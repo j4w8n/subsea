@@ -18,12 +18,21 @@ pub enum Instruction {
     Idiv { divisor: Operand },
     Imul { src: Operand, dst: Operand },
     Jmp { target: String },
-    LetString { name: String, value: String },
+    Let { name: String, value: BindingValue },
     Print { parts: Vec<PrintPart> },
     Sub { src: Operand, dst: Operand },
     Syscall,
     Udiv { divisor: Operand },
     Umul { src: Operand, dst: Operand },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum BindingValue {
+    Integer {
+        value: i64,
+        width: Option<MemoryWidth>,
+    },
+    String(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -44,7 +53,7 @@ pub enum Operand {
     Pointer(String),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MemoryWidth {
     I8,
     I16,

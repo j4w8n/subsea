@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, Label, MemoryWidth, Operand, PrintPart,
-    Program,
+    Address, AddressOperator, AddressTerm, BindingValue, Instruction, Label, MemoryWidth, Operand,
+    PrintPart, Program,
 };
 use crate::grammar::Token;
 
@@ -114,17 +114,12 @@ impl Parser {
                     }
                 };
 
+                let width = self.parse_optional_binding_width()?;
                 self.expect(Token::Equals, "Expected '=' after binding name")?;
 
-                match self.advance() {
-                    Some(Token::Text(value)) => Ok(Instruction::LetString { name, value }),
-                    Some(token) => Err(format!(
-                        "Expected string literal after '=', found {token:?}"
-                    )),
-                    None => Err(String::from(
-                        "Expected string literal after '=', found end of input",
-                    )),
-                }
+                let value = self.parse_binding_value(width)?;
+
+                Ok(Instruction::Let { name, value })
             }
             Some(Token::Print) => match self.advance() {
                 Some(Token::Ident(name)) => Ok(Instruction::Print {
@@ -203,6 +198,52 @@ impl Parser {
         }
 
         Ok(Instruction::Print { parts })
+    }
+
+    fn parse_optional_binding_width(&mut self) -> Result<Option<MemoryWidth>, String> {
+        if !matches!(self.peek(), Some(Token::Colon)) {
+            return Ok(None);
+        }
+
+        self.advance();
+
+        match self.advance() {
+            Some(Token::Ident(name)) => parse_memory_width(&name).map(Some),
+            Some(token) => Err(format!("Expected binding width after ':', found {token:?}")),
+            None => Err(String::from(
+                "Expected binding width after ':', found end of input",
+            )),
+        }
+    }
+
+    fn parse_binding_value(&mut self, width: Option<MemoryWidth>) -> Result<BindingValue, String> {
+        match self.advance() {
+            Some(Token::Text(value)) => {
+                if width.is_some() {
+                    return Err(String::from("String bindings cannot have an integer width"));
+                }
+
+                Ok(BindingValue::String(value))
+            }
+            Some(Token::NumberLiteral(value)) => parse_integer_binding_value(&value, width),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) => {
+                    parse_integer_binding_value(&format!("-{value}"), width)
+                }
+                Some(token) => Err(format!(
+                    "Expected number after '-' in binding value, found {token:?}"
+                )),
+                None => Err(String::from(
+                    "Expected number after '-' in binding value, found end of input",
+                )),
+            },
+            Some(token) => Err(format!(
+                "Expected string or integer literal after '=', found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected string or integer literal after '=', found end of input",
+            )),
+        }
     }
 
     fn parse_exit_code(&mut self) -> Result<u8, String> {
@@ -427,6 +468,56 @@ fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
     }
 }
 
+fn parse_integer_binding_value(
+    value: &str,
+    width: Option<MemoryWidth>,
+) -> Result<BindingValue, String> {
+    let value = value
+        .parse::<i64>()
+        .map_err(|_| format!("Invalid integer binding value {value:?}"))?;
+
+    if let Some(width) = width {
+        validate_integer_binding_width(value, width)?;
+    }
+
+    Ok(BindingValue::Integer { value, width })
+}
+
+fn validate_integer_binding_width(value: i64, width: MemoryWidth) -> Result<(), String> {
+    let valid = match width {
+        MemoryWidth::I8 => i8::MIN as i64 <= value && value <= i8::MAX as i64,
+        MemoryWidth::I16 => i16::MIN as i64 <= value && value <= i16::MAX as i64,
+        MemoryWidth::I32 => i32::MIN as i64 <= value && value <= i32::MAX as i64,
+        MemoryWidth::I64 => true,
+        MemoryWidth::U8 => 0 <= value && value <= u8::MAX as i64,
+        MemoryWidth::U16 => 0 <= value && value <= u16::MAX as i64,
+        MemoryWidth::U32 => 0 <= value && value <= u32::MAX as i64,
+        MemoryWidth::U64 => 0 <= value,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "Integer binding value {value} does not fit in {}",
+            memory_width_name(width)
+        ))
+    }
+}
+
+fn memory_width_name(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::I8 => "i8",
+        MemoryWidth::I16 => "i16",
+        MemoryWidth::I32 => "i32",
+        MemoryWidth::I64 => "i64",
+        MemoryWidth::U8 => "u8",
+        MemoryWidth::U16 => "u16",
+        MemoryWidth::U32 => "u32",
+        MemoryWidth::U64 => "u64",
+    }
+}
+
 fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -528,4 +619,122 @@ fn is_register_name(s: &str) -> bool {
             | "r14b"
             | "r15b"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::BindingValue;
+
+    #[test]
+    fn parses_integer_binding() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Let,
+            Token::Ident(String::from("count")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("3")),
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions[0],
+            Instruction::Let {
+                name: String::from("count"),
+                value: BindingValue::Integer {
+                    value: 3,
+                    width: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_negative_integer_binding() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Let,
+            Token::Ident(String::from("count")),
+            Token::Equals,
+            Token::Minus,
+            Token::NumberLiteral(String::from("3")),
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions[0],
+            Instruction::Let {
+                name: String::from("count"),
+                value: BindingValue::Integer {
+                    value: -3,
+                    width: None
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_integer_binding() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Let,
+            Token::Ident(String::from("count")),
+            Token::Colon,
+            Token::Ident(String::from("u8")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("3")),
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions[0],
+            Instruction::Let {
+                name: String::from("count"),
+                value: BindingValue::Integer {
+                    value: 3,
+                    width: Some(MemoryWidth::U8)
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_typed_integer_binding_out_of_range() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Let,
+            Token::Ident(String::from("count")),
+            Token::Colon,
+            Token::Ident(String::from("u8")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("256")),
+            Token::RBrace,
+        ]);
+
+        let error = parser.parse_program().unwrap_err();
+
+        assert_eq!(error, "Integer binding value 256 does not fit in u8");
+    }
 }

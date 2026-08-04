@@ -1,5 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, Instruction, MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressOperator, AddressTerm, BindingValue, Instruction, MemoryWidth, Operand,
+    PrintPart, Program,
 };
 use std::collections::HashMap;
 
@@ -21,10 +22,10 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Add { src, dst } => {
-                    emit_binary_instruction(&mut asm, "add", src, dst)?;
+                    emit_binary_instruction(&mut asm, "add", src, dst, &strings, &label.name)?;
                 }
                 Instruction::Copy { src, dst } => {
-                    emit_copy_instruction(&mut asm, src, dst)?;
+                    emit_copy_instruction(&mut asm, src, dst, &strings, &label.name)?;
                 }
                 Instruction::Exit { code } => {
                     asm.push_str("  mov rax, 60\n");
@@ -32,16 +33,16 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str("  syscall\n");
                 }
                 Instruction::Idiv { divisor } => {
-                    let divisor = emit_operand(divisor)?;
+                    let divisor = emit_operand(divisor, &strings, &label.name)?;
                     asm.push_str(&format!("  idiv {divisor}\n"));
                 }
                 Instruction::Imul { src, dst } => {
-                    emit_binary_instruction(&mut asm, "imul", src, dst)?;
+                    emit_binary_instruction(&mut asm, "imul", src, dst, &strings, &label.name)?;
                 }
                 Instruction::Jmp { target } => {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
-                Instruction::LetString { .. } => {}
+                Instruction::Let { .. } => {}
                 Instruction::Print { parts } => {
                     for part in parts {
                         let string =
@@ -51,15 +52,15 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     }
                 }
                 Instruction::Sub { src, dst } => {
-                    emit_binary_instruction(&mut asm, "sub", src, dst)?;
+                    emit_binary_instruction(&mut asm, "sub", src, dst, &strings, &label.name)?;
                 }
                 Instruction::Syscall => asm.push_str("  syscall\n"),
                 Instruction::Udiv { divisor } => {
-                    let divisor = emit_operand(divisor)?;
+                    let divisor = emit_operand(divisor, &strings, &label.name)?;
                     asm.push_str(&format!("  div {divisor}\n"));
                 }
                 Instruction::Umul { src, dst } => {
-                    emit_binary_instruction(&mut asm, "imul", src, dst)?;
+                    emit_binary_instruction(&mut asm, "imul", src, dst, &strings, &label.name)?;
                 }
             }
         }
@@ -80,30 +81,47 @@ struct StringTable {
     all: Vec<StringBinding>,
     bindings: HashMap<(String, String), StringBinding>,
     literals: HashMap<(String, usize), StringBinding>,
+    integers: HashMap<(String, String), IntegerBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct IntegerBinding {
+    value: i64,
 }
 
 fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     let mut all = Vec::new();
     let mut bindings = HashMap::new();
+    let mut integers = HashMap::new();
     let mut literals = HashMap::new();
     let mut literal_indexes = HashMap::new();
 
     for label in &program.labels {
         for instruction in &label.instructions {
             match instruction {
-                Instruction::LetString { name, value } => {
+                Instruction::Let { name, value } => {
                     let key = (label.name.clone(), name.clone());
 
                     if bindings.contains_key(&key) {
                         return Err(format!(
-                            "String binding {name:?} is already defined in label {:?}",
+                            "Binding {name:?} is already defined in label {:?}",
                             label.name
                         ));
                     }
 
+                    let (asm_label, printable_value) = match value {
+                        BindingValue::String(value) => {
+                            (format!(".Lstr_{}_{}", label.name, name), value.clone())
+                        }
+                        BindingValue::Integer { value, .. } => {
+                            integers.insert(key.clone(), IntegerBinding { value: *value });
+                            (format!(".Lint_{}_{}", label.name, name), value.to_string())
+                        }
+                    };
+
                     let binding = StringBinding {
-                        asm_label: format!(".Lstr_{}_{}", label.name, name),
-                        value: value.clone(),
+                        asm_label,
+                        value: printable_value,
                     };
 
                     all.push(binding.clone());
@@ -134,6 +152,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         all,
         bindings,
         literals,
+        integers,
     })
 }
 
@@ -148,7 +167,7 @@ fn resolve_print_part<'a>(
             .bindings
             .get(&(label_name.to_string(), name.clone()))
             .ok_or_else(|| {
-                format!("Cannot print unknown string binding {name:?} in label {label_name:?}")
+                format!("Cannot print unknown binding {name:?} in label {label_name:?}")
             }),
         PrintPart::Literal(_) => {
             let index = literal_indexes.entry(label_name.to_string()).or_insert(0);
@@ -159,6 +178,161 @@ fn resolve_print_part<'a>(
                 .get(&(label_name.to_string(), *index))
                 .ok_or_else(|| String::from("Internal error: missing print literal"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{BindingValue, Label};
+
+    #[test]
+    fn prints_integer_binding() {
+        let program = Program {
+            entry: String::from("main"),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Let {
+                        name: String::from("count"),
+                        value: BindingValue::Integer {
+                            value: 3,
+                            width: None,
+                        },
+                    },
+                    Instruction::Print {
+                        parts: vec![PrintPart::Binding(String::from("count"))],
+                    },
+                    Instruction::Exit { code: 0 },
+                ],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains(".Lint_main_count:\n  .byte 51\n"));
+        assert!(asm.contains("  lea rsi, [rip + .Lint_main_count]\n"));
+        assert!(asm.contains("  mov rdx, 1\n"));
+    }
+
+    #[test]
+    fn uses_integer_binding_as_immediate_operand() {
+        let program = Program {
+            entry: String::from("main"),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Let {
+                        name: String::from("count"),
+                        value: BindingValue::Integer {
+                            value: 3,
+                            width: None,
+                        },
+                    },
+                    Instruction::Copy {
+                        src: Operand::Ident(String::from("count")),
+                        dst: Operand::Register(String::from("rax")),
+                    },
+                    Instruction::Exit { code: 0 },
+                ],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains("  mov rax, 3\n"));
+    }
+
+    #[test]
+    fn formats_integer_binding() {
+        let program = Program {
+            entry: String::from("main"),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Let {
+                        name: String::from("count"),
+                        value: BindingValue::Integer {
+                            value: 3,
+                            width: None,
+                        },
+                    },
+                    Instruction::Print {
+                        parts: vec![
+                            PrintPart::Literal(String::from("count = ")),
+                            PrintPart::Binding(String::from("count")),
+                            PrintPart::Literal(String::from("\n")),
+                        ],
+                    },
+                    Instruction::Exit { code: 0 },
+                ],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(
+            asm.contains(".Lstr_main_literal_1:\n  .byte 99, 111, 117, 110, 116, 32, 61, 32\n")
+        );
+        assert!(asm.contains(".Lint_main_count:\n  .byte 51\n"));
+        assert!(asm.contains(".Lstr_main_literal_2:\n  .byte 10\n"));
+    }
+
+    #[test]
+    fn rejects_immediate_that_does_not_fit_register_destination() {
+        let program = Program {
+            entry: String::from("main"),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Copy {
+                    src: Operand::Immediate(66000),
+                    dst: Operand::Register(String::from("ax")),
+                }],
+            }],
+        };
+
+        let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Immediate value 66000 does not fit in 16-bit destination"
+        );
+    }
+
+    #[test]
+    fn rejects_integer_binding_that_does_not_fit_memory_destination() {
+        let program = Program {
+            entry: String::from("main"),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Let {
+                        name: String::from("count"),
+                        value: BindingValue::Integer {
+                            value: 256,
+                            width: None,
+                        },
+                    },
+                    Instruction::Copy {
+                        src: Operand::Ident(String::from("count")),
+                        dst: Operand::Dereference {
+                            address: Address {
+                                first: AddressTerm::Register(String::from("rsp")),
+                                rest: Vec::new(),
+                            },
+                            width: Some(MemoryWidth::U8),
+                        },
+                    },
+                ],
+            }],
+        };
+
+        let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Immediate value 256 does not fit in 8-bit destination"
+        );
     }
 }
 
@@ -206,30 +380,44 @@ fn emit_binary_instruction(
     opcode: &str,
     src: &Operand,
     dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
 ) -> Result<(), String> {
-    validate_binary_operands(opcode, src, dst)?;
+    validate_binary_operands(opcode, src, dst, strings, label_name)?;
 
-    let src = emit_operand(src)?;
-    let dst = emit_operand(dst)?;
+    let src = emit_operand(src, strings, label_name)?;
+    let dst = emit_operand(dst, strings, label_name)?;
     asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
 
     Ok(())
 }
 
-fn emit_copy_instruction(asm: &mut String, src: &Operand, dst: &Operand) -> Result<(), String> {
+fn emit_copy_instruction(
+    asm: &mut String,
+    src: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
     if let Operand::Pointer(name) = src {
         validate_address_copy_dst(dst)?;
 
-        let dst = emit_operand(dst)?;
+        let dst = emit_operand(dst, strings, label_name)?;
         asm.push_str(&format!("  lea {dst}, [rip + {name}]\n"));
 
         Ok(())
     } else {
-        emit_binary_instruction(asm, "mov", src, dst)
+        emit_binary_instruction(asm, "mov", src, dst, strings, label_name)
     }
 }
 
-fn validate_binary_operands(opcode: &str, src: &Operand, dst: &Operand) -> Result<(), String> {
+fn validate_binary_operands(
+    opcode: &str,
+    src: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
     if matches!(
         dst,
         Operand::Immediate(_) | Operand::Ident(_) | Operand::Pointer(_)
@@ -250,7 +438,7 @@ fn validate_binary_operands(opcode: &str, src: &Operand, dst: &Operand) -> Resul
     }
 
     if opcode == "mov"
-        && matches!(src, Operand::Immediate(_))
+        && is_immediate_operand(src, strings, label_name)
         && matches!(
             dst,
             Operand::Dereference {
@@ -274,7 +462,63 @@ fn validate_binary_operands(opcode: &str, src: &Operand, dst: &Operand) -> Resul
         }
     }
 
+    if let (Some(value), Some(width)) = (
+        immediate_value(src, strings, label_name),
+        destination_width(dst),
+    ) {
+        validate_immediate_range(value, width)?;
+    }
+
     Ok(())
+}
+
+fn is_immediate_operand(operand: &Operand, strings: &StringTable, label_name: &str) -> bool {
+    match operand {
+        Operand::Immediate(_) => true,
+        Operand::Ident(name) => strings
+            .integers
+            .contains_key(&(label_name.to_string(), name.clone())),
+        _ => false,
+    }
+}
+
+fn immediate_value(operand: &Operand, strings: &StringTable, label_name: &str) -> Option<i64> {
+    match operand {
+        Operand::Immediate(value) => Some(*value),
+        Operand::Ident(name) => strings
+            .integers
+            .get(&(label_name.to_string(), name.clone()))
+            .map(|binding| binding.value),
+        _ => None,
+    }
+}
+
+fn destination_width(operand: &Operand) -> Option<Width> {
+    match operand {
+        Operand::Register(name) => register_width(name),
+        Operand::Dereference {
+            width: Some(width), ..
+        } => Some(memory_width_bits(width)),
+        _ => None,
+    }
+}
+
+fn validate_immediate_range(value: i64, width: Width) -> Result<(), String> {
+    let valid = match width {
+        Width::Bits8 => i8::MIN as i64 <= value && value <= u8::MAX as i64,
+        Width::Bits16 => i16::MIN as i64 <= value && value <= u16::MAX as i64,
+        Width::Bits32 => i32::MIN as i64 <= value && value <= u32::MAX as i64,
+        Width::Bits64 => true,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "Immediate value {value} does not fit in {}-bit destination",
+            width.bits()
+        ))
+    }
 }
 
 fn validate_address_copy_dst(dst: &Operand) -> Result<(), String> {
@@ -286,7 +530,11 @@ fn validate_address_copy_dst(dst: &Operand) -> Result<(), String> {
     }
 }
 
-fn emit_operand(operand: &Operand) -> Result<String, String> {
+fn emit_operand(
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<String, String> {
     match operand {
         Operand::Dereference { address, width } => {
             let address = emit_address(address);
@@ -298,7 +546,13 @@ fn emit_operand(operand: &Operand) -> Result<String, String> {
         }
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
-        Operand::Ident(name) => Ok(name.clone()),
+        Operand::Ident(name) => match strings
+            .integers
+            .get(&(label_name.to_string(), name.clone()))
+        {
+            Some(binding) => Ok(binding.value.to_string()),
+            None => Ok(name.clone()),
+        },
         Operand::Pointer(name) => Err(format!(
             "Pointer operand &{name} is only supported as the source of copy"
         )),
