@@ -89,6 +89,42 @@ main: {
 }
 ```
 
+Top-level `mem` declarations allocate writable memory for the lifetime of the program:
+
+```ss
+.entry main
+
+mem count:u16 = 3
+mem buf:u8(128)
+
+main: {
+  exit 0
+}
+```
+
+`mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`. `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
+
+`let` and `mem` are intentionally different:
+
+```ss
+let count:u16 = 3   // compile-time constant value
+mem count:u16 = 3   // writable memory named count
+```
+
+Read and write `mem` values with memory operands:
+
+```ss
+copy [count]:u16, ax
+add 1, ax
+copy ax, [count]:u16
+```
+
+Use `&` to pass the address of `mem` storage:
+
+```ss
+copy &buf, rsi
+```
+
 ## Bindings And Printing
 
 Subsea supports a small first abstraction for defining and printing compile-time bindings:
