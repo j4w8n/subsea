@@ -33,6 +33,7 @@ pub enum Token {
     Jmp,
     Let,
     Literal,
+    Mem,
     Period,
     Pointer(String),
     Print,

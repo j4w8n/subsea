@@ -151,6 +151,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "imul" => Some(Token::Imul),
                 "jmp" => Some(Token::Jmp),
                 "let" => Some(Token::Let),
+                "mem" => Some(Token::Mem),
                 "print" => Some(Token::Print),
                 "sub" => Some(Token::Sub),
                 "syscall" => Some(Token::Syscall),

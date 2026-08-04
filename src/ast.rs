@@ -1,7 +1,22 @@
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub entry: String,
+    pub memory: Vec<MemoryDeclaration>,
     pub labels: Vec<Label>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MemoryDeclaration {
+    Scalar {
+        name: String,
+        width: MemoryWidth,
+        value: i64,
+    },
+    Buffer {
+        name: String,
+        width: MemoryWidth,
+        count: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]

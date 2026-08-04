@@ -1,8 +1,9 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, BindingValue, Instruction, Label, MemoryWidth, Operand,
-    PrintPart, Program,
+    Address, AddressOperator, AddressTerm, BindingValue, Instruction, Label, MemoryDeclaration,
+    MemoryWidth, Operand, PrintPart, Program,
 };
 use crate::grammar::Token;
+use std::collections::HashSet;
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -19,13 +20,24 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let entry = self.parse_entry_directive()?;
+        let mut memory = Vec::new();
         let mut labels = Vec::new();
 
         while !self.is_at_end() {
-            labels.push(self.parse_label()?);
+            if matches!(self.peek(), Some(Token::Mem)) {
+                memory.push(self.parse_memory_declaration()?);
+            } else {
+                labels.push(self.parse_label()?);
+            }
         }
 
-        Ok(Program { entry, labels })
+        validate_memory_names(&memory)?;
+
+        Ok(Program {
+            entry,
+            memory,
+            labels,
+        })
     }
 
     fn parse_entry_directive(&mut self) -> Result<String, String> {
@@ -70,6 +82,55 @@ impl Parser {
         self.expect(Token::RBrace, "Expected '}' after label block")?;
 
         Ok(Label { name, instructions })
+    }
+
+    fn parse_memory_declaration(&mut self) -> Result<MemoryDeclaration, String> {
+        self.expect(Token::Mem, "Expected mem declaration")?;
+
+        let name = match self.advance() {
+            Some(Token::Ident(name)) => name,
+            Some(token) => return Err(format!("Expected memory name after mem, found {token:?}")),
+            None => {
+                return Err(String::from(
+                    "Expected memory name after mem, found end of input",
+                ));
+            }
+        };
+
+        self.expect(Token::Colon, "Expected ':' after memory name")?;
+
+        let width = match self.advance() {
+            Some(Token::Ident(name)) => parse_memory_width(&name)?,
+            Some(token) => return Err(format!("Expected memory width after ':', found {token:?}")),
+            None => {
+                return Err(String::from(
+                    "Expected memory width after ':', found end of input",
+                ));
+            }
+        };
+
+        match self.peek() {
+            Some(Token::Equals) => {
+                self.advance();
+                let value = self.parse_integer_literal("memory initializer")?;
+                validate_integer_binding_width(value, width)?;
+
+                Ok(MemoryDeclaration::Scalar { name, width, value })
+            }
+            Some(Token::LParen) => {
+                self.advance();
+                let count = self.parse_buffer_count()?;
+                self.expect(Token::RParen, "Expected ')' after buffer count")?;
+
+                Ok(MemoryDeclaration::Buffer { name, width, count })
+            }
+            Some(token) => Err(format!(
+                "Expected '=' for scalar memory or '(' for buffer memory, found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected '=' for scalar memory or '(' for buffer memory, found end of input",
+            )),
+        }
     }
 
     fn parse_instruction(&mut self) -> Result<Instruction, String> {
@@ -243,6 +304,45 @@ impl Parser {
             None => Err(String::from(
                 "Expected string or integer literal after '=', found end of input",
             )),
+        }
+    }
+
+    fn parse_integer_literal(&mut self, context: &str) -> Result<i64, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<i64>()
+                .map_err(|_| format!("Invalid integer {context} {value:?}")),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) => value
+                    .parse::<i64>()
+                    .map(|value| -value)
+                    .map_err(|_| format!("Invalid integer {context} -{value}")),
+                Some(token) => Err(format!(
+                    "Expected number after '-' in {context}, found {token:?}"
+                )),
+                None => Err(format!(
+                    "Expected number after '-' in {context}, found end of input"
+                )),
+            },
+            Some(token) => Err(format!("Expected integer {context}, found {token:?}")),
+            None => Err(format!("Expected integer {context}, found end of input")),
+        }
+    }
+
+    fn parse_buffer_count(&mut self) -> Result<usize, String> {
+        let value = match self.advance() {
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<usize>()
+                .map_err(|_| format!("Invalid buffer count {value:?}"))?,
+            Some(Token::Minus) => return Err(String::from("Buffer count must be greater than 0")),
+            Some(token) => return Err(format!("Expected buffer count, found {token:?}")),
+            None => return Err(String::from("Expected buffer count, found end of input")),
+        };
+
+        if value == 0 {
+            Err(String::from("Buffer count must be greater than 0"))
+        } else {
+            Ok(value)
         }
     }
 
@@ -518,6 +618,22 @@ fn memory_width_name(width: MemoryWidth) -> &'static str {
     }
 }
 
+fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
+    let mut names = HashSet::new();
+
+    for declaration in memory {
+        let name = match declaration {
+            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => name,
+        };
+
+        if !names.insert(name) {
+            return Err(format!("Memory name {name:?} is already defined"));
+        }
+    }
+
+    Ok(())
+}
+
 fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -736,5 +852,115 @@ mod tests {
         let error = parser.parse_program().unwrap_err();
 
         assert_eq!(error, "Integer binding value 256 does not fit in u8");
+    }
+
+    #[test]
+    fn parses_memory_scalar_declaration() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Mem,
+            Token::Ident(String::from("count")),
+            Token::Colon,
+            Token::Ident(String::from("u16")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("3")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.memory[0],
+            MemoryDeclaration::Scalar {
+                name: String::from("count"),
+                width: MemoryWidth::U16,
+                value: 3
+            }
+        );
+    }
+
+    #[test]
+    fn parses_memory_buffer_declaration() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Mem,
+            Token::Ident(String::from("buf")),
+            Token::Colon,
+            Token::Ident(String::from("u8")),
+            Token::LParen,
+            Token::NumberLiteral(String::from("128")),
+            Token::RParen,
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.memory[0],
+            MemoryDeclaration::Buffer {
+                name: String::from("buf"),
+                width: MemoryWidth::U8,
+                count: 128
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_memory_names() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Mem,
+            Token::Ident(String::from("count")),
+            Token::Colon,
+            Token::Ident(String::from("u16")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("3")),
+            Token::Mem,
+            Token::Ident(String::from("count")),
+            Token::Colon,
+            Token::Ident(String::from("u16")),
+            Token::Equals,
+            Token::NumberLiteral(String::from("4")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::RBrace,
+        ]);
+
+        let error = parser.parse_program().unwrap_err();
+
+        assert_eq!(error, "Memory name \"count\" is already defined");
+    }
+
+    #[test]
+    fn rejects_zero_length_memory_buffer() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Mem,
+            Token::Ident(String::from("buf")),
+            Token::Colon,
+            Token::Ident(String::from("u8")),
+            Token::LParen,
+            Token::NumberLiteral(String::from("0")),
+            Token::RParen,
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::RBrace,
+        ]);
+
+        let error = parser.parse_program().unwrap_err();
+
+        assert_eq!(error, "Buffer count must be greater than 0");
     }
 }

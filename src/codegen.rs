@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, BindingValue, Instruction, MemoryWidth, Operand,
-    PrintPart, Program,
+    Address, AddressOperator, AddressTerm, BindingValue, Instruction, MemoryDeclaration,
+    MemoryWidth, Operand, PrintPart, Program,
 };
 use std::collections::HashMap;
 
@@ -10,6 +10,8 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     let mut asm = String::new();
 
     asm.push_str(".intel_syntax noprefix\n");
+    emit_data(&mut asm, &program.memory);
+    emit_bss(&mut asm, &program.memory);
     emit_rodata(&mut asm, &strings.all);
     asm.push_str(".section .text\n");
     asm.push_str(".global _start\n\n");
@@ -181,6 +183,52 @@ fn resolve_print_part<'a>(
     }
 }
 
+fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
+    let scalars: Vec<_> = memory
+        .iter()
+        .filter_map(|declaration| match declaration {
+            MemoryDeclaration::Scalar { name, width, value } => Some((name, width, value)),
+            MemoryDeclaration::Buffer { .. } => None,
+        })
+        .collect();
+
+    if scalars.is_empty() {
+        return;
+    }
+
+    asm.push_str(".section .data\n");
+
+    for (name, width, value) in scalars {
+        asm.push_str(&format!("{name}:\n"));
+        asm.push_str(&format!("  {} {value}\n", memory_width_directive(width)));
+    }
+
+    asm.push('\n');
+}
+
+fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
+    let buffers: Vec<_> = memory
+        .iter()
+        .filter_map(|declaration| match declaration {
+            MemoryDeclaration::Scalar { .. } => None,
+            MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
+        })
+        .collect();
+
+    if buffers.is_empty() {
+        return;
+    }
+
+    asm.push_str(".section .bss\n");
+
+    for (name, width, count) in buffers {
+        asm.push_str(&format!("{name}:\n"));
+        asm.push_str(&format!("  .zero {}\n", memory_width_size(width) * count));
+    }
+
+    asm.push('\n');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +238,7 @@ mod tests {
     fn prints_integer_binding() {
         let program = Program {
             entry: String::from("main"),
+            memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![
@@ -219,6 +268,7 @@ mod tests {
     fn uses_integer_binding_as_immediate_operand() {
         let program = Program {
             entry: String::from("main"),
+            memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![
@@ -247,6 +297,7 @@ mod tests {
     fn formats_integer_binding() {
         let program = Program {
             entry: String::from("main"),
+            memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![
@@ -282,6 +333,7 @@ mod tests {
     fn rejects_immediate_that_does_not_fit_register_destination() {
         let program = Program {
             entry: String::from("main"),
+            memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![Instruction::Copy {
@@ -303,6 +355,7 @@ mod tests {
     fn rejects_integer_binding_that_does_not_fit_memory_destination() {
         let program = Program {
             entry: String::from("main"),
+            memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![
@@ -333,6 +386,34 @@ mod tests {
             error,
             "Immediate value 256 does not fit in 8-bit destination"
         );
+    }
+
+    #[test]
+    fn emits_memory_scalars_and_buffers() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: vec![
+                MemoryDeclaration::Scalar {
+                    name: String::from("count"),
+                    width: MemoryWidth::U16,
+                    value: 3,
+                },
+                MemoryDeclaration::Buffer {
+                    name: String::from("buf"),
+                    width: MemoryWidth::U8,
+                    count: 128,
+                },
+            ],
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Exit { code: 0 }],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains(".section .data\ncount:\n  .word 3\n\n"));
+        assert!(asm.contains(".section .bss\nbuf:\n  .zero 128\n\n"));
     }
 }
 
@@ -597,6 +678,24 @@ fn memory_width_bits(width: &MemoryWidth) -> Width {
         MemoryWidth::I16 | MemoryWidth::U16 => Width::Bits16,
         MemoryWidth::I32 | MemoryWidth::U32 => Width::Bits32,
         MemoryWidth::I64 | MemoryWidth::U64 => Width::Bits64,
+    }
+}
+
+fn memory_width_size(width: &MemoryWidth) -> usize {
+    match width {
+        MemoryWidth::I8 | MemoryWidth::U8 => 1,
+        MemoryWidth::I16 | MemoryWidth::U16 => 2,
+        MemoryWidth::I32 | MemoryWidth::U32 => 4,
+        MemoryWidth::I64 | MemoryWidth::U64 => 8,
+    }
+}
+
+fn memory_width_directive(width: &MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::I8 | MemoryWidth::U8 => ".byte",
+        MemoryWidth::I16 | MemoryWidth::U16 => ".word",
+        MemoryWidth::I32 | MemoryWidth::U32 => ".long",
+        MemoryWidth::I64 | MemoryWidth::U64 => ".quad",
     }
 }
 
