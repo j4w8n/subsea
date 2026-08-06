@@ -268,6 +268,9 @@ rdx:rax = r10 u/ count
 ```text
 call label
 jmp label
+jmp label if operand == operand
+jmp label if operand i< operand
+jmp label if operand u< operand
 push operand
 pop operand
 ret
@@ -276,6 +279,22 @@ syscall
 ```
 
 `call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
+
+`jmp label if lhs op rhs` compares two operands and jumps only when the condition is true. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons. `==` and `!=` are shared because equality does not depend on signedness:
+
+```ss
+main: {
+  rax = 0
+  jmp .done if rax == 0
+
+.loop:
+  rcx = rcx - 1
+  jmp .loop if rcx u> 0
+
+.done:
+  exit 0
+}
+```
 
 ```ss
 main: {
