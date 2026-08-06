@@ -2,7 +2,7 @@
 
 A more readable, learnable alternative to Assembly, with the same power to directly work with CPU registers and memory. The name is a play on words: subsea is "below C".
 
-The current compiler targets Linux x86-64 by lowering `.ss` source files to assembly, assembling with `as`, linking with `ld`, and optionally running the result.
+The current compiler targets Linux x86-64 by lowering `.ss` source files to assembly, assembling with `as`, and linking with `ld`.
 
 ## Requirements
 
@@ -18,8 +18,6 @@ On many Linux systems these are available through the `binutils` package.
 ## Example
 
 ```ss
-.entry main
-
 main: {
   let message = "Hello World!\n"
   print message
@@ -28,7 +26,7 @@ main: {
 }
 ```
 
-This prints `Hello World!` and exits the program with status code `0`. The entry label does not have to be `main`, but is subsea's best practice.
+This prints `Hello World!` and exits the program with status code `0`. Every program must define a top-level `main` label; subsea starts execution there.
 
 ## CLI
 
@@ -72,10 +70,12 @@ subsea build main.ss -t
 
 ## Source Structure
 
-A program starts with an entry directive and label target:
+A program starts at a required top-level `main` label:
 
 ```ss
-.entry main
+main: {
+  exit 0
+}
 ```
 
 Labels contain instruction blocks:
@@ -89,11 +89,40 @@ main: {
 }
 ```
 
+Local labels can also be used as markers inside a block. Local labels start with `.` and are scoped to the containing top-level label, so different blocks can reuse names like `.loop` and `.done` without collisions:
+
+```ss
+main: {
+  rax = 3
+
+.loop:
+  rax = rax - 1
+  jmp .loop
+}
+
+other: {
+.loop:
+  jmp .loop
+}
+```
+
+Nested labels must be local. Write `.loop:`, not `loop:`, inside a block.
+
+Top-level bare labels are allowed when you only need a jump or call target:
+
+```ss
+main: {
+  jmp skip
+}
+
+skip:
+```
+
+Labels fall through naturally. If a label does not end with `jmp`, `ret`, `exit`, or another control-flow transfer, execution continues into the next emitted label.
+
 Top-level `mem` declarations allocate writable memory for the lifetime of the program:
 
 ```ss
-.entry main
-
 mem count:u16 = 3
 mem buf:u8(128)
 
@@ -192,8 +221,6 @@ rax rdi rsi rdx
 Subsea allows you to directly work with memory and registers, along with supporting other common operations.
 
 ```ss
-.entry main
-
 // This program immediately exits with an exit code of `0`
 main: {
   rax = 60  // store the "exit" syscall
