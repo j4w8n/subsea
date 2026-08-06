@@ -144,6 +144,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             match s.as_str() {
                 "true" => Some(Token::Bool(true)),
                 "false" => Some(Token::Bool(false)),
+                "call" => Some(Token::Call),
                 "exit" => Some(Token::Exit),
                 "idiv" => Some(Token::Idiv),
                 "imul" => Some(Token::Imul),
@@ -151,6 +152,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "let" => Some(Token::Let),
                 "mem" => Some(Token::Mem),
                 "print" => Some(Token::Print),
+                "ret" => Some(Token::Ret),
                 "syscall" => Some(Token::Syscall),
                 "udiv" => Some(Token::Udiv),
                 "umul" => Some(Token::Umul),

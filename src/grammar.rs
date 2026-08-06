@@ -23,6 +23,7 @@ pub enum Token {
     Text(String),
 
     Ampersand,
+    Call,
     Comma,
     Directive(String),
     Exit,
@@ -36,6 +37,7 @@ pub enum Token {
     Pointer(String),
     Print,
     Register(String),
+    Ret,
     Syscall,
     Udiv,
     Umul,

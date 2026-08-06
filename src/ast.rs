@@ -31,6 +31,9 @@ pub enum Instruction {
         dst: AssignmentTarget,
         value: AssignmentValue,
     },
+    Call {
+        target: String,
+    },
     Exit {
         code: u8,
     },
@@ -47,6 +50,7 @@ pub enum Instruction {
     Print {
         parts: Vec<PrintPart>,
     },
+    Ret,
     Syscall,
     Udiv {
         divisor: Operand,

@@ -135,6 +135,13 @@ impl Parser {
 
     fn parse_instruction(&mut self) -> Result<Instruction, String> {
         match self.advance() {
+            Some(Token::Call) => match self.advance() {
+                Some(Token::Ident(target)) => Ok(Instruction::Call { target }),
+                Some(token) => Err(format!("Expected call target label, found {token:?}")),
+                None => Err(String::from(
+                    "Expected call target label, found end of input",
+                )),
+            },
             Some(Token::Exit) => {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
@@ -182,6 +189,7 @@ impl Parser {
                     "Expected binding name or string literal after print, found end of input",
                 )),
             },
+            Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Syscall) => Ok(Instruction::Syscall),
             Some(Token::Udiv) => {
                 let divisor = self.parse_operand()?;
@@ -963,6 +971,33 @@ mod tests {
                     rhs: Operand::Register(String::from("rcx")),
                 }
             }
+        );
+    }
+
+    #[test]
+    fn parses_call_and_ret() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Call,
+            Token::Ident(String::from("helper")),
+            Token::Ret,
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions,
+            vec![
+                Instruction::Call {
+                    target: String::from("helper"),
+                },
+                Instruction::Ret,
+            ]
         );
     }
 

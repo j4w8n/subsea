@@ -26,6 +26,9 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Assign { dst, value } => {
                     emit_assignment(&mut asm, dst, value, &strings, &label.name)?;
                 }
+                Instruction::Call { target } => {
+                    asm.push_str(&format!("  call {target}\n"));
+                }
                 Instruction::Exit { code } => {
                     asm.push_str("  mov rax, 60\n");
                     asm.push_str(&format!("  mov rdi, {code}\n"));
@@ -47,6 +50,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                         emit_print_instruction(&mut asm, string);
                     }
                 }
+                Instruction::Ret => asm.push_str("  ret\n"),
                 Instruction::Syscall => asm.push_str("  syscall\n"),
                 Instruction::Udiv { divisor } => {
                     let divisor = emit_operand(divisor, &strings, &label.name)?;
@@ -510,6 +514,28 @@ mod tests {
             error,
             "Widened multiply right operand cannot be an immediate value"
         );
+    }
+
+    #[test]
+    fn emits_call_and_ret() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Call {
+                        target: String::from("helper"),
+                    },
+                    Instruction::Ret,
+                ],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains("  call helper\n"));
+        assert!(asm.contains("  ret\n"));
     }
 
     #[test]
