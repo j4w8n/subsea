@@ -211,9 +211,11 @@ rax = 10
 rax = rax + 5
 rax = rax - 1
 rbx = count * 2
+rdx:rax = umul rbx, rcx
+rdx:rax = imul rbx, rcx
 ```
 
-The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Division remains explicit with `udiv` and `idiv` because those instructions use x86-64's implicit `rdx:rax`, `rax`, and `rdx` registers.
+The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Use `rdx:rax = umul lhs, rhs` or `rdx:rax = imul lhs, rhs` when you need the full widened multiply result. Division remains explicit with `udiv` and `idiv` because those instructions use x86-64's implicit `rdx:rax`, `rax`, and `rdx` registers.
 
 ## Instructions
 
@@ -228,6 +230,8 @@ syscall
 ```
 
 `*` keeps the low bits of the destination width. Signedness does not affect the low result, so there is no separate signed/unsigned multiply form for ordinary assignment math.
+
+`rdx:rax = umul lhs, rhs` lowers to x86-64 `mul` and writes the unsigned 128-bit result across `rdx:rax`. `rdx:rax = imul lhs, rhs` lowers to x86-64 one-operand `imul` and writes the signed 128-bit result across `rdx:rax`. The right operand cannot be an immediate value because x86-64 widened multiply requires a register or memory operand.
 
 `udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
 
