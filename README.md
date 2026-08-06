@@ -1,6 +1,6 @@
 # subsea
 
-A more readable, learnable replacement for assembly, with the same power to directly work with CPU registers and memory. The name is a play on words: subsea is "below C".
+A more readable, learnable alternative to Assembly, with the same power to directly work with CPU registers and memory. The name is a play on words: subsea is "below C".
 
 The current compiler targets Linux x86-64 by lowering `.ss` source files to assembly, assembling with `as`, linking with `ld`, and optionally running the result.
 
@@ -211,17 +211,32 @@ rax = 10
 rax = rax + 5
 rax = rax - 1
 rbx = count * 2
-rdx:rax = umul rbx, rcx
-rdx:rax = imul rbx, rcx
-rdx:rax = udiv rbx, rcx
-rdx:rax = idiv rbx, rcx
+rdx:rax = rbx u* rcx
+rdx:rax = rbx i* rcx
+rdx:rax = rbx u/ rcx
+rdx:rax = rbx i/ rcx
 ```
 
-The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Use `rdx:rax = umul lhs, rhs` or `rdx:rax = imul lhs, rhs` when you need the full widened multiply result. Use `rdx:rax = udiv lhs, rhs` or `rdx:rax = idiv lhs, rhs` when you need division; the quotient is written to `rax` and the remainder is written to `rdx`.
+The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Use `u*` or `i*` with `rdx:rax` when you need the full widened multiply result. Use `u/` or `i/` with `rdx:rax` when you need division; remainder is written to `rdx` and the quotient is written to `rax`.
+
+Widened multiply and divide operands must already be register or memory operands. Numeric literals and integer bindings are immediate values, so put them in explicit registers first:
+
+```ss
+r10 = 100
+r11 = 10
+rdx:rax = r10 u* r11
+rdx:rax = r10 u/ r11
+```
+
+These are invalid because `100`, `10`, and `count` are immediate values:
+
+```ss
+let count = 10
+rdx:rax = 100 u* 10
+rdx:rax = r10 u/ count
+```
 
 ## Instructions
-
-Currently supported Assembly-like instructions:
 
 ```text
 call label
@@ -229,29 +244,6 @@ jmp label
 ret
 exit code
 syscall
-```
-
-`*` keeps the low bits of the destination width. Signedness does not affect the low result, so there is no separate signed/unsigned multiply form for ordinary assignment math.
-
-`rdx:rax = umul lhs, rhs` lowers to x86-64 `mul` and writes the unsigned 128-bit result across `rdx:rax`. `rdx:rax = imul lhs, rhs` lowers to x86-64 one-operand `imul` and writes the signed 128-bit result across `rdx:rax`.
-
-`rdx:rax = udiv lhs, rhs` lowers to x86-64 `div`. `rdx:rax = idiv lhs, rhs` lowers to x86-64 `idiv`. Both write the quotient to `rax` and the remainder to `rdx`.
-
-Widened multiply and divide operands must already be register or memory operands. Numeric literals and integer bindings are immediate values, so put them in explicit registers first:
-
-```ss
-r10 = 100
-r11 = 10
-rdx:rax = umul r10, r11
-rdx:rax = udiv r10, r11
-```
-
-These are invalid because `100`, `10`, and `count` are immediate values:
-
-```ss
-let count = 10
-rdx:rax = umul 100, 10
-rdx:rax = udiv r10, count
 ```
 
 `call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
