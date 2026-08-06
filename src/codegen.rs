@@ -37,6 +37,9 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Jmp { target } => {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
+                Instruction::Label { name } => {
+                    asm.push_str(&format!("{name}:\n"));
+                }
                 Instruction::Let { .. } => {}
                 Instruction::Print { parts } => {
                     for part in parts {

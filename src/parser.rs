@@ -19,7 +19,6 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
-        let entry = self.parse_entry_directive()?;
         let mut memory = Vec::new();
         let mut labels = Vec::new();
 
@@ -27,47 +26,41 @@ impl Parser {
             if matches!(self.peek(), Some(Token::Mem)) {
                 memory.push(self.parse_memory_declaration()?);
             } else {
-                labels.push(self.parse_label()?);
+                labels.push(self.parse_top_level_label()?);
             }
         }
 
         validate_memory_names(&memory)?;
+        validate_main_label(&labels)?;
 
         Ok(Program {
-            entry,
+            entry: String::from("main"),
             memory,
             labels,
         })
     }
 
-    fn parse_entry_directive(&mut self) -> Result<String, String> {
-        match self.advance() {
-            Some(Token::Directive(name)) if name == "entry" => {}
-            Some(token) => return Err(format!("Expected .entry directive, found {token:?}")),
-            None => {
-                return Err(String::from(
-                    "Expected .entry directive, found end of input",
-                ));
-            }
-        }
-
-        match self.advance() {
-            Some(Token::Ident(name)) => Ok(name),
-            Some(token) => Err(format!("Expected entry label name, found {token:?}")),
-            None => Err(String::from(
-                "Expected entry label name, found end of input",
-            )),
-        }
-    }
-
-    fn parse_label(&mut self) -> Result<Label, String> {
+    fn parse_top_level_label(&mut self) -> Result<Label, String> {
         let name = match self.advance() {
             Some(Token::Ident(name)) => name,
+            Some(Token::LocalIdent(name)) => {
+                return Err(format!(
+                    "Local label .{name} cannot be declared at the top level"
+                ));
+            }
             Some(token) => return Err(format!("Expected label name, found {token:?}")),
             None => return Err(String::from("Expected label name, found end of input")),
         };
 
         self.expect(Token::Colon, "Expected ':' after label name")?;
+
+        if !matches!(self.peek(), Some(Token::LBrace)) {
+            return Ok(Label {
+                name,
+                instructions: Vec::new(),
+            });
+        }
+
         self.expect(Token::LBrace, "Expected '{' to start label block")?;
 
         let mut instructions = Vec::new();
@@ -76,7 +69,7 @@ impl Parser {
                 return Err(format!("Expected '}}' to close label '{name}'"));
             }
 
-            instructions.push(self.parse_instruction()?);
+            instructions.push(self.parse_instruction(&name)?);
         }
 
         self.expect(Token::RBrace, "Expected '}' after label block")?;
@@ -133,26 +126,18 @@ impl Parser {
         }
     }
 
-    fn parse_instruction(&mut self) -> Result<Instruction, String> {
+    fn parse_instruction(&mut self, current_label: &str) -> Result<Instruction, String> {
         match self.advance() {
-            Some(Token::Call) => match self.advance() {
-                Some(Token::Ident(target)) => Ok(Instruction::Call { target }),
-                Some(token) => Err(format!("Expected call target label, found {token:?}")),
-                None => Err(String::from(
-                    "Expected call target label, found end of input",
-                )),
+            Some(Token::Call) => match self.parse_label_target("call", current_label)? {
+                target => Ok(Instruction::Call { target }),
+            },
+            Some(Token::Jmp) => match self.parse_label_target("jump", current_label)? {
+                target => Ok(Instruction::Jmp { target }),
             },
             Some(Token::Exit) => {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
             }
-            Some(Token::Jmp) => match self.advance() {
-                Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
-                Some(token) => Err(format!("Expected jump target label, found {token:?}")),
-                None => Err(String::from(
-                    "Expected jump target label, found end of input",
-                )),
-            },
             Some(Token::Let) => {
                 let name = match self.advance() {
                     Some(Token::Ident(name)) => name,
@@ -198,6 +183,15 @@ impl Parser {
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
             )),
+            Some(Token::LocalIdent(name)) if matches!(self.peek(), Some(Token::Colon)) => {
+                self.advance();
+                Ok(Instruction::Label {
+                    name: mangle_local_label(current_label, &name),
+                })
+            }
+            Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::Colon)) => Err(format!(
+                "Nested label {name}: must be local; write .{name}: instead"
+            )),
             Some(Token::Ident(name)) => {
                 self.parse_assignment(AssignmentTarget::Operand(Operand::Ident(name)))
             }
@@ -214,6 +208,23 @@ impl Parser {
             Some(Token::Register(name)) => self.parse_register_assignment(name),
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
+        }
+    }
+
+    fn parse_label_target(
+        &mut self,
+        instruction: &str,
+        current_label: &str,
+    ) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::Ident(target)) => Ok(target),
+            Some(Token::LocalIdent(target)) => Ok(mangle_local_label(current_label, &target)),
+            Some(token) => Err(format!(
+                "Expected {instruction} target label, found {token:?}"
+            )),
+            None => Err(format!(
+                "Expected {instruction} target label, found end of input"
+            )),
         }
     }
 
@@ -657,6 +668,10 @@ fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
     }
 }
 
+fn mangle_local_label(parent: &str, name: &str) -> String {
+    format!(".L.{parent}.{name}")
+}
+
 fn parse_integer_binding_value(
     value: &str,
     width: Option<MemoryWidth>,
@@ -721,6 +736,14 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn validate_main_label(labels: &[Label]) -> Result<(), String> {
+    if labels.iter().any(|label| label.name == "main") {
+        Ok(())
+    } else {
+        Err(String::from("Program must define a top-level main label"))
+    }
 }
 
 fn split_format_literal(value: &str) -> Result<Vec<String>, String> {

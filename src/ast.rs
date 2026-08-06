@@ -40,6 +40,9 @@ pub enum Instruction {
     Jmp {
         target: String,
     },
+    Label {
+        name: String,
+    },
     Let {
         name: String,
         value: BindingValue,

@@ -378,6 +378,50 @@ fn emits_push_and_pop() {
 }
 
 #[test]
+fn emits_inline_label() {
+    let program = main_program(vec![
+        Instruction::Label {
+            name: String::from(".L.main.loop"),
+        },
+        Instruction::Jmp {
+            target: String::from(".L.main.loop"),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("main:\n.L.main.loop:\n  jmp .L.main.loop\n"));
+}
+
+#[test]
+fn labels_fall_through_without_implicit_jump() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: Vec::new(),
+        labels: vec![
+            Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                    value: AssignmentValue::Operand(Operand::Immediate(1)),
+                }],
+            },
+            Label {
+                name: String::from("next"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+                    value: AssignmentValue::Operand(Operand::Immediate(2)),
+                }],
+            },
+        ],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("main:\n  mov rax, 1\n\nnext:\n  mov rbx, 2\n"));
+}
+
+#[test]
 fn rejects_non_64_bit_push_register() {
     let program = main_program(vec![Instruction::Push {
         src: Operand::Register(String::from("eax")),

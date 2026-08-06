@@ -11,8 +11,6 @@ fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
 
 fn empty_main_prefix() -> Vec<Token> {
     vec![
-        Token::Directive(String::from("entry")),
-        Token::Ident(String::from("main")),
         Token::Ident(String::from("main")),
         Token::Colon,
         Token::LBrace,
@@ -235,6 +233,88 @@ fn parses_push_and_pop() {
 }
 
 #[test]
+fn parses_nested_label_marker() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::LocalIdent(String::from("loop")),
+        Token::Colon,
+        Token::Jmp,
+        Token::LocalIdent(String::from("loop")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Label {
+                name: String::from(".L.main.loop"),
+            },
+            Instruction::Jmp {
+                target: String::from(".L.main.loop"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn rejects_bare_nested_label() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Ident(String::from("loop")), Token::Colon]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Nested label loop: must be local; write .loop: instead"
+    );
+}
+
+#[test]
+fn parses_top_level_bare_label() {
+    let program = parse(vec![
+        Token::Ident(String::from("main")),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+        Token::Ident(String::from("skip")),
+        Token::Colon,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.labels[1],
+        subsea::ast::Label {
+            name: String::from("skip"),
+            instructions: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn rejects_top_level_local_label() {
+    let error = parse(vec![Token::LocalIdent(String::from("skip")), Token::Colon]).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Local label .skip cannot be declared at the top level"
+    );
+}
+
+#[test]
+fn rejects_missing_main_label() {
+    let error = parse(vec![
+        Token::Ident(String::from("helper")),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap_err();
+
+    assert_eq!(error, "Program must define a top-level main label");
+}
+
+#[test]
 fn rejects_typed_integer_binding_out_of_range() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
@@ -254,8 +334,6 @@ fn rejects_typed_integer_binding_out_of_range() {
 #[test]
 fn parses_memory_scalar_declaration() {
     let program = parse(vec![
-        Token::Directive(String::from("entry")),
-        Token::Ident(String::from("main")),
         Token::Mem,
         Token::Ident(String::from("count")),
         Token::Colon,
@@ -282,8 +360,6 @@ fn parses_memory_scalar_declaration() {
 #[test]
 fn parses_memory_buffer_declaration() {
     let program = parse(vec![
-        Token::Directive(String::from("entry")),
-        Token::Ident(String::from("main")),
         Token::Mem,
         Token::Ident(String::from("buf")),
         Token::Colon,
@@ -311,8 +387,6 @@ fn parses_memory_buffer_declaration() {
 #[test]
 fn rejects_duplicate_memory_names() {
     let error = parse(vec![
-        Token::Directive(String::from("entry")),
-        Token::Ident(String::from("main")),
         Token::Mem,
         Token::Ident(String::from("count")),
         Token::Colon,
@@ -338,8 +412,6 @@ fn rejects_duplicate_memory_names() {
 #[test]
 fn rejects_zero_length_memory_buffer() {
     let error = parse(vec![
-        Token::Directive(String::from("entry")),
-        Token::Ident(String::from("main")),
         Token::Mem,
         Token::Ident(String::from("buf")),
         Token::Colon,

@@ -66,9 +66,9 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                         break;
                     }
                 }
-                Some(Token::Directive(s))
+                Some(Token::LocalIdent(s))
             }
-            _ => Some(Token::Period),
+            _ => return Err(String::from("Expected local identifier after '.'")),
         },
         Some('&') => match chars.peek() {
             Some(&c) if is_ident_start(c) => {
