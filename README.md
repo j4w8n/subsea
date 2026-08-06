@@ -241,6 +241,8 @@ rdx:rax = r10 u/ count
 ```text
 call label
 jmp label
+push operand
+pop operand
 ret
 exit code
 syscall
@@ -262,6 +264,27 @@ add: {
   rax = rdi + rsi
   ret
 }
+```
+
+`push operand` stores a value on the stack and moves `rsp` down. `pop operand` loads a value from the stack and moves `rsp` up:
+
+```ss
+push rax
+push 10
+pop rbx
+```
+
+On x86-64, stack operations are pointer-width operations. `push` accepts immediate values, 64-bit registers, and explicitly 64-bit memory operands. `pop` accepts 64-bit registers and explicitly 64-bit memory operands:
+
+```ss
+push rax          // valid
+push [addr]:u64   // valid
+pop rbx           // valid
+pop [addr]:u64    // valid
+
+push eax          // invalid: not 64-bit
+pop [addr]        // invalid: memory width is ambiguous
+pop 10            // invalid: destination cannot be immediate
 ```
 
 `exit <code>` lowers to the Linux x86-64 `exit` syscall. Exit codes must be between `0` and `255`:
