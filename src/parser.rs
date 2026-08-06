@@ -1,6 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    CompareOp, Condition, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
+    PrintPart, Program,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -132,7 +133,10 @@ impl Parser {
                 target => Ok(Instruction::Call { target }),
             },
             Some(Token::Jmp) => match self.parse_label_target("jump", current_label)? {
-                target => Ok(Instruction::Jmp { target }),
+                target => {
+                    let condition = self.parse_optional_jump_condition()?;
+                    Ok(Instruction::Jmp { target, condition })
+                }
             },
             Some(Token::Exit) => {
                 let code = self.parse_exit_code()?;
@@ -224,6 +228,51 @@ impl Parser {
             )),
             None => Err(format!(
                 "Expected {instruction} target label, found end of input"
+            )),
+        }
+    }
+
+    fn parse_optional_jump_condition(&mut self) -> Result<Option<Condition>, String> {
+        if !matches!(self.peek(), Some(Token::If)) {
+            return Ok(None);
+        }
+
+        self.advance();
+
+        let lhs = self.parse_operand()?;
+        let op = self.parse_compare_op()?;
+        let rhs = self.parse_operand()?;
+
+        Ok(Some(Condition { lhs, op, rhs }))
+    }
+
+    fn parse_compare_op(&mut self) -> Result<CompareOp, String> {
+        match self.advance() {
+            Some(Token::EqualsEquals) => Ok(CompareOp::Equal),
+            Some(Token::NotEquals) => Ok(CompareOp::NotEqual),
+            Some(Token::ILess) => Ok(CompareOp::SignedLess),
+            Some(Token::ILessEquals) => Ok(CompareOp::SignedLessEqual),
+            Some(Token::IGreater) => Ok(CompareOp::SignedGreater),
+            Some(Token::IGreaterEquals) => Ok(CompareOp::SignedGreaterEqual),
+            Some(Token::ULess) => Ok(CompareOp::UnsignedLess),
+            Some(Token::ULessEquals) => Ok(CompareOp::UnsignedLessEqual),
+            Some(Token::UGreater) => Ok(CompareOp::UnsignedGreater),
+            Some(Token::UGreaterEquals) => Ok(CompareOp::UnsignedGreaterEqual),
+            Some(Token::Less) => Err(String::from(
+                "Comparison '<' must specify signedness; use i< or u<",
+            )),
+            Some(Token::LessEquals) => Err(String::from(
+                "Comparison '<=' must specify signedness; use i<= or u<=",
+            )),
+            Some(Token::Greater) => Err(String::from(
+                "Comparison '>' must specify signedness; use i> or u>",
+            )),
+            Some(Token::GreaterEquals) => Err(String::from(
+                "Comparison '>=' must specify signedness; use i>= or u>=",
+            )),
+            Some(token) => Err(format!("Expected comparison operator, found {token:?}")),
+            None => Err(String::from(
+                "Expected comparison operator, found end of input",
             )),
         }
     }

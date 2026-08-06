@@ -89,7 +89,38 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         Some('-') => Some(Token::Minus),
         Some('*') => Some(Token::Star),
         Some('/') => Some(Token::Slash),
-        Some('=') => Some(Token::Equals),
+        Some('=') => {
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                Some(Token::EqualsEquals)
+            } else {
+                Some(Token::Equals)
+            }
+        }
+        Some('!') => {
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                Some(Token::NotEquals)
+            } else {
+                return Err(String::from("Expected '=' after '!'"));
+            }
+        }
+        Some('<') => {
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                Some(Token::LessEquals)
+            } else {
+                Some(Token::Less)
+            }
+        }
+        Some('>') => {
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                Some(Token::GreaterEquals)
+            } else {
+                Some(Token::Greater)
+            }
+        }
         Some('(') => Some(Token::LParen),
         Some(')') => Some(Token::RParen),
         Some('{') => Some(Token::LBrace),
@@ -144,6 +175,25 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             match s.as_str() {
                 "true" => Some(Token::Bool(true)),
                 "false" => Some(Token::Bool(false)),
+                "if" => Some(Token::If),
+                "i" if matches!(chars.peek(), Some('<')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::ILessEquals)
+                    } else {
+                        Some(Token::ILess)
+                    }
+                }
+                "i" if matches!(chars.peek(), Some('>')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::IGreaterEquals)
+                    } else {
+                        Some(Token::IGreater)
+                    }
+                }
                 "i" if matches!(chars.peek(), Some('*')) => {
                     chars.next();
                     Some(Token::IStar)
@@ -162,6 +212,24 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "push" => Some(Token::Push),
                 "ret" => Some(Token::Ret),
                 "syscall" => Some(Token::Syscall),
+                "u" if matches!(chars.peek(), Some('<')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::ULessEquals)
+                    } else {
+                        Some(Token::ULess)
+                    }
+                }
+                "u" if matches!(chars.peek(), Some('>')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::UGreaterEquals)
+                    } else {
+                        Some(Token::UGreater)
+                    }
+                }
                 "u" if matches!(chars.peek(), Some('*')) => {
                     chars.next();
                     Some(Token::UStar)

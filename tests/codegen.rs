@@ -1,6 +1,6 @@
 use subsea::ast::{
-    Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, Instruction, Label,
-    MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
+    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -385,12 +385,45 @@ fn emits_inline_label() {
         },
         Instruction::Jmp {
             target: String::from(".L.main.loop"),
+            condition: None,
         },
     ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains("main:\n.L.main.loop:\n  jmp .L.main.loop\n"));
+}
+
+#[test]
+fn emits_signed_conditional_jump() {
+    let program = main_program(vec![Instruction::Jmp {
+        target: String::from("done"),
+        condition: Some(Condition {
+            lhs: Operand::Register(String::from("rax")),
+            op: CompareOp::SignedLess,
+            rhs: Operand::Immediate(0),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cmp rax, 0\n  jl done\n"));
+}
+
+#[test]
+fn emits_unsigned_conditional_jump() {
+    let program = main_program(vec![Instruction::Jmp {
+        target: String::from("loop"),
+        condition: Some(Condition {
+            lhs: Operand::Register(String::from("rcx")),
+            op: CompareOp::UnsignedLess,
+            rhs: Operand::Register(String::from("rbx")),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cmp rcx, rbx\n  jb loop\n"));
 }
 
 #[test]

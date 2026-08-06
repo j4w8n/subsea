@@ -39,6 +39,7 @@ pub enum Instruction {
     },
     Jmp {
         target: String,
+        condition: Option<Condition>,
     },
     Label {
         name: String,
@@ -58,6 +59,27 @@ pub enum Instruction {
     },
     Ret,
     Syscall,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Condition {
+    pub lhs: Operand,
+    pub op: CompareOp,
+    pub rhs: Operand,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CompareOp {
+    Equal,
+    NotEqual,
+    SignedLess,
+    SignedLessEqual,
+    SignedGreater,
+    SignedGreaterEqual,
+    UnsignedLess,
+    UnsignedLessEqual,
+    UnsignedGreater,
+    UnsignedGreaterEqual,
 }
 
 #[derive(Debug, PartialEq, Clone)]

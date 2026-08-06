@@ -1,6 +1,6 @@
 use subsea::ast::{
-    AssignmentTarget, AssignmentValue, BindingValue, Instruction, MathOp, MemoryDeclaration,
-    MemoryWidth, Operand,
+    AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, Instruction, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand,
 };
 use subsea::grammar::Token;
 use subsea::parser::Parser;
@@ -252,8 +252,83 @@ fn parses_nested_label_marker() {
             },
             Instruction::Jmp {
                 target: String::from(".L.main.loop"),
+                condition: None,
             },
         ]
+    );
+}
+
+#[test]
+fn parses_conditional_jump() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        Token::Ident(String::from("done")),
+        Token::If,
+        Token::Register(String::from("rcx")),
+        Token::ULess,
+        Token::Register(String::from("rbx")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Jmp {
+            target: String::from("done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rcx")),
+                op: CompareOp::UnsignedLess,
+                rhs: Operand::Register(String::from("rbx")),
+            }),
+        }]
+    );
+}
+
+#[test]
+fn parses_signed_conditional_jump() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        Token::Ident(String::from("negative")),
+        Token::If,
+        Token::Register(String::from("rax")),
+        Token::ILess,
+        Token::NumberLiteral(String::from("0")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Jmp {
+            target: String::from("negative"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rax")),
+                op: CompareOp::SignedLess,
+                rhs: Operand::Immediate(0),
+            }),
+        }]
+    );
+}
+
+#[test]
+fn rejects_conditional_jump_without_signedness() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        Token::Ident(String::from("done")),
+        Token::If,
+        Token::Register(String::from("rax")),
+        Token::Less,
+        Token::Register(String::from("rbx")),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Comparison '<' must specify signedness; use i< or u<"
     );
 }
 

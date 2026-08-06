@@ -19,3 +19,21 @@ fn rejects_bare_period() {
 
     assert_eq!(error, "Expected local identifier after '.'");
 }
+
+#[test]
+fn lexes_comparison_operators() {
+    assert_eq!(lex_one("==").unwrap(), Some(Token::EqualsEquals));
+    assert_eq!(lex_one("!=").unwrap(), Some(Token::NotEquals));
+    assert_eq!(lex_one("<").unwrap(), Some(Token::Less));
+    assert_eq!(lex_one("<=").unwrap(), Some(Token::LessEquals));
+    assert_eq!(lex_one(">").unwrap(), Some(Token::Greater));
+    assert_eq!(lex_one(">=").unwrap(), Some(Token::GreaterEquals));
+    assert_eq!(lex_one("i<").unwrap(), Some(Token::ILess));
+    assert_eq!(lex_one("i<=").unwrap(), Some(Token::ILessEquals));
+    assert_eq!(lex_one("i>").unwrap(), Some(Token::IGreater));
+    assert_eq!(lex_one("i>=").unwrap(), Some(Token::IGreaterEquals));
+    assert_eq!(lex_one("u<").unwrap(), Some(Token::ULess));
+    assert_eq!(lex_one("u<=").unwrap(), Some(Token::ULessEquals));
+    assert_eq!(lex_one("u>").unwrap(), Some(Token::UGreater));
+    assert_eq!(lex_one("u>=").unwrap(), Some(Token::UGreaterEquals));
+}

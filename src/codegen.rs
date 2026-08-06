@@ -1,6 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    CompareOp, Condition, Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
+    Program,
 };
 use std::collections::HashMap;
 
@@ -34,8 +35,12 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("  mov rdi, {code}\n"));
                     asm.push_str("  syscall\n");
                 }
-                Instruction::Jmp { target } => {
-                    asm.push_str(&format!("  jmp {target}\n"));
+                Instruction::Jmp { target, condition } => {
+                    if let Some(condition) = condition {
+                        emit_conditional_jump(&mut asm, target, condition, &strings, &label.name)?;
+                    } else {
+                        asm.push_str(&format!("  jmp {target}\n"));
+                    }
                 }
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
@@ -68,6 +73,123 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     }
 
     Ok(asm)
+}
+
+fn emit_conditional_jump(
+    asm: &mut String,
+    target: &str,
+    condition: &Condition,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    let (lhs, rhs, op) = normalize_compare(
+        &condition.lhs,
+        &condition.rhs,
+        condition.op,
+        strings,
+        label_name,
+    )?;
+
+    validate_compare_operands(lhs, rhs, strings, label_name)?;
+
+    let lhs = emit_operand(lhs, strings, label_name)?;
+    let rhs = emit_operand(rhs, strings, label_name)?;
+    asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+    asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
+
+    Ok(())
+}
+
+fn normalize_compare<'a>(
+    lhs: &'a Operand,
+    rhs: &'a Operand,
+    op: CompareOp,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(&'a Operand, &'a Operand, CompareOp), String> {
+    if is_immediate_operand(lhs, strings, label_name) {
+        if is_immediate_operand(rhs, strings, label_name) {
+            return Err(String::from("Comparison cannot use two immediate operands"));
+        }
+
+        Ok((rhs, lhs, reverse_compare_op(op)))
+    } else {
+        Ok((lhs, rhs, op))
+    }
+}
+
+fn reverse_compare_op(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Equal => CompareOp::Equal,
+        CompareOp::NotEqual => CompareOp::NotEqual,
+        CompareOp::SignedLess => CompareOp::SignedGreater,
+        CompareOp::SignedLessEqual => CompareOp::SignedGreaterEqual,
+        CompareOp::SignedGreater => CompareOp::SignedLess,
+        CompareOp::SignedGreaterEqual => CompareOp::SignedLessEqual,
+        CompareOp::UnsignedLess => CompareOp::UnsignedGreater,
+        CompareOp::UnsignedLessEqual => CompareOp::UnsignedGreaterEqual,
+        CompareOp::UnsignedGreater => CompareOp::UnsignedLess,
+        CompareOp::UnsignedGreaterEqual => CompareOp::UnsignedLessEqual,
+    }
+}
+
+fn compare_jump_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equal => "je",
+        CompareOp::NotEqual => "jne",
+        CompareOp::SignedLess => "jl",
+        CompareOp::SignedLessEqual => "jle",
+        CompareOp::SignedGreater => "jg",
+        CompareOp::SignedGreaterEqual => "jge",
+        CompareOp::UnsignedLess => "jb",
+        CompareOp::UnsignedLessEqual => "jbe",
+        CompareOp::UnsignedGreater => "ja",
+        CompareOp::UnsignedGreaterEqual => "jae",
+    }
+}
+
+fn validate_compare_operands(
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    if matches!(lhs, Operand::Pointer(_)) || matches!(rhs, Operand::Pointer(_)) {
+        return Err(String::from("Comparison cannot use an address-of operand"));
+    }
+
+    if matches!(lhs, Operand::Dereference { .. }) && matches!(rhs, Operand::Dereference { .. }) {
+        return Err(String::from(
+            "Comparison cannot use memory for both operands",
+        ));
+    }
+
+    if let (Some(lhs_width), Some(rhs_width)) = (operand_width(lhs), operand_width(rhs)) {
+        if lhs_width != rhs_width {
+            return Err(format!(
+                "Cannot compare {}-bit operand with {}-bit operand",
+                lhs_width.bits(),
+                rhs_width.bits()
+            ));
+        }
+    }
+
+    if let (Some(value), Some(width)) = (
+        immediate_value(rhs, strings, label_name),
+        destination_width(lhs),
+    ) {
+        validate_immediate_range(value, width)?;
+    }
+
+    if is_immediate_operand(rhs, strings, label_name)
+        && matches!(lhs, Operand::Dereference { width: None, .. })
+    {
+        return Err(String::from(
+            "Cannot compare an immediate value with memory without an explicit width",
+        ));
+    }
+
+    Ok(())
 }
 
 #[derive(Clone)]
