@@ -234,6 +234,92 @@ fn rejects_immediate_widened_multiply_rhs() {
 }
 
 #[test]
+fn rejects_immediate_widened_multiply_lhs() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideMultiply {
+            signed: false,
+            lhs: Operand::Immediate(10),
+            rhs: Operand::Register(String::from("rcx")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Widened multiply left operand cannot be an immediate value"
+    );
+}
+
+#[test]
+fn emits_unsigned_widened_divide() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideDivide {
+            signed: false,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Register(String::from("rcx")),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  xor rdx, rdx\n"));
+    assert!(asm.contains("  div rcx\n"));
+}
+
+#[test]
+fn emits_signed_widened_divide() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideDivide {
+            signed: true,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Register(String::from("rcx")),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  cqo\n"));
+    assert!(asm.contains("  idiv rcx\n"));
+}
+
+#[test]
+fn rejects_immediate_widened_divide_rhs() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideDivide {
+            signed: false,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Immediate(2),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Widened division right operand cannot be an immediate value"
+    );
+}
+
+#[test]
 fn emits_call_and_ret() {
     let program = main_program(vec![
         Instruction::Call {

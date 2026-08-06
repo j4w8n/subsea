@@ -37,9 +37,6 @@ pub enum Instruction {
     Exit {
         code: u8,
     },
-    Idiv {
-        divisor: Operand,
-    },
     Jmp {
         target: String,
     },
@@ -52,9 +49,6 @@ pub enum Instruction {
     },
     Ret,
     Syscall,
-    Udiv {
-        divisor: Operand,
-    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -72,6 +66,11 @@ pub enum AssignmentValue {
         rhs: Operand,
     },
     WideMultiply {
+        signed: bool,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    WideDivide {
         signed: bool,
         lhs: Operand,
         rhs: Operand,

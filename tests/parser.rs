@@ -158,6 +158,38 @@ fn parses_widened_multiply_assignment() {
 }
 
 #[test]
+fn parses_widened_divide_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("rdx")),
+        Token::Colon,
+        Token::Register(String::from("rax")),
+        Token::Equals,
+        Token::Idiv,
+        Token::Register(String::from("rbx")),
+        Token::Comma,
+        Token::Register(String::from("rcx")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair {
+                high: String::from("rdx"),
+                low: String::from("rax"),
+            },
+            value: AssignmentValue::WideDivide {
+                signed: true,
+                lhs: Operand::Register(String::from("rbx")),
+                rhs: Operand::Register(String::from("rcx")),
+            },
+        }
+    );
+}
+
+#[test]
 fn parses_call_and_ret() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

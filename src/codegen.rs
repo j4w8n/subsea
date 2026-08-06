@@ -34,10 +34,6 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("  mov rdi, {code}\n"));
                     asm.push_str("  syscall\n");
                 }
-                Instruction::Idiv { divisor } => {
-                    let divisor = emit_operand(divisor, &strings, &label.name)?;
-                    asm.push_str(&format!("  idiv {divisor}\n"));
-                }
                 Instruction::Jmp { target } => {
                     asm.push_str(&format!("  jmp {target}\n"));
                 }
@@ -52,10 +48,6 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 }
                 Instruction::Ret => asm.push_str("  ret\n"),
                 Instruction::Syscall => asm.push_str("  syscall\n"),
-                Instruction::Udiv { divisor } => {
-                    let divisor = emit_operand(divisor, &strings, &label.name)?;
-                    asm.push_str(&format!("  div {divisor}\n"));
-                }
             }
         }
 
@@ -342,12 +334,33 @@ fn emit_assignment(
         }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => {
             validate_wide_multiply_target(dst)?;
-            validate_wide_multiply_rhs(rhs, strings, label_name)?;
+            validate_wide_math_operand("Widened multiply left operand", lhs, strings, label_name)?;
+            validate_wide_math_operand("Widened multiply right operand", rhs, strings, label_name)?;
 
             let rax = Operand::Register(String::from("rax"));
             emit_copy_instruction(asm, lhs, &rax, strings, label_name)?;
 
             let opcode = if *signed { "imul" } else { "mul" };
+            let rhs = emit_operand(rhs, strings, label_name)?;
+            asm.push_str(&format!("  {opcode} {rhs}\n"));
+
+            Ok(())
+        }
+        AssignmentValue::WideDivide { signed, lhs, rhs } => {
+            validate_wide_multiply_target(dst)?;
+            validate_wide_math_operand("Widened division left operand", lhs, strings, label_name)?;
+            validate_wide_math_operand("Widened division right operand", rhs, strings, label_name)?;
+
+            let rax = Operand::Register(String::from("rax"));
+            emit_copy_instruction(asm, lhs, &rax, strings, label_name)?;
+
+            if *signed {
+                asm.push_str("  cqo\n");
+            } else {
+                asm.push_str("  xor rdx, rdx\n");
+            }
+
+            let opcode = if *signed { "idiv" } else { "div" };
             let rhs = emit_operand(rhs, strings, label_name)?;
             asm.push_str(&format!("  {opcode} {rhs}\n"));
 
@@ -377,27 +390,24 @@ fn validate_wide_multiply_target(dst: &AssignmentTarget) -> Result<(), String> {
     }
 }
 
-fn validate_wide_multiply_rhs(
-    rhs: &Operand,
+fn validate_wide_math_operand(
+    name: &str,
+    operand: &Operand,
     strings: &StringTable,
     label_name: &str,
 ) -> Result<(), String> {
-    if matches!(rhs, Operand::Pointer(_)) {
-        return Err(String::from(
-            "Widened multiply right operand cannot be an address-of operand",
-        ));
+    if matches!(operand, Operand::Pointer(_)) {
+        return Err(format!("{name} cannot be an address-of operand"));
     }
 
-    if is_immediate_operand(rhs, strings, label_name) {
-        return Err(String::from(
-            "Widened multiply right operand cannot be an immediate value",
-        ));
+    if is_immediate_operand(operand, strings, label_name) {
+        return Err(format!("{name} cannot be an immediate value"));
     }
 
-    if let Some(width) = operand_width(rhs) {
+    if let Some(width) = operand_width(operand) {
         if width != Width::Bits64 {
             return Err(format!(
-                "Widened multiply right operand must be 64-bit, found {}-bit operand",
+                "{name} must be 64-bit, found {}-bit operand",
                 width.bits()
             ));
         }

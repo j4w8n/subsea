@@ -146,10 +146,9 @@ impl Parser {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
             }
-            Some(Token::Idiv) => {
-                let divisor = self.parse_operand()?;
-                Ok(Instruction::Idiv { divisor })
-            }
+            Some(Token::Idiv | Token::Udiv) => Err(String::from(
+                "Division is only supported on the right side of rdx:rax assignment",
+            )),
             Some(Token::Jmp) => match self.advance() {
                 Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
                 Some(token) => Err(format!("Expected jump target label, found {token:?}")),
@@ -191,10 +190,6 @@ impl Parser {
             },
             Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Syscall) => Ok(Instruction::Syscall),
-            Some(Token::Udiv) => {
-                let divisor = self.parse_operand()?;
-                Ok(Instruction::Udiv { divisor })
-            }
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
             )),
@@ -247,8 +242,11 @@ impl Parser {
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
-        if matches!(self.peek(), Some(Token::Imul | Token::Umul)) {
-            return self.parse_wide_multiply_assignment(dst);
+        if matches!(
+            self.peek(),
+            Some(Token::Idiv | Token::Imul | Token::Udiv | Token::Umul)
+        ) {
+            return self.parse_wide_math_assignment(dst);
         }
 
         let lhs = self.parse_operand()?;
@@ -260,7 +258,7 @@ impl Parser {
                     Some(Token::Star) => MathOp::Multiply,
                     Some(Token::Slash) => {
                         return Err(String::from(
-                            "Assignment division is not supported yet; use udiv or idiv",
+                            "Use rdx:rax = udiv lhs, rhs or rdx:rax = idiv lhs, rhs for division",
                         ));
                     }
                     _ => unreachable!(),
@@ -275,26 +273,25 @@ impl Parser {
         Ok(Instruction::Assign { dst, value })
     }
 
-    fn parse_wide_multiply_assignment(
-        &mut self,
-        dst: AssignmentTarget,
-    ) -> Result<Instruction, String> {
-        let signed = match self.advance() {
-            Some(Token::Imul) => true,
-            Some(Token::Umul) => false,
+    fn parse_wide_math_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
+        let (is_division, signed) = match self.advance() {
+            Some(Token::Idiv) => (true, true),
+            Some(Token::Imul) => (false, true),
+            Some(Token::Udiv) => (true, false),
+            Some(Token::Umul) => (false, false),
             _ => unreachable!(),
         };
         let lhs = self.parse_operand()?;
-        self.expect(
-            Token::Comma,
-            "Expected ',' after widened multiply left operand",
-        )?;
+        self.expect(Token::Comma, "Expected ',' after widened math left operand")?;
         let rhs = self.parse_operand()?;
 
-        Ok(Instruction::Assign {
-            dst,
-            value: AssignmentValue::WideMultiply { signed, lhs, rhs },
-        })
+        let value = if is_division {
+            AssignmentValue::WideDivide { signed, lhs, rhs }
+        } else {
+            AssignmentValue::WideMultiply { signed, lhs, rhs }
+        };
+
+        Ok(Instruction::Assign { dst, value })
     }
 
     fn parse_print_literal(&mut self, value: String) -> Result<Instruction, String> {
