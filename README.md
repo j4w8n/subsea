@@ -114,15 +114,16 @@ mem count:u16 = 3   // writable memory named count
 Read and write `mem` values with memory operands:
 
 ```ss
-copy [count]:u16, ax
-add 1, ax
-copy ax, [count]:u16
+ax = [count]:u16
+ax = ax + 1
+[count]:u16 = ax
 ```
 
 Use `&` to pass the address of `mem` storage:
 
 ```ss
-copy &buf, rsi
+mem buf:u8(128)
+rsi = &buf
 ```
 
 ## Bindings And Printing
@@ -152,7 +153,7 @@ Integer bindings can also be used as immediate operands:
 
 ```ss
 let count = 3
-copy count, rax
+rax = count
 ```
 
 Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
@@ -186,7 +187,7 @@ Supported string escapes:
 rax rdi rsi rdx
 ```
 
-## Assembly-like Syntax
+## Assembly-like Power
 
 Subsea allows you to directly work with memory and registers, along with supporting other common operations.
 
@@ -195,34 +196,30 @@ Subsea allows you to directly work with memory and registers, along with support
 
 // This program immediately exits with an exit code of `0`
 main: {
-  copy 60, rax   // store the "exit" syscall
-  copy 0, rdi    // store the exit status code
-  syscall        // execute the syscall
+  rax = 60  // store the "exit" syscall
+  rdi = 0   // store the exit status code
+  syscall   // execute the syscall
 }
 ```
 
-## Operand Order
+## Assignment Syntax
 
-Subsea uses source-first, destination-second instruction syntax:
+Subsea uses readable assignment syntax for moving values and doing simple math:
 
 ```ss
-copy 10, rax
-add 5, rax
-sub 1, rax
+rax = 10
+rax = rax + 5
+rax = rax - 1
+rbx = count * 2
 ```
 
-For example, you can read the first line as "copy the value 10 to register rax". The destination is the operand that changes.
+The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Division remains explicit with `udiv` and `idiv` because those instructions use x86-64's implicit `rdx:rax`, `rax`, and `rdx` registers.
 
 ## Instructions
 
-Currently supported instructions:
+Currently supported Assembly-like instructions:
 
 ```text
-copy src, dst
-add src, dst
-sub src, dst
-umul src, dst
-imul src, dst
 udiv operand
 idiv operand
 jmp label
@@ -230,9 +227,7 @@ exit code
 syscall
 ```
 
-`i` means signed integer and `u` means unsigned integer.
-
-`umul` and `imul` currently emit two-operand `imul`, because the low half of integer multiplication is the same for signed and unsigned multiplication.
+`*` keeps the low bits of the destination width. Signedness does not affect the low result, so there is no separate signed/unsigned multiply form for ordinary assignment math.
 
 `udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
 
@@ -246,9 +241,9 @@ exit 1
 Negative immediate operands are supported:
 
 ```ss
-copy -1, rax
-add -8, rsp
-sub -1, rax
+rax = -1
+rsp = rsp - 8
+rax = rax - 1
 ```
 
 ## Width Rules
@@ -256,46 +251,46 @@ sub -1, rax
 Subsea currently rejects mixed-width register operations. These are invalid:
 
 ```ss
-copy rax, eax
-copy eax, rax
-add eax, rax
-imul ax, eax
+eax = rax
+rax = eax
+rax = rax + eax
+eax = eax * ax
 ```
 
 Memory/register operations infer width from the register:
 
 ```ss
-copy [addr], rax  // 64-bit load
-copy rax, [addr]  // 64-bit store
-copy [addr], eax  // 32-bit load
-copy eax, [addr]  // 32-bit store
+rax = [addr]  // 64-bit load
+[addr] = rax  // 64-bit store
+eax = [addr]  // 32-bit load
+[addr] = eax  // 32-bit store
 ```
 
 Ambiguous or unsupported memory moves are rejected:
 
 ```ss
-copy 5, [addr]      // no explicit memory width
-copy [rax], [rbx]   // memory-to-memory copy is not supported
+[addr] = 5      // no explicit memory width
+[rbx] = [rax]   // memory-to-memory assignment is not supported
 ```
 
 Use explicit memory widths when the compiler cannot infer the width:
 
 ```ss
-copy 5, [addr]:u8
-copy -1, [addr]:i8
-copy 500, [addr]:u16
-copy -500, [addr]:i16
-copy 100000, [addr]:u32
-copy -100000, [addr]:i32
-copy 100000, [addr]:u64
-copy -100000, [addr]:i64
+[addr]:u8 = 5
+[addr]:i8 = -1
+[addr]:u16 = 500
+[addr]:i16 = -500
+[addr]:u32 = 100000
+[addr]:i32 = -100000
+[addr]:u64 = 100000
+[addr]:i64 = -100000
 ```
 
 Memory width annotations lower to pointer-sized assembly operands:
 
 ```ss
-copy 5, [rax]:u8
-copy -1, [rax]:i64
+[rax]:u8 = 5
+[rax]:i64 = -1
 ```
 
 ```asm
@@ -306,21 +301,21 @@ mov qword ptr [rax], -1
 When both a register and an explicit memory width are present, their widths must match:
 
 ```ss
-copy rax, [addr]:u64  // valid
-copy eax, [addr]:u32  // valid
-copy rax, [addr]:u32  // invalid
+[addr]:u64 = rax  // valid
+[addr]:u32 = eax  // valid
+[addr]:u32 = rax  // invalid
 ```
 
 Immediate values and integer bindings must fit the destination width:
 
 ```ss
-copy 255, al      // valid
-copy -1, al       // valid
-copy 256, al      // invalid
-copy 66000, ax    // invalid
+al = 255      // valid
+al = -1       // valid
+al = 256      // invalid
+ax = 66000    // invalid
 
 let count:u8 = 255
-copy count, al    // valid
+al = count    // valid
 ```
 
 ## Registers
@@ -362,25 +357,25 @@ Subsea uses `[]` for dereference and `&` for address-of labels.
 Examples:
 
 ```ss
-copy [5], rax
-copy [rax], rbx
-copy [label], rcx
-copy &label, rdx
+rax = [5]
+rbx = [rax]
+rcx = [label]
+rdx = &label
 ```
 
 Important: numbers inside brackets are memory addresses, not immediate values.
 
 ```ss
-copy 5, rax    // immediate value 5
-copy [5], rax  // memory at address 5
+rax = 5    // immediate value 5
+rax = [5]  // memory at address 5
 ```
 
 Invalid address-of forms:
 
 ```ss
-copy &5, rax
-copy &rax, rax
-copy &[rax], rax
+rax = &5
+rax = &rax
+rax = &[rax]
 ```
 
 Registers can contain addresses, but registers themselves are not addressable memory locations.
@@ -390,19 +385,19 @@ Registers can contain addresses, but registers themselves are not addressable me
 Memory operands support x86-64-style address expressions:
 
 ```ss
-copy [rax + 8], rbx
-copy [rbp - 16], rcx
-copy [rax + rbx + 8], rdx
-copy [label + 4], r8
+rbx = [rax + 8]
+rcx = [rbp - 16]
+rdx = [rax + rbx + 8]
+r8 = [label + 4]
 ```
 
 Scaled index addressing is also supported:
 
 ```ss
-copy [rax + rcx * 1], rbx
-copy [rax + rcx * 2], rbx
-copy [rax + rcx * 4 + 8], rbx
-copy [label + rcx * 8 - 16], rbx
+rbx = [rax + rcx * 1]
+rbx = [rax + rcx * 2]
+rbx = [rax + rcx * 4 + 8]
+rbx = [label + rcx * 8 - 16]
 ```
 
 Allowed scales are:
@@ -414,16 +409,16 @@ Allowed scales are:
 Only registers can be scaled. These are invalid:
 
 ```ss
-copy [rax + rcx * 3], rbx
-copy [rax + label * 4], rbx
-copy [rax + 8 * 4], rbx
+rbx = [rax + rcx * 3]
+rbx = [rax + label * 4]
+rbx = [rax + 8 * 4]
 ```
 
 Nested dereferences and address-of inside memory operands are not supported:
 
 ```ss
-copy [[rax]], rbx
-copy [&label], rbx
+rbx = [[rax]]
+rbx = [&label]
 ```
 
 ## Code Comments
