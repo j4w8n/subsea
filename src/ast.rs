@@ -128,6 +128,7 @@ pub enum BindingValue {
 pub enum PrintPart {
     Binding(String),
     Literal(String),
+    Operand(Operand),
 }
 
 #[derive(Debug, PartialEq, Clone)]

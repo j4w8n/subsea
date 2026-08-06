@@ -1,6 +1,6 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, Instruction, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart,
 };
 use subsea::grammar::Token;
 use subsea::parser::Parser;
@@ -229,6 +229,21 @@ fn parses_push_and_pop() {
                 dst: Operand::Register(String::from("rbx")),
             },
         ]
+    );
+}
+
+#[test]
+fn parses_print_register() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Print, Token::Register(String::from("rax"))]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Print {
+            parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+        }]
     );
 }
 

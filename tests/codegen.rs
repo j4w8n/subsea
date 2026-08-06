@@ -39,6 +39,20 @@ fn prints_integer_binding() {
 }
 
 #[test]
+fn emits_runtime_integer_print() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rax\n"));
+    assert!(asm.contains(".L.main.print_1_loop:\n"));
+    assert!(asm.contains("  div rbx\n"));
+    assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
 fn uses_integer_binding_as_immediate_operand() {
     let program = main_program(vec![
         Instruction::Let {

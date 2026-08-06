@@ -166,12 +166,35 @@ impl Parser {
                 Some(Token::Ident(name)) => Ok(Instruction::Print {
                     parts: vec![PrintPart::Binding(name)],
                 }),
+                Some(Token::Register(name)) => Ok(Instruction::Print {
+                    parts: vec![PrintPart::Operand(Operand::Register(name))],
+                }),
+                Some(Token::NumberLiteral(value)) => value
+                    .parse::<i64>()
+                    .map(|value| Instruction::Print {
+                        parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                    })
+                    .map_err(|_| format!("Invalid integer literal {value:?}")),
+                Some(Token::Minus) => match self.advance() {
+                    Some(Token::NumberLiteral(value)) => value
+                        .parse::<i64>()
+                        .map(|value| Instruction::Print {
+                            parts: vec![PrintPart::Operand(Operand::Immediate(-value))],
+                        })
+                        .map_err(|_| format!("Invalid integer literal -{value}")),
+                    Some(token) => Err(format!(
+                        "Expected number after '-' in print operand, found {token:?}"
+                    )),
+                    None => Err(String::from(
+                        "Expected number after '-' in print operand, found end of input",
+                    )),
+                },
                 Some(Token::Text(value)) => self.parse_print_literal(value),
                 Some(token) => Err(format!(
-                    "Expected binding name or string literal after print, found {token:?}"
+                    "Expected binding name, register, integer, or string literal after print, found {token:?}"
                 )),
                 None => Err(String::from(
-                    "Expected binding name or string literal after print, found end of input",
+                    "Expected binding name, register, integer, or string literal after print, found end of input",
                 )),
             },
             Some(Token::Pop) => {

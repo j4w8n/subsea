@@ -22,6 +22,8 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     for label in &program.labels {
         asm.push_str(&format!("{}:\n", label.name));
 
+        let mut runtime_print_index = 0;
+
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Assign { dst, value } => {
@@ -48,10 +50,28 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Let { .. } => {}
                 Instruction::Print { parts } => {
                     for part in parts {
-                        let string =
-                            resolve_print_part(&strings, &mut literal_indexes, &label.name, part)?;
+                        match part {
+                            PrintPart::Binding(_) | PrintPart::Literal(_) => {
+                                let string = resolve_print_part(
+                                    &strings,
+                                    &mut literal_indexes,
+                                    &label.name,
+                                    part,
+                                )?;
 
-                        emit_print_instruction(&mut asm, string);
+                                emit_print_string_instruction(&mut asm, string);
+                            }
+                            PrintPart::Operand(operand) => {
+                                runtime_print_index += 1;
+                                emit_print_operand_instruction(
+                                    &mut asm,
+                                    operand,
+                                    &strings,
+                                    &label.name,
+                                    runtime_print_index,
+                                )?;
+                            }
+                        }
                     }
                 }
                 Instruction::Pop { dst } => {
@@ -299,6 +319,7 @@ fn resolve_print_part<'a>(
                 .get(&(label_name.to_string(), *index))
                 .ok_or_else(|| String::from("Internal error: missing print literal"))
         }
+        PrintPart::Operand(_) => Err(String::from("Internal error: operand print is runtime")),
     }
 }
 
@@ -379,12 +400,78 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding]) {
     asm.push('\n');
 }
 
-fn emit_print_instruction(asm: &mut String, string: &StringBinding) {
+fn emit_print_string_instruction(asm: &mut String, string: &StringBinding) {
     asm.push_str("  mov rax, 1\n");
     asm.push_str("  mov rdi, 1\n");
     asm.push_str(&format!("  lea rsi, [rip + {}]\n", string.asm_label));
     asm.push_str(&format!("  mov rdx, {}\n", string.value.len()));
     asm.push_str("  syscall\n");
+}
+
+fn emit_print_operand_instruction(
+    asm: &mut String,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    index: usize,
+) -> Result<(), String> {
+    if matches!(operand, Operand::Pointer(_)) {
+        return Err(String::from(
+            "print operand cannot be an address-of operand",
+        ));
+    }
+
+    load_print_operand(asm, operand, strings, label_name)?;
+
+    let loop_label = format!(".L.{label_name}.print_{index}_loop");
+    let done_label = format!(".L.{label_name}.print_{index}_done");
+
+    asm.push_str("  push rbx\n");
+    asm.push_str("  sub rsp, 40\n");
+    asm.push_str("  lea rsi, [rsp + 40]\n");
+    asm.push_str("  mov rbx, 10\n");
+    asm.push_str(&format!("{loop_label}:\n"));
+    asm.push_str("  xor rdx, rdx\n");
+    asm.push_str("  div rbx\n");
+    asm.push_str("  add dl, 48\n");
+    asm.push_str("  sub rsi, 1\n");
+    asm.push_str("  mov byte ptr [rsi], dl\n");
+    asm.push_str("  cmp rax, 0\n");
+    asm.push_str(&format!("  jne {loop_label}\n"));
+    asm.push_str(&format!("{done_label}:\n"));
+    asm.push_str("  lea rdx, [rsp + 40]\n");
+    asm.push_str("  sub rdx, rsi\n");
+    asm.push_str("  mov rax, 1\n");
+    asm.push_str("  mov rdi, 1\n");
+    asm.push_str("  syscall\n");
+    asm.push_str("  add rsp, 40\n");
+    asm.push_str("  pop rbx\n");
+
+    Ok(())
+}
+
+fn load_print_operand(
+    asm: &mut String,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    match operand_width(operand) {
+        Some(Width::Bits8 | Width::Bits16) => {
+            let operand = emit_operand(operand, strings, label_name)?;
+            asm.push_str(&format!("  movzx rax, {operand}\n"));
+        }
+        Some(Width::Bits32) => {
+            let operand = emit_operand(operand, strings, label_name)?;
+            asm.push_str(&format!("  mov eax, {operand}\n"));
+        }
+        _ => {
+            let operand = emit_operand(operand, strings, label_name)?;
+            asm.push_str(&format!("  mov rax, {operand}\n"));
+        }
+    }
+
+    Ok(())
 }
 
 fn emit_binary_instruction(
