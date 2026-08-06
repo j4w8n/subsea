@@ -5,18 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub mod ast;
-pub mod codegen;
-pub mod driver;
-pub mod grammar;
-pub mod lexer;
-pub mod parser;
-
-use crate::codegen::emit_x86_64_linux_asm;
-use crate::driver::{build_executable, run_executable};
-use crate::grammar::Token;
-use crate::lexer::get_next_token;
-use crate::parser::Parser;
+use subsea::codegen::emit_x86_64_linux_asm;
+use subsea::driver::{self, build_executable, run_executable};
+use subsea::grammar::Token;
+use subsea::lexer::get_next_token;
+use subsea::parser::Parser;
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
