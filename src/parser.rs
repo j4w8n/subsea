@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, AssignmentValue, BindingValue, Instruction, Label,
-    MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
+    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -190,22 +190,58 @@ impl Parser {
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
             )),
-            Some(Token::Ident(name)) => self.parse_assignment(Operand::Ident(name)),
+            Some(Token::Ident(name)) => {
+                self.parse_assignment(AssignmentTarget::Operand(Operand::Ident(name)))
+            }
             Some(Token::LBracket) => {
                 let address = self.parse_address()?;
                 self.expect(Token::RBracket, "Expected ']' after memory operand")?;
                 let width = self.parse_optional_memory_width()?;
 
-                self.parse_assignment(Operand::Dereference { address, width })
+                self.parse_assignment(AssignmentTarget::Operand(Operand::Dereference {
+                    address,
+                    width,
+                }))
             }
-            Some(Token::Register(name)) => self.parse_assignment(Operand::Register(name)),
+            Some(Token::Register(name)) => self.parse_register_assignment(name),
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
     }
 
-    fn parse_assignment(&mut self, dst: Operand) -> Result<Instruction, String> {
+    fn parse_register_assignment(&mut self, high_or_dst: String) -> Result<Instruction, String> {
+        if !matches!(self.peek(), Some(Token::Colon)) {
+            return self
+                .parse_assignment(AssignmentTarget::Operand(Operand::Register(high_or_dst)));
+        }
+
+        self.advance();
+        let low = match self.advance() {
+            Some(Token::Register(name)) => name,
+            Some(token) => {
+                return Err(format!(
+                    "Expected low register after register-pair ':', found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected low register after register-pair ':', found end of input",
+                ));
+            }
+        };
+
+        self.parse_assignment(AssignmentTarget::RegisterPair {
+            high: high_or_dst,
+            low,
+        })
+    }
+
+    fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
+
+        if matches!(self.peek(), Some(Token::Imul | Token::Umul)) {
+            return self.parse_wide_multiply_assignment(dst);
+        }
 
         let lhs = self.parse_operand()?;
         let value = match self.peek() {
@@ -229,6 +265,28 @@ impl Parser {
         };
 
         Ok(Instruction::Assign { dst, value })
+    }
+
+    fn parse_wide_multiply_assignment(
+        &mut self,
+        dst: AssignmentTarget,
+    ) -> Result<Instruction, String> {
+        let signed = match self.advance() {
+            Some(Token::Imul) => true,
+            Some(Token::Umul) => false,
+            _ => unreachable!(),
+        };
+        let lhs = self.parse_operand()?;
+        self.expect(
+            Token::Comma,
+            "Expected ',' after widened multiply left operand",
+        )?;
+        let rhs = self.parse_operand()?;
+
+        Ok(Instruction::Assign {
+            dst,
+            value: AssignmentValue::WideMultiply { signed, lhs, rhs },
+        })
     }
 
     fn parse_print_literal(&mut self, value: String) -> Result<Instruction, String> {
@@ -861,11 +919,48 @@ mod tests {
         assert_eq!(
             program.labels[0].instructions[0],
             Instruction::Assign {
-                dst: Operand::Register(String::from("rax")),
+                dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
                 value: AssignmentValue::Binary {
                     op: MathOp::Add,
                     lhs: Operand::Register(String::from("rbx")),
                     rhs: Operand::Immediate(3),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_widened_multiply_assignment() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Register(String::from("rdx")),
+            Token::Colon,
+            Token::Register(String::from("rax")),
+            Token::Equals,
+            Token::Umul,
+            Token::Register(String::from("rbx")),
+            Token::Comma,
+            Token::Register(String::from("rcx")),
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions[0],
+            Instruction::Assign {
+                dst: AssignmentTarget::RegisterPair {
+                    high: String::from("rdx"),
+                    low: String::from("rax"),
+                },
+                value: AssignmentValue::WideMultiply {
+                    signed: false,
+                    lhs: Operand::Register(String::from("rbx")),
+                    rhs: Operand::Register(String::from("rcx")),
                 }
             }
         );

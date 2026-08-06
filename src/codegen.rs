@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, AssignmentValue, BindingValue, Instruction, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
+    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
 };
 use std::collections::HashMap;
 
@@ -268,7 +268,7 @@ mod tests {
                         },
                     },
                     Instruction::Assign {
-                        dst: Operand::Register(String::from("rax")),
+                        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
                         value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
                     },
                     Instruction::Exit { code: 0 },
@@ -325,7 +325,7 @@ mod tests {
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![Instruction::Assign {
-                    dst: Operand::Register(String::from("ax")),
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("ax"))),
                     value: AssignmentValue::Operand(Operand::Immediate(66000)),
                 }],
             }],
@@ -355,13 +355,13 @@ mod tests {
                         },
                     },
                     Instruction::Assign {
-                        dst: Operand::Dereference {
+                        dst: AssignmentTarget::Operand(Operand::Dereference {
                             address: Address {
                                 first: AddressTerm::Register(String::from("rsp")),
                                 rest: Vec::new(),
                             },
                             width: Some(MemoryWidth::U8),
-                        },
+                        }),
                         value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
                     },
                 ],
@@ -384,7 +384,7 @@ mod tests {
             labels: vec![Label {
                 name: String::from("main"),
                 instructions: vec![Instruction::Assign {
-                    dst: Operand::Register(String::from("rax")),
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
                     value: AssignmentValue::Binary {
                         op: MathOp::Subtract,
                         lhs: Operand::Register(String::from("rbx")),
@@ -398,6 +398,118 @@ mod tests {
 
         assert!(asm.contains("  neg rax\n"));
         assert!(asm.contains("  add rax, rbx\n"));
+    }
+
+    #[test]
+    fn emits_unsigned_widened_multiply() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::RegisterPair {
+                        high: String::from("rdx"),
+                        low: String::from("rax"),
+                    },
+                    value: AssignmentValue::WideMultiply {
+                        signed: false,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Register(String::from("rcx")),
+                    },
+                }],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains("  mov rax, rbx\n"));
+        assert!(asm.contains("  mul rcx\n"));
+    }
+
+    #[test]
+    fn emits_signed_widened_multiply() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::RegisterPair {
+                        high: String::from("rdx"),
+                        low: String::from("rax"),
+                    },
+                    value: AssignmentValue::WideMultiply {
+                        signed: true,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Register(String::from("rcx")),
+                    },
+                }],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains("  mov rax, rbx\n"));
+        assert!(asm.contains("  imul rcx\n"));
+    }
+
+    #[test]
+    fn rejects_non_rdx_rax_widened_multiply_destination() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::RegisterPair {
+                        high: String::from("r9"),
+                        low: String::from("r8"),
+                    },
+                    value: AssignmentValue::WideMultiply {
+                        signed: false,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Register(String::from("rcx")),
+                    },
+                }],
+            }],
+        };
+
+        let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Widened multiply destination must be rdx:rax, found r9:r8"
+        );
+    }
+
+    #[test]
+    fn rejects_immediate_widened_multiply_rhs() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: AssignmentTarget::RegisterPair {
+                        high: String::from("rdx"),
+                        low: String::from("rax"),
+                    },
+                    value: AssignmentValue::WideMultiply {
+                        signed: false,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Immediate(2),
+                    },
+                }],
+            }],
+        };
+
+        let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Widened multiply right operand cannot be an immediate value"
+        );
     }
 
     #[test]
@@ -487,14 +599,19 @@ fn emit_binary_instruction(
 
 fn emit_assignment(
     asm: &mut String,
-    dst: &Operand,
+    dst: &AssignmentTarget,
     value: &AssignmentValue,
     strings: &StringTable,
     label_name: &str,
 ) -> Result<(), String> {
     match value {
-        AssignmentValue::Operand(src) => emit_copy_instruction(asm, src, dst, strings, label_name),
+        AssignmentValue::Operand(src) => {
+            let dst = assignment_operand_target(dst)?;
+            emit_copy_instruction(asm, src, dst, strings, label_name)
+        }
         AssignmentValue::Binary { op, lhs, rhs } => {
+            let dst = assignment_operand_target(dst)?;
+
             if !matches!(dst, Operand::Register(_)) {
                 return Err(String::from(
                     "Math assignment destination must be a register for now",
@@ -543,7 +660,70 @@ fn emit_assignment(
                 emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name)
             }
         }
+        AssignmentValue::WideMultiply { signed, lhs, rhs } => {
+            validate_wide_multiply_target(dst)?;
+            validate_wide_multiply_rhs(rhs, strings, label_name)?;
+
+            let rax = Operand::Register(String::from("rax"));
+            emit_copy_instruction(asm, lhs, &rax, strings, label_name)?;
+
+            let opcode = if *signed { "imul" } else { "mul" };
+            let rhs = emit_operand(rhs, strings, label_name)?;
+            asm.push_str(&format!("  {opcode} {rhs}\n"));
+
+            Ok(())
+        }
     }
+}
+
+fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String> {
+    match dst {
+        AssignmentTarget::Operand(operand) => Ok(operand),
+        AssignmentTarget::RegisterPair { .. } => Err(String::from(
+            "Register-pair assignment requires a widened multiply right side",
+        )),
+    }
+}
+
+fn validate_wide_multiply_target(dst: &AssignmentTarget) -> Result<(), String> {
+    match dst {
+        AssignmentTarget::RegisterPair { high, low } if high == "rdx" && low == "rax" => Ok(()),
+        AssignmentTarget::RegisterPair { high, low } => Err(format!(
+            "Widened multiply destination must be rdx:rax, found {high}:{low}"
+        )),
+        AssignmentTarget::Operand(_) => Err(String::from(
+            "Widened multiply destination must be the register pair rdx:rax",
+        )),
+    }
+}
+
+fn validate_wide_multiply_rhs(
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    if matches!(rhs, Operand::Pointer(_)) {
+        return Err(String::from(
+            "Widened multiply right operand cannot be an address-of operand",
+        ));
+    }
+
+    if is_immediate_operand(rhs, strings, label_name) {
+        return Err(String::from(
+            "Widened multiply right operand cannot be an immediate value",
+        ));
+    }
+
+    if let Some(width) = operand_width(rhs) {
+        if width != Width::Bits64 {
+            return Err(format!(
+                "Widened multiply right operand must be 64-bit, found {}-bit operand",
+                width.bits()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn emit_copy_instruction(

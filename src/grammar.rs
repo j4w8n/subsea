@@ -27,6 +27,7 @@ pub enum Token {
     Directive(String),
     Exit,
     Idiv,
+    Imul,
     Jmp,
     Let,
     Literal,
@@ -37,6 +38,7 @@ pub enum Token {
     Register(String),
     Syscall,
     Udiv,
+    Umul,
 }
 
 #[derive(Debug, PartialEq, Clone)]

@@ -28,7 +28,7 @@ pub struct Label {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Instruction {
     Assign {
-        dst: Operand,
+        dst: AssignmentTarget,
         value: AssignmentValue,
     },
     Exit {
@@ -54,10 +54,21 @@ pub enum Instruction {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum AssignmentTarget {
+    Operand(Operand),
+    RegisterPair { high: String, low: String },
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum AssignmentValue {
     Operand(Operand),
     Binary {
         op: MathOp,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    WideMultiply {
+        signed: bool,
         lhs: Operand,
         rhs: Operand,
     },
