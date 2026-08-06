@@ -47,6 +47,12 @@ pub enum Instruction {
     Print {
         parts: Vec<PrintPart>,
     },
+    Pop {
+        dst: Operand,
+    },
+    Push {
+        src: Operand,
+    },
     Ret,
     Syscall,
 }

@@ -157,7 +157,9 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "jmp" => Some(Token::Jmp),
                 "let" => Some(Token::Let),
                 "mem" => Some(Token::Mem),
+                "pop" => Some(Token::Pop),
                 "print" => Some(Token::Print),
+                "push" => Some(Token::Push),
                 "ret" => Some(Token::Ret),
                 "syscall" => Some(Token::Syscall),
                 "u" if matches!(chars.peek(), Some('*')) => {

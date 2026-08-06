@@ -210,6 +210,31 @@ fn parses_call_and_ret() {
 }
 
 #[test]
+fn parses_push_and_pop() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Push,
+        Token::Register(String::from("rax")),
+        Token::Pop,
+        Token::Register(String::from("rbx")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Push {
+                src: Operand::Register(String::from("rax")),
+            },
+            Instruction::Pop {
+                dst: Operand::Register(String::from("rbx")),
+            },
+        ]
+    );
+}
+
+#[test]
 fn rejects_typed_integer_binding_out_of_range() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

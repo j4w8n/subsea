@@ -185,6 +185,14 @@ impl Parser {
                     "Expected binding name or string literal after print, found end of input",
                 )),
             },
+            Some(Token::Pop) => {
+                let dst = self.parse_operand()?;
+                Ok(Instruction::Pop { dst })
+            }
+            Some(Token::Push) => {
+                let src = self.parse_operand()?;
+                Ok(Instruction::Push { src })
+            }
             Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Syscall) => Ok(Instruction::Syscall),
             Some(Token::Ampersand) => Err(String::from(

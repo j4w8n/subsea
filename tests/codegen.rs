@@ -357,6 +357,72 @@ fn emits_call_and_ret() {
 }
 
 #[test]
+fn emits_push_and_pop() {
+    let program = main_program(vec![
+        Instruction::Push {
+            src: Operand::Register(String::from("rax")),
+        },
+        Instruction::Push {
+            src: Operand::Immediate(10),
+        },
+        Instruction::Pop {
+            dst: Operand::Register(String::from("rbx")),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  push rax\n"));
+    assert!(asm.contains("  push 10\n"));
+    assert!(asm.contains("  pop rbx\n"));
+}
+
+#[test]
+fn rejects_non_64_bit_push_register() {
+    let program = main_program(vec![Instruction::Push {
+        src: Operand::Register(String::from("eax")),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "push source must be 64-bit, found 32-bit register");
+}
+
+#[test]
+fn rejects_pop_immediate_destination() {
+    let program = main_program(vec![Instruction::Pop {
+        dst: Operand::Immediate(10),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "pop destination must be a 64-bit register or explicitly 64-bit memory operand"
+    );
+}
+
+#[test]
+fn rejects_pop_memory_without_width() {
+    let program = main_program(vec![Instruction::Pop {
+        dst: Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(String::from("rsp")),
+                rest: Vec::new(),
+            },
+            width: None,
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "pop destination memory operand requires an explicit 64-bit width"
+    );
+}
+
+#[test]
 fn emits_memory_scalars_and_buffers() {
     let program = Program {
         entry: String::from("main"),

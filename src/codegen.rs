@@ -46,6 +46,16 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                         emit_print_instruction(&mut asm, string);
                     }
                 }
+                Instruction::Pop { dst } => {
+                    validate_pop_operand(dst)?;
+                    let dst = emit_operand(dst, &strings, &label.name)?;
+                    asm.push_str(&format!("  pop {dst}\n"));
+                }
+                Instruction::Push { src } => {
+                    validate_push_operand(src, &strings, &label.name)?;
+                    let src = emit_operand(src, &strings, &label.name)?;
+                    asm.push_str(&format!("  push {src}\n"));
+                }
                 Instruction::Ret => asm.push_str("  ret\n"),
                 Instruction::Syscall => asm.push_str("  syscall\n"),
             }
@@ -551,6 +561,59 @@ fn validate_address_copy_dst(dst: &Operand) -> Result<(), String> {
         _ => Err(String::from(
             "Address-of labels can only be copied into registers for now",
         )),
+    }
+}
+
+fn validate_push_operand(
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    if matches!(src, Operand::Pointer(_)) {
+        return Err(String::from("push source cannot be an address-of operand"));
+    }
+
+    if is_immediate_operand(src, strings, label_name) {
+        return Ok(());
+    }
+
+    validate_stack_width("push source", src)
+}
+
+fn validate_pop_operand(dst: &Operand) -> Result<(), String> {
+    if matches!(
+        dst,
+        Operand::Immediate(_) | Operand::Ident(_) | Operand::Pointer(_)
+    ) {
+        return Err(String::from(
+            "pop destination must be a 64-bit register or explicitly 64-bit memory operand",
+        ));
+    }
+
+    validate_stack_width("pop destination", dst)
+}
+
+fn validate_stack_width(name: &str, operand: &Operand) -> Result<(), String> {
+    match operand {
+        Operand::Register(register) => match register_width(register) {
+            Some(Width::Bits64) => Ok(()),
+            Some(width) => Err(format!(
+                "{name} must be 64-bit, found {}-bit register",
+                width.bits()
+            )),
+            None => Ok(()),
+        },
+        Operand::Dereference { width, .. } => match width.as_ref().map(memory_width_bits) {
+            Some(Width::Bits64) => Ok(()),
+            Some(width) => Err(format!(
+                "{name} must be 64-bit, found {}-bit memory operand",
+                width.bits()
+            )),
+            None => Err(format!(
+                "{name} memory operand requires an explicit 64-bit width"
+            )),
+        },
+        _ => Ok(()),
     }
 }
 
