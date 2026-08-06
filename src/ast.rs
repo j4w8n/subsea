@@ -27,18 +27,47 @@ pub struct Label {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Instruction {
-    Add { src: Operand, dst: Operand },
-    Copy { src: Operand, dst: Operand },
-    Exit { code: u8 },
-    Idiv { divisor: Operand },
-    Imul { src: Operand, dst: Operand },
-    Jmp { target: String },
-    Let { name: String, value: BindingValue },
-    Print { parts: Vec<PrintPart> },
-    Sub { src: Operand, dst: Operand },
+    Assign {
+        dst: Operand,
+        value: AssignmentValue,
+    },
+    Exit {
+        code: u8,
+    },
+    Idiv {
+        divisor: Operand,
+    },
+    Jmp {
+        target: String,
+    },
+    Let {
+        name: String,
+        value: BindingValue,
+    },
+    Print {
+        parts: Vec<PrintPart>,
+    },
     Syscall,
-    Udiv { divisor: Operand },
-    Umul { src: Operand, dst: Operand },
+    Udiv {
+        divisor: Operand,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum AssignmentValue {
+    Operand(Operand),
+    Binary {
+        op: MathOp,
+        lhs: Operand,
+        rhs: Operand,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MathOp {
+    Add,
+    Multiply,
+    Subtract,
 }
 
 #[derive(Debug, PartialEq, Clone)]

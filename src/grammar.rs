@@ -22,14 +22,11 @@ pub enum Token {
     Star,
     Text(String),
 
-    Add,
     Ampersand,
     Comma,
-    Copy,
     Directive(String),
     Exit,
     Idiv,
-    Imul,
     Jmp,
     Let,
     Literal,
@@ -38,10 +35,8 @@ pub enum Token {
     Pointer(String),
     Print,
     Register(String),
-    Sub,
     Syscall,
     Udiv,
-    Umul,
 }
 
 #[derive(Debug, PartialEq, Clone)]

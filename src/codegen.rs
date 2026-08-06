@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, BindingValue, Instruction, MemoryDeclaration,
-    MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressOperator, AddressTerm, AssignmentValue, BindingValue, Instruction, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
 };
 use std::collections::HashMap;
 
@@ -23,11 +23,8 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
 
         for instruction in &label.instructions {
             match instruction {
-                Instruction::Add { src, dst } => {
-                    emit_binary_instruction(&mut asm, "add", src, dst, &strings, &label.name)?;
-                }
-                Instruction::Copy { src, dst } => {
-                    emit_copy_instruction(&mut asm, src, dst, &strings, &label.name)?;
+                Instruction::Assign { dst, value } => {
+                    emit_assignment(&mut asm, dst, value, &strings, &label.name)?;
                 }
                 Instruction::Exit { code } => {
                     asm.push_str("  mov rax, 60\n");
@@ -37,9 +34,6 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Idiv { divisor } => {
                     let divisor = emit_operand(divisor, &strings, &label.name)?;
                     asm.push_str(&format!("  idiv {divisor}\n"));
-                }
-                Instruction::Imul { src, dst } => {
-                    emit_binary_instruction(&mut asm, "imul", src, dst, &strings, &label.name)?;
                 }
                 Instruction::Jmp { target } => {
                     asm.push_str(&format!("  jmp {target}\n"));
@@ -53,16 +47,10 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                         emit_print_instruction(&mut asm, string);
                     }
                 }
-                Instruction::Sub { src, dst } => {
-                    emit_binary_instruction(&mut asm, "sub", src, dst, &strings, &label.name)?;
-                }
                 Instruction::Syscall => asm.push_str("  syscall\n"),
                 Instruction::Udiv { divisor } => {
                     let divisor = emit_operand(divisor, &strings, &label.name)?;
                     asm.push_str(&format!("  div {divisor}\n"));
-                }
-                Instruction::Umul { src, dst } => {
-                    emit_binary_instruction(&mut asm, "imul", src, dst, &strings, &label.name)?;
                 }
             }
         }
@@ -279,9 +267,9 @@ mod tests {
                             width: None,
                         },
                     },
-                    Instruction::Copy {
-                        src: Operand::Ident(String::from("count")),
+                    Instruction::Assign {
                         dst: Operand::Register(String::from("rax")),
+                        value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
                     },
                     Instruction::Exit { code: 0 },
                 ],
@@ -336,9 +324,9 @@ mod tests {
             memory: Vec::new(),
             labels: vec![Label {
                 name: String::from("main"),
-                instructions: vec![Instruction::Copy {
-                    src: Operand::Immediate(66000),
+                instructions: vec![Instruction::Assign {
                     dst: Operand::Register(String::from("ax")),
+                    value: AssignmentValue::Operand(Operand::Immediate(66000)),
                 }],
             }],
         };
@@ -366,8 +354,7 @@ mod tests {
                             width: None,
                         },
                     },
-                    Instruction::Copy {
-                        src: Operand::Ident(String::from("count")),
+                    Instruction::Assign {
                         dst: Operand::Dereference {
                             address: Address {
                                 first: AddressTerm::Register(String::from("rsp")),
@@ -375,6 +362,7 @@ mod tests {
                             },
                             width: Some(MemoryWidth::U8),
                         },
+                        value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
                     },
                 ],
             }],
@@ -386,6 +374,30 @@ mod tests {
             error,
             "Immediate value 256 does not fit in 8-bit destination"
         );
+    }
+
+    #[test]
+    fn preserves_math_rhs_when_it_is_also_the_destination() {
+        let program = Program {
+            entry: String::from("main"),
+            memory: Vec::new(),
+            labels: vec![Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Assign {
+                    dst: Operand::Register(String::from("rax")),
+                    value: AssignmentValue::Binary {
+                        op: MathOp::Subtract,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Register(String::from("rax")),
+                    },
+                }],
+            }],
+        };
+
+        let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+        assert!(asm.contains("  neg rax\n"));
+        assert!(asm.contains("  add rax, rbx\n"));
     }
 
     #[test]
@@ -473,6 +485,67 @@ fn emit_binary_instruction(
     Ok(())
 }
 
+fn emit_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    value: &AssignmentValue,
+    strings: &StringTable,
+    label_name: &str,
+) -> Result<(), String> {
+    match value {
+        AssignmentValue::Operand(src) => emit_copy_instruction(asm, src, dst, strings, label_name),
+        AssignmentValue::Binary { op, lhs, rhs } => {
+            if !matches!(dst, Operand::Register(_)) {
+                return Err(String::from(
+                    "Math assignment destination must be a register for now",
+                ));
+            }
+
+            if lhs == dst {
+                let opcode = match op {
+                    MathOp::Add => "add",
+                    MathOp::Multiply => "imul",
+                    MathOp::Subtract => "sub",
+                };
+
+                return emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name);
+            }
+
+            if rhs == dst {
+                match op {
+                    MathOp::Add | MathOp::Multiply => {
+                        let opcode = match op {
+                            MathOp::Add => "add",
+                            MathOp::Multiply => "imul",
+                            MathOp::Subtract => unreachable!(),
+                        };
+
+                        return emit_binary_instruction(asm, opcode, lhs, dst, strings, label_name);
+                    }
+                    MathOp::Subtract => {
+                        let dst_operand = emit_operand(dst, strings, label_name)?;
+                        asm.push_str(&format!("  neg {dst_operand}\n"));
+
+                        return emit_binary_instruction(asm, "add", lhs, dst, strings, label_name);
+                    }
+                }
+            }
+
+            {
+                emit_copy_instruction(asm, lhs, dst, strings, label_name)?;
+
+                let opcode = match op {
+                    MathOp::Add => "add",
+                    MathOp::Multiply => "imul",
+                    MathOp::Subtract => "sub",
+                };
+
+                emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name)
+            }
+        }
+    }
+}
+
 fn emit_copy_instruction(
     asm: &mut String,
     src: &Operand,
@@ -529,7 +602,7 @@ fn validate_binary_operands(
         )
     {
         return Err(String::from(
-            "Cannot copy an immediate value directly into memory without an explicit width",
+            "Cannot assign an immediate value directly into memory without an explicit width",
         ));
     }
 
@@ -635,7 +708,7 @@ fn emit_operand(
             None => Ok(name.clone()),
         },
         Operand::Pointer(name) => Err(format!(
-            "Pointer operand &{name} is only supported as the source of copy"
+            "Pointer operand &{name} is only supported as the right side of assignment"
         )),
     }
 }

@@ -1,6 +1,6 @@
 use crate::ast::{
-    Address, AddressOperator, AddressTerm, BindingValue, Instruction, Label, MemoryDeclaration,
-    MemoryWidth, Operand, PrintPart, Program,
+    Address, AddressOperator, AddressTerm, AssignmentValue, BindingValue, Instruction, Label,
+    MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -135,14 +135,6 @@ impl Parser {
 
     fn parse_instruction(&mut self) -> Result<Instruction, String> {
         match self.advance() {
-            Some(Token::Add) => {
-                let (src, dst) = self.parse_binary_operands("add")?;
-                Ok(Instruction::Add { src, dst })
-            }
-            Some(Token::Copy) => {
-                let (src, dst) = self.parse_binary_operands("copy")?;
-                Ok(Instruction::Copy { src, dst })
-            }
             Some(Token::Exit) => {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
@@ -150,10 +142,6 @@ impl Parser {
             Some(Token::Idiv) => {
                 let divisor = self.parse_operand()?;
                 Ok(Instruction::Idiv { divisor })
-            }
-            Some(Token::Imul) => {
-                let (src, dst) = self.parse_binary_operands("imul")?;
-                Ok(Instruction::Imul { src, dst })
             }
             Some(Token::Jmp) => match self.advance() {
                 Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
@@ -194,22 +182,53 @@ impl Parser {
                     "Expected binding name or string literal after print, found end of input",
                 )),
             },
-            Some(Token::Sub) => {
-                let (src, dst) = self.parse_binary_operands("sub")?;
-                Ok(Instruction::Sub { src, dst })
-            }
             Some(Token::Syscall) => Ok(Instruction::Syscall),
             Some(Token::Udiv) => {
                 let divisor = self.parse_operand()?;
                 Ok(Instruction::Udiv { divisor })
             }
-            Some(Token::Umul) => {
-                let (src, dst) = self.parse_binary_operands("umul")?;
-                Ok(Instruction::Umul { src, dst })
+            Some(Token::Ampersand) => Err(String::from(
+                "Address-of syntax is only supported on the right side of assignment",
+            )),
+            Some(Token::Ident(name)) => self.parse_assignment(Operand::Ident(name)),
+            Some(Token::LBracket) => {
+                let address = self.parse_address()?;
+                self.expect(Token::RBracket, "Expected ']' after memory operand")?;
+                let width = self.parse_optional_memory_width()?;
+
+                self.parse_assignment(Operand::Dereference { address, width })
             }
+            Some(Token::Register(name)) => self.parse_assignment(Operand::Register(name)),
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
+    }
+
+    fn parse_assignment(&mut self, dst: Operand) -> Result<Instruction, String> {
+        self.expect(Token::Equals, "Expected '=' after assignment destination")?;
+
+        let lhs = self.parse_operand()?;
+        let value = match self.peek() {
+            Some(Token::Plus | Token::Minus | Token::Star | Token::Slash) => {
+                let op = match self.advance() {
+                    Some(Token::Plus) => MathOp::Add,
+                    Some(Token::Minus) => MathOp::Subtract,
+                    Some(Token::Star) => MathOp::Multiply,
+                    Some(Token::Slash) => {
+                        return Err(String::from(
+                            "Assignment division is not supported yet; use udiv or idiv",
+                        ));
+                    }
+                    _ => unreachable!(),
+                };
+                let rhs = self.parse_operand()?;
+
+                AssignmentValue::Binary { op, lhs, rhs }
+            }
+            _ => AssignmentValue::Operand(lhs),
+        };
+
+        Ok(Instruction::Assign { dst, value })
     }
 
     fn parse_print_literal(&mut self, value: String) -> Result<Instruction, String> {
@@ -361,17 +380,6 @@ impl Parser {
         } else {
             Err(String::from("Exit code must be between 0 and 255"))
         }
-    }
-
-    fn parse_binary_operands(&mut self, instruction: &str) -> Result<(Operand, Operand), String> {
-        let src = self.parse_operand()?;
-        self.expect(
-            Token::Comma,
-            &format!("Expected ',' after {instruction} source operand"),
-        )?;
-        let dst = self.parse_operand()?;
-
-        Ok((src, dst))
     }
 
     fn parse_operand(&mut self) -> Result<Operand, String> {
@@ -827,6 +835,37 @@ mod tests {
                 value: BindingValue::Integer {
                     value: 3,
                     width: Some(MemoryWidth::U8)
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_assignment_math() {
+        let mut parser = Parser::new(vec![
+            Token::Directive(String::from("entry")),
+            Token::Ident(String::from("main")),
+            Token::Ident(String::from("main")),
+            Token::Colon,
+            Token::LBrace,
+            Token::Register(String::from("rax")),
+            Token::Equals,
+            Token::Register(String::from("rbx")),
+            Token::Plus,
+            Token::NumberLiteral(String::from("3")),
+            Token::RBrace,
+        ]);
+
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(
+            program.labels[0].instructions[0],
+            Instruction::Assign {
+                dst: Operand::Register(String::from("rax")),
+                value: AssignmentValue::Binary {
+                    op: MathOp::Add,
+                    lhs: Operand::Register(String::from("rbx")),
+                    rhs: Operand::Immediate(3),
                 }
             }
         );
