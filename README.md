@@ -224,7 +224,9 @@ Currently supported Assembly-like instructions:
 ```text
 udiv operand
 idiv operand
+call label
 jmp label
+ret
 exit code
 syscall
 ```
@@ -234,6 +236,24 @@ syscall
 `rdx:rax = umul lhs, rhs` lowers to x86-64 `mul` and writes the unsigned 128-bit result across `rdx:rax`. `rdx:rax = imul lhs, rhs` lowers to x86-64 one-operand `imul` and writes the signed 128-bit result across `rdx:rax`. The right operand cannot be an immediate value because x86-64 widened multiply requires a register or memory operand.
 
 `udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
+
+`call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
+
+```ss
+main: {
+  rdi = 2
+  rsi = 3
+  call add
+  // result is now in rax
+
+  exit 0
+}
+
+add: {
+  rax = rdi + rsi
+  ret
+}
+```
 
 `exit <code>` lowers to the Linux x86-64 `exit` syscall. Exit codes must be between `0` and `255`:
 
