@@ -213,17 +213,17 @@ rax = rax - 1
 rbx = count * 2
 rdx:rax = umul rbx, rcx
 rdx:rax = imul rbx, rcx
+rdx:rax = udiv rbx, rcx
+rdx:rax = idiv rbx, rcx
 ```
 
-The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Use `rdx:rax = umul lhs, rhs` or `rdx:rax = imul lhs, rhs` when you need the full widened multiply result. Division remains explicit with `udiv` and `idiv` because those instructions use x86-64's implicit `rdx:rax`, `rax`, and `rdx` registers.
+The left side is the destination that changes. Math assignment currently supports `+`, `-`, and low-result `*`. Use `rdx:rax = umul lhs, rhs` or `rdx:rax = imul lhs, rhs` when you need the full widened multiply result. Use `rdx:rax = udiv lhs, rhs` or `rdx:rax = idiv lhs, rhs` when you need division; the quotient is written to `rax` and the remainder is written to `rdx`.
 
 ## Instructions
 
 Currently supported Assembly-like instructions:
 
 ```text
-udiv operand
-idiv operand
 call label
 jmp label
 ret
@@ -233,9 +233,26 @@ syscall
 
 `*` keeps the low bits of the destination width. Signedness does not affect the low result, so there is no separate signed/unsigned multiply form for ordinary assignment math.
 
-`rdx:rax = umul lhs, rhs` lowers to x86-64 `mul` and writes the unsigned 128-bit result across `rdx:rax`. `rdx:rax = imul lhs, rhs` lowers to x86-64 one-operand `imul` and writes the signed 128-bit result across `rdx:rax`. The right operand cannot be an immediate value because x86-64 widened multiply requires a register or memory operand.
+`rdx:rax = umul lhs, rhs` lowers to x86-64 `mul` and writes the unsigned 128-bit result across `rdx:rax`. `rdx:rax = imul lhs, rhs` lowers to x86-64 one-operand `imul` and writes the signed 128-bit result across `rdx:rax`.
 
-`udiv` lowers to x86-64 `div`. `idiv` lowers to x86-64 `idiv`. Both intentionally follow x86-64's one-operand division form. The dividend is implicitly `rdx:rax`, the quotient is written to `rax`, and the remainder is written to `rdx`.
+`rdx:rax = udiv lhs, rhs` lowers to x86-64 `div`. `rdx:rax = idiv lhs, rhs` lowers to x86-64 `idiv`. Both write the quotient to `rax` and the remainder to `rdx`.
+
+Widened multiply and divide operands must already be register or memory operands. Numeric literals and integer bindings are immediate values, so put them in explicit registers first:
+
+```ss
+r10 = 100
+r11 = 10
+rdx:rax = umul r10, r11
+rdx:rax = udiv r10, r11
+```
+
+These are invalid because `100`, `10`, and `count` are immediate values:
+
+```ss
+let count = 10
+rdx:rax = umul 100, 10
+rdx:rax = udiv r10, count
+```
 
 `call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
 
