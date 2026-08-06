@@ -168,6 +168,10 @@ print "Printed directly!\n"
 let count = 3
 print count
 
+rax = 42
+print rax
+print "\n"
+
 let byte_count:u8 = 3
 print "count = {}\n", byte_count
 
@@ -176,7 +180,7 @@ let kind = "lang"
 print "Hello, {} {}\n", name, kind
 ```
 
-Bindings are currently label-local. `print message` can print a binding declared with `let` in the same label block. `print "..."` prints literal text directly.
+Bindings are currently label-local. `print message` can print a binding declared with `let` in the same label block. `print "..."` prints literal text directly. `print rax` prints a runtime integer operand as unsigned decimal text.
 
 Integer bindings can also be used as immediate operands:
 
@@ -201,6 +205,15 @@ print "Hello, {}\n", name
 
 Each `{}` consumes one following binding argument. The number of placeholders must match the number of arguments. Format specifiers like `{x}` or `{i64}` are not supported yet.
 
+Runtime integer printing is intentionally simple for now. It accepts registers and integer immediates, emits unsigned decimal digits, and does not add a newline automatically:
+
+```ss
+rax = 42
+print "rax = "
+print rax
+print "\n"
+```
+
 Supported string escapes:
 
 ```text
@@ -210,10 +223,11 @@ Supported string escapes:
 \\
 ```
 
-`print` lowers to the Linux x86-64 `write` syscall and clobbers syscall registers:
+`print` lowers to the Linux x86-64 `write` syscall. Runtime integer printing also uses `rax` and `rdx` for decimal conversion. Preserve values yourself with `push` and `pop` if you need them after printing:
 
 ```text
-rax rdi rsi rdx
+// print may clobber these registers
+rax rdi rsi rdx rcx r11
 ```
 
 ## Assembly-like Power
@@ -290,6 +304,166 @@ main: {
 .loop:
   rcx = rcx - 1
   jmp .loop if rcx u> 0
+
+.done:
+  exit 0
+}
+```
+
+## Control-Flow Patterns
+
+Conditional jumps and local labels are enough to express common structured control-flow patterns directly.
+
+While loop:
+
+```ss
+main: {
+  r8 = 0
+
+.loop:
+  jmp .done if r8 u>= 5
+  print r8
+  print "\n"
+  r8 = r8 + 1
+  jmp .loop
+
+.done:
+  exit 0
+}
+```
+
+Do-while loop:
+
+```ss
+main: {
+  r8 = 0
+
+.loop:
+  print r8
+  print "\n"
+  r8 = r8 + 1
+  jmp .loop if r8 u< 5
+
+  exit 0
+}
+```
+
+For-style counted loop:
+
+```ss
+main: {
+  r8 = 0   // i
+  r9 = 10  // limit
+
+.loop:
+  jmp .done if r8 u>= r9
+  print r8
+  print "\n"
+  r8 = r8 + 1
+  jmp .loop
+
+.done:
+  exit 0
+}
+```
+
+If/else:
+
+```ss
+main: {
+  rax = 3
+
+  jmp .else if rax != 0
+  print "zero\n"
+  jmp .done
+
+.else:
+  print "non-zero\n"
+
+.done:
+  exit 0
+}
+```
+
+Guard clause or early exit:
+
+```ss
+main: {
+  rax = 0
+  jmp .fail if rax == 0
+
+  print "ok\n"
+  exit 0
+
+.fail:
+  print "fail\n"
+  exit 1
+}
+```
+
+Break and continue:
+
+```ss
+main: {
+  r8 = 0
+
+.loop:
+  r8 = r8 + 1
+  jmp .done if r8 u> 10  // break
+  jmp .loop if r8 == 5   // continue
+  print r8
+  print "\n"
+  jmp .loop
+
+.done:
+  exit 0
+}
+```
+
+State machine:
+
+```ss
+main: {
+  rax = 0
+  jmp .state_start
+
+.state_start:
+  print "start\n"
+  rax = 1
+  jmp .state_done if rax == 1
+  jmp .state_error
+
+.state_done:
+  print "done\n"
+  exit 0
+
+.state_error:
+  print "error\n"
+  exit 1
+}
+```
+
+Array iteration with scaled addressing:
+
+```ss
+mem values:u64(4)
+
+main: {
+  [values]:u64 = 10
+  [values + 8]:u64 = 20
+  [values + 16]:u64 = 30
+  [values + 24]:u64 = 40
+
+  r8 = 0
+  r9 = 4
+
+.loop:
+  jmp .done if r8 u>= r9
+  rax = [values + r8 * 8]:u64
+  print rax
+  print "\n"
+  r8 = r8 + 1
+  jmp .loop
 
 .done:
   exit 0
