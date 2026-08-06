@@ -212,6 +212,28 @@ fn rejects_non_rdx_rax_widened_multiply_destination() {
 }
 
 #[test]
+fn rejects_non_rdx_rax_widened_divide_destination() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("r9"),
+            low: String::from("r8"),
+        },
+        value: AssignmentValue::WideDivide {
+            signed: false,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Register(String::from("rcx")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Widened division destination must be rdx:rax, found r9:r8"
+    );
+}
+
+#[test]
 fn rejects_immediate_widened_multiply_rhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {

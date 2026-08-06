@@ -144,18 +144,30 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             match s.as_str() {
                 "true" => Some(Token::Bool(true)),
                 "false" => Some(Token::Bool(false)),
+                "i" if matches!(chars.peek(), Some('*')) => {
+                    chars.next();
+                    Some(Token::IStar)
+                }
+                "i" if matches!(chars.peek(), Some('/')) => {
+                    chars.next();
+                    Some(Token::ISlash)
+                }
                 "call" => Some(Token::Call),
                 "exit" => Some(Token::Exit),
-                "idiv" => Some(Token::Idiv),
-                "imul" => Some(Token::Imul),
                 "jmp" => Some(Token::Jmp),
                 "let" => Some(Token::Let),
                 "mem" => Some(Token::Mem),
                 "print" => Some(Token::Print),
                 "ret" => Some(Token::Ret),
                 "syscall" => Some(Token::Syscall),
-                "udiv" => Some(Token::Udiv),
-                "umul" => Some(Token::Umul),
+                "u" if matches!(chars.peek(), Some('*')) => {
+                    chars.next();
+                    Some(Token::UStar)
+                }
+                "u" if matches!(chars.peek(), Some('/')) => {
+                    chars.next();
+                    Some(Token::USlash)
+                }
                 register if is_register(register) => Some(Token::Register(s)),
                 _ => Some(Token::Ident(s)),
             }

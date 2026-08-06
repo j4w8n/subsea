@@ -133,9 +133,8 @@ fn parses_widened_multiply_assignment() {
         Token::Colon,
         Token::Register(String::from("rax")),
         Token::Equals,
-        Token::Umul,
         Token::Register(String::from("rbx")),
-        Token::Comma,
+        Token::UStar,
         Token::Register(String::from("rcx")),
     ]);
 
@@ -165,9 +164,8 @@ fn parses_widened_divide_assignment() {
         Token::Colon,
         Token::Register(String::from("rax")),
         Token::Equals,
-        Token::Idiv,
         Token::Register(String::from("rbx")),
-        Token::Comma,
+        Token::ISlash,
         Token::Register(String::from("rcx")),
     ]);
 

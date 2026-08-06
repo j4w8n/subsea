@@ -146,9 +146,6 @@ impl Parser {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
             }
-            Some(Token::Idiv | Token::Udiv) => Err(String::from(
-                "Division is only supported on the right side of rdx:rax assignment",
-            )),
             Some(Token::Jmp) => match self.advance() {
                 Some(Token::Ident(target)) => Ok(Instruction::Jmp { target }),
                 Some(token) => Err(format!("Expected jump target label, found {token:?}")),
@@ -242,53 +239,66 @@ impl Parser {
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
-        if matches!(
-            self.peek(),
-            Some(Token::Idiv | Token::Imul | Token::Udiv | Token::Umul)
-        ) {
-            return self.parse_wide_math_assignment(dst);
-        }
-
         let lhs = self.parse_operand()?;
         let value = match self.peek() {
-            Some(Token::Plus | Token::Minus | Token::Star | Token::Slash) => {
-                let op = match self.advance() {
-                    Some(Token::Plus) => MathOp::Add,
-                    Some(Token::Minus) => MathOp::Subtract,
-                    Some(Token::Star) => MathOp::Multiply,
-                    Some(Token::Slash) => {
-                        return Err(String::from(
-                            "Use rdx:rax = udiv lhs, rhs or rdx:rax = idiv lhs, rhs for division",
-                        ));
+            Some(
+                Token::ISlash
+                | Token::IStar
+                | Token::Plus
+                | Token::Minus
+                | Token::Slash
+                | Token::Star
+                | Token::USlash
+                | Token::UStar,
+            ) => match self.advance() {
+                Some(Token::Plus) => {
+                    let rhs = self.parse_operand()?;
+                    AssignmentValue::Binary {
+                        op: MathOp::Add,
+                        lhs,
+                        rhs,
                     }
-                    _ => unreachable!(),
-                };
-                let rhs = self.parse_operand()?;
+                }
+                Some(Token::Minus) => {
+                    let rhs = self.parse_operand()?;
+                    AssignmentValue::Binary {
+                        op: MathOp::Subtract,
+                        lhs,
+                        rhs,
+                    }
+                }
+                Some(Token::Star) => {
+                    let rhs = self.parse_operand()?;
+                    AssignmentValue::Binary {
+                        op: MathOp::Multiply,
+                        lhs,
+                        rhs,
+                    }
+                }
+                Some(Token::Slash) => {
+                    return Err(String::from(
+                        "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
+                    ));
+                }
+                Some(operator @ (Token::ISlash | Token::IStar | Token::USlash | Token::UStar)) => {
+                    let (is_division, signed) = match operator {
+                        Token::ISlash => (true, true),
+                        Token::IStar => (false, true),
+                        Token::USlash => (true, false),
+                        Token::UStar => (false, false),
+                        _ => unreachable!(),
+                    };
+                    let rhs = self.parse_operand()?;
 
-                AssignmentValue::Binary { op, lhs, rhs }
-            }
+                    if is_division {
+                        AssignmentValue::WideDivide { signed, lhs, rhs }
+                    } else {
+                        AssignmentValue::WideMultiply { signed, lhs, rhs }
+                    }
+                }
+                _ => unreachable!(),
+            },
             _ => AssignmentValue::Operand(lhs),
-        };
-
-        Ok(Instruction::Assign { dst, value })
-    }
-
-    fn parse_wide_math_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
-        let (is_division, signed) = match self.advance() {
-            Some(Token::Idiv) => (true, true),
-            Some(Token::Imul) => (false, true),
-            Some(Token::Udiv) => (true, false),
-            Some(Token::Umul) => (false, false),
-            _ => unreachable!(),
-        };
-        let lhs = self.parse_operand()?;
-        self.expect(Token::Comma, "Expected ',' after widened math left operand")?;
-        let rhs = self.parse_operand()?;
-
-        let value = if is_division {
-            AssignmentValue::WideDivide { signed, lhs, rhs }
-        } else {
-            AssignmentValue::WideMultiply { signed, lhs, rhs }
         };
 
         Ok(Instruction::Assign { dst, value })

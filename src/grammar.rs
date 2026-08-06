@@ -6,6 +6,8 @@ pub enum Token {
     DoubleColon,
     Equals,
     Ident(String),
+    ISlash,
+    IStar,
     LBrace,
     LBracket,
     LParen,
@@ -21,14 +23,14 @@ pub enum Token {
     Slash,
     Star,
     Text(String),
+    USlash,
+    UStar,
 
     Ampersand,
     Call,
     Comma,
     Directive(String),
     Exit,
-    Idiv,
-    Imul,
     Jmp,
     Let,
     Literal,
@@ -39,8 +41,6 @@ pub enum Token {
     Register(String),
     Ret,
     Syscall,
-    Udiv,
-    Umul,
 }
 
 #[derive(Debug, PartialEq, Clone)]

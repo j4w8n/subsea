@@ -333,7 +333,7 @@ fn emit_assignment(
             }
         }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => {
-            validate_wide_multiply_target(dst)?;
+            validate_wide_math_target("Widened multiply", dst)?;
             validate_wide_math_operand("Widened multiply left operand", lhs, strings, label_name)?;
             validate_wide_math_operand("Widened multiply right operand", rhs, strings, label_name)?;
 
@@ -347,7 +347,7 @@ fn emit_assignment(
             Ok(())
         }
         AssignmentValue::WideDivide { signed, lhs, rhs } => {
-            validate_wide_multiply_target(dst)?;
+            validate_wide_math_target("Widened division", dst)?;
             validate_wide_math_operand("Widened division left operand", lhs, strings, label_name)?;
             validate_wide_math_operand("Widened division right operand", rhs, strings, label_name)?;
 
@@ -378,14 +378,14 @@ fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String>
     }
 }
 
-fn validate_wide_multiply_target(dst: &AssignmentTarget) -> Result<(), String> {
+fn validate_wide_math_target(operation: &str, dst: &AssignmentTarget) -> Result<(), String> {
     match dst {
         AssignmentTarget::RegisterPair { high, low } if high == "rdx" && low == "rax" => Ok(()),
         AssignmentTarget::RegisterPair { high, low } => Err(format!(
-            "Widened multiply destination must be rdx:rax, found {high}:{low}"
+            "{operation} destination must be rdx:rax, found {high}:{low}"
         )),
         AssignmentTarget::Operand(_) => Err(String::from(
-            "Widened multiply destination must be the register pair rdx:rax",
+            "Widened math destination must be the register pair rdx:rax",
         )),
     }
 }
