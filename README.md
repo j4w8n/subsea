@@ -4,6 +4,21 @@ A more readable, learnable alternative to Assembly, with the same power to direc
 
 The current compiler targets Linux x86-64 by lowering `.ss` source files to assembly, assembling with `as`, and linking with `ld`.
 
+## Assembly-Like Power
+
+Subsea allows direct control over registers, memory, and Linux syscalls while keeping syntax more readable than raw assembly.
+
+```ss
+// This program immediately exits with an exit code of 0.
+main: {
+  rax = 60  // exit syscall number
+  rdi = 0   // exit status
+  syscall
+}
+```
+
+> The above is a simple example. You can actually use `exit 0` to do the same thing as those three lines.
+
 ## Requirements
 
 Subsea currently requires Linux x86-64 and GNU binutils:
@@ -49,7 +64,7 @@ emit-asm  Compile to x86-64 assembly and print it
 Use `-o` with `build` to choose the executable path:
 
 ```sh
-subsea build main.ss -o main
+subsea build main.ss -o my_program
 ```
 
 Build artifacts are written to:
@@ -89,7 +104,9 @@ main: {
 }
 ```
 
-Local labels can be used as markers inside a block. Local labels start with `.` and are scoped to the containing top-level label, so different blocks can reuse names like `.loop` and `.done` without collisions:
+Local labels can be used as markers inside a block. They don't start a nested block, so they don't use braces or own the instructions after them. This is also why we choose to not indent a local label. Think of it as a named postion in the parent block that code can jump to.
+
+Local labels start with `.` and are scoped to the containing top-level label, so different blocks can reuse names like `.loop:` and `.done:` without collisions:
 
 ```ss
 main: {
@@ -106,8 +123,6 @@ other: {
 }
 ```
 
-Nested labels must be local. Write `.loop:`, not `loop:`, inside a block.
-
 Top-level bare labels are allowed when you only need a jump or call target:
 
 ```ss
@@ -118,20 +133,7 @@ main: {
 skip:
 ```
 
-Labels fall through naturally. If a label does not end with `jmp`, `ret`, `exit`, or another control-flow transfer, execution continues into the next emitted label.
-
-## Assembly-Like Power
-
-Subsea allows direct control over registers, memory, and Linux syscalls while keeping syntax more readable than raw assembly.
-
-```ss
-// This program immediately exits with an exit code of 0.
-main: {
-  rax = 60  // exit syscall number
-  rdi = 0   // exit status
-  syscall
-}
-```
+Labels fall through naturally. If execution reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
 
 ## Registers
 
