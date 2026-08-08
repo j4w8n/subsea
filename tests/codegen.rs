@@ -77,9 +77,28 @@ fn emits_runtime_integer_print() {
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains("  mov rax, rax\n"));
-    assert!(asm.contains(".L.main.print_1_loop:\n"));
+    assert!(asm.contains(".L.__subsea.main.print_1_loop:\n"));
     assert!(asm.contains("  div rbx\n"));
     assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn generated_print_labels_do_not_collide_with_local_labels() {
+    let program = main_program(vec![
+        Instruction::Label {
+            name: String::from(".L.main.print_1_loop"),
+        },
+        Instruction::Print {
+            parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".L.main.print_1_loop:\n"));
+    assert!(asm.contains(".L.__subsea.main.print_1_loop:\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
@@ -102,6 +121,27 @@ fn uses_integer_binding_as_immediate_operand() {
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains("  mov rax, 3\n"));
+}
+
+#[test]
+fn rejects_string_binding_as_operand() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: String::from("message"),
+            value: BindingValue::String(String::from("hi")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::Ident(String::from("message"))),
+        },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "String binding \"message\" in label \"main\" cannot be used as an operand"
+    );
 }
 
 #[test]
@@ -283,7 +323,7 @@ fn rejects_large_immediate_for_64_bit_memory_destination() {
 
     assert_eq!(
         error,
-        "Immediate value 2147483648 does not fit in 64-bit destination"
+        "Immediate value 2147483648 cannot be encoded directly into a 64-bit memory destination; move it through a 64-bit register first"
     );
 }
 
@@ -760,6 +800,34 @@ fn allows_stack_label_to_end_with_explicit_exit_syscall() {
         Instruction::Assign {
             dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
             value: AssignmentValue::Operand(Operand::Immediate(60)),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rdi"))),
+            value: AssignmentValue::Operand(Operand::Immediate(0)),
+        },
+        Instruction::Syscall,
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn allows_stack_label_to_end_with_exit_syscall_after_extra_setup() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("value"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(1),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::Immediate(60)),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+            value: AssignmentValue::Operand(Operand::Immediate(123)),
         },
         Instruction::Assign {
             dst: AssignmentTarget::Operand(Operand::Register(String::from("rdi"))),

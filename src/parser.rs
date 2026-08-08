@@ -944,9 +944,34 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
 
     for label in labels {
         let mut bindings = HashSet::new();
+        let mut operand_bindings = HashSet::new();
         for instruction in &label.instructions {
-            if let Instruction::Const { name, .. } | Instruction::Stack { name, .. } = instruction {
-                bindings.insert(name.as_str());
+            match instruction {
+                Instruction::Const { name, value } => {
+                    if label_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level label",
+                            label.name
+                        ));
+                    }
+
+                    bindings.insert(name.as_str());
+                    if matches!(value, BindingValue::Integer { .. }) {
+                        operand_bindings.insert(name.as_str());
+                    }
+                }
+                Instruction::Stack { name, .. } => {
+                    if label_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level label",
+                            label.name
+                        ));
+                    }
+
+                    bindings.insert(name.as_str());
+                    operand_bindings.insert(name.as_str());
+                }
+                _ => {}
             }
         }
 
@@ -954,6 +979,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
             validate_instruction_symbols(
                 instruction,
                 &bindings,
+                &operand_bindings,
                 &memory_names,
                 &label_names,
                 &label.name,
@@ -967,6 +993,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
 fn validate_instruction_symbols(
     instruction: &Instruction,
     bindings: &HashSet<&str>,
+    operand_bindings: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
@@ -1024,7 +1051,14 @@ fn validate_instruction_symbols(
     }
 
     for operand in operands {
-        validate_operand_symbol(operand, bindings, memory, labels, current_label)?;
+        validate_operand_symbol(
+            operand,
+            bindings,
+            operand_bindings,
+            memory,
+            labels,
+            current_label,
+        )?;
     }
     Ok(())
 }
@@ -1032,14 +1066,23 @@ fn validate_instruction_symbols(
 fn validate_operand_symbol(
     operand: &Operand,
     bindings: &HashSet<&str>,
+    operand_bindings: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
 ) -> Result<(), String> {
     match operand {
-        Operand::Ident(name) if !bindings.contains(name.as_str()) => Err(format!(
-            "Unknown symbol {name:?} in label {current_label:?}"
-        )),
+        Operand::Ident(name) if !operand_bindings.contains(name.as_str()) => {
+            if bindings.contains(name.as_str()) {
+                Err(format!(
+                    "String binding {name:?} in label {current_label:?} cannot be used as an operand"
+                ))
+            } else {
+                Err(format!(
+                    "Unknown symbol {name:?} in label {current_label:?}"
+                ))
+            }
+        }
         Operand::Pointer(name)
             if !memory.contains(name.as_str()) && !labels.contains(name.as_str()) =>
         {
@@ -1096,75 +1139,5 @@ fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
 }
 
 fn is_register_name(s: &str) -> bool {
-    matches!(
-        s,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rdi"
-            | "rsi"
-            | "rbp"
-            | "rsp"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "edi"
-            | "esi"
-            | "ebp"
-            | "esp"
-            | "ax"
-            | "bx"
-            | "cx"
-            | "dx"
-            | "di"
-            | "si"
-            | "bp"
-            | "sp"
-            | "al"
-            | "bl"
-            | "cl"
-            | "dl"
-            | "ah"
-            | "bh"
-            | "ch"
-            | "dh"
-            | "dil"
-            | "sil"
-            | "bpl"
-            | "spl"
-            | "r8"
-            | "r9"
-            | "r10"
-            | "r11"
-            | "r12"
-            | "r13"
-            | "r14"
-            | "r15"
-            | "r8d"
-            | "r9d"
-            | "r10d"
-            | "r11d"
-            | "r12d"
-            | "r13d"
-            | "r14d"
-            | "r15d"
-            | "r8w"
-            | "r9w"
-            | "r10w"
-            | "r11w"
-            | "r12w"
-            | "r13w"
-            | "r14w"
-            | "r15w"
-            | "r8b"
-            | "r9b"
-            | "r10b"
-            | "r11b"
-            | "r12b"
-            | "r13b"
-            | "r14b"
-            | "r15b"
-    )
+    crate::register::is_register(s)
 }

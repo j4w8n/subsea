@@ -62,6 +62,18 @@ fn build_accepts_flags_before_source_path() {
 }
 
 #[test]
+fn build_rejects_duplicate_timings_flag() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["build", "-t", "--timings", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Timings flag was already provided"));
+}
+
+#[test]
 fn run_removes_its_build_directory() {
     let _guard = CLI_LOCK.lock().unwrap();
     let before = build_dirs();

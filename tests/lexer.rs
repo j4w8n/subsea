@@ -28,6 +28,13 @@ fn rejects_non_ascii_identifier_start() {
 }
 
 #[test]
+fn rejects_decimal_number_literal() {
+    let error = lex_one("1.5").unwrap_err();
+
+    assert_eq!(error, "Decimal number literals are not supported: 1.5");
+}
+
+#[test]
 fn lexes_comparison_operators() {
     assert_eq!(lex_one("==").unwrap(), Some(Token::EqualsEquals));
     assert_eq!(lex_one("!=").unwrap(), Some(Token::NotEquals));

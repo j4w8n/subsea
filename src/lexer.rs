@@ -149,7 +149,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             return Err(String::from("Unterminated string literal"));
         }
         Some(c) if c.is_ascii_digit() => {
-            let num_str = lex_number(c, chars);
+            let num_str = lex_number(c, chars)?;
             Some(Token::NumberLiteral(num_str))
         }
         Some(c) if is_ident_start(c) => {
@@ -247,7 +247,7 @@ fn is_ident_continue(c: char) -> bool {
     c == '_' || c.is_ascii_alphanumeric()
 }
 
-fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> String {
+fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> Result<String, String> {
     let mut num_str = String::from(first);
 
     while let Some(&c) = chars.peek() {
@@ -274,10 +274,14 @@ fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> String {
                     break;
                 }
             }
+
+            return Err(format!(
+                "Decimal number literals are not supported: {num_str}"
+            ));
         }
     }
 
-    num_str
+    Ok(num_str)
 }
 
 fn is_register(s: &str) -> bool {

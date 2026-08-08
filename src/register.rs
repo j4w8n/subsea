@@ -17,3 +17,25 @@ pub(crate) fn width(name: &str) -> Option<Width> {
 pub fn is_register(name: &str) -> bool {
     width(name).is_some()
 }
+
+pub(crate) fn family(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "rax" | "eax" | "ax" | "al" | "ah" => "rax",
+        "rbx" | "ebx" | "bx" | "bl" | "bh" => "rbx",
+        "rcx" | "ecx" | "cx" | "cl" | "ch" => "rcx",
+        "rdx" | "edx" | "dx" | "dl" | "dh" => "rdx",
+        "rdi" | "edi" | "di" | "dil" => "rdi",
+        "rsi" | "esi" | "si" | "sil" => "rsi",
+        "rbp" | "ebp" | "bp" | "bpl" => "rbp",
+        "rsp" | "esp" | "sp" | "spl" => "rsp",
+        "r8" | "r8d" | "r8w" | "r8b" => "r8",
+        "r9" | "r9d" | "r9w" | "r9b" => "r9",
+        "r10" | "r10d" | "r10w" | "r10b" => "r10",
+        "r11" | "r11d" | "r11w" | "r11b" => "r11",
+        "r12" | "r12d" | "r12w" | "r12b" => "r12",
+        "r13" | "r13d" | "r13w" | "r13b" => "r13",
+        "r14" | "r14d" | "r14w" | "r14b" => "r14",
+        "r15" | "r15d" | "r15w" | "r15b" => "r15",
+        _ => return None,
+    })
+}

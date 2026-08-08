@@ -100,6 +100,7 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     let mut source_path = None;
     let mut output_path = None;
     let mut show_timings = false;
+    let mut timings_provided = false;
     let mut position = 0;
 
     while position < args.len() {
@@ -117,7 +118,14 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
 
                 output_path = Some(PathBuf::from(path));
             }
-            "--timings" | "-t" => show_timings = true,
+            "--timings" | "-t" => {
+                if timings_provided {
+                    return Err(String::from("Timings flag was already provided"));
+                }
+
+                timings_provided = true;
+                show_timings = true;
+            }
             flag if flag.starts_with('-') => return Err(format!("Unknown build flag {flag:?}")),
             path => {
                 if source_path.is_some() {

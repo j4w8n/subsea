@@ -3,7 +3,7 @@ use subsea::ast::{
     MemoryDeclaration, MemoryWidth, Operand, PrintPart,
 };
 use subsea::grammar::Token;
-use subsea::parser::Parser;
+use subsea::parser::{Parser, validate_program_symbols};
 
 fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
     Parser::new(tokens).parse_program()
@@ -43,6 +43,28 @@ fn parses_integer_binding() {
                 width: None,
             },
         }
+    );
+}
+
+#[test]
+fn rejects_string_binding_as_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Const,
+        Token::Ident(String::from("message")),
+        Token::Equals,
+        Token::Text(String::from("hi")),
+        Token::Register(String::from("rax")),
+        Token::Equals,
+        Token::Ident(String::from("message")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+    let error = validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "String binding \"message\" in label \"main\" cannot be used as an operand"
     );
 }
 
@@ -566,6 +588,56 @@ fn rejects_label_that_conflicts_with_memory_name() {
     assert_eq!(error, "Label \"count\" conflicts with top-level memory");
     program.labels.pop();
     subsea::parser::validate_program_symbols(&program).unwrap();
+}
+
+#[test]
+fn rejects_binding_that_conflicts_with_top_level_label() {
+    let program = parse(vec![
+        Token::Ident(String::from("main")),
+        Token::Colon,
+        Token::LBrace,
+        Token::Const,
+        Token::Ident(String::from("count")),
+        Token::Equals,
+        Token::NumberLiteral(String::from("1")),
+        Token::RBrace,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+    ])
+    .unwrap();
+
+    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Name \"count\" in label \"main\" conflicts with top-level label"
+    );
+}
+
+#[test]
+fn rejects_stack_variable_that_conflicts_with_top_level_label() {
+    let program = parse(vec![
+        Token::Ident(String::from("main")),
+        Token::Colon,
+        Token::LBrace,
+        Token::Stack,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+        Token::Ident(String::from("u64")),
+        Token::Equals,
+        Token::NumberLiteral(String::from("1")),
+        Token::RBrace,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+    ])
+    .unwrap();
+
+    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Name \"count\" in label \"main\" conflicts with top-level label"
+    );
 }
 
 #[test]

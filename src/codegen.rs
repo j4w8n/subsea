@@ -492,26 +492,26 @@ fn previous_instructions_set_exit_syscall(
     instructions: &[Instruction],
     syscall_index: usize,
 ) -> bool {
-    let Some(Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(rax)),
-        value: AssignmentValue::Operand(Operand::Immediate(60)),
-    }) = syscall_index
-        .checked_sub(2)
-        .and_then(|index| instructions.get(index))
-    else {
-        return false;
-    };
-    let Some(Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(rdi)),
-        ..
-    }) = syscall_index
-        .checked_sub(1)
-        .and_then(|index| instructions.get(index))
-    else {
-        return false;
-    };
+    let mut rax_is_exit = false;
+    let mut rdi_is_set = false;
 
-    rax == "rax" && rdi == "rdi"
+    for instruction in &instructions[..syscall_index] {
+        if let Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(register)),
+            value,
+        } = instruction
+        {
+            match register.as_str() {
+                "rax" => {
+                    rax_is_exit = matches!(value, AssignmentValue::Operand(Operand::Immediate(60)));
+                }
+                "rdi" => rdi_is_set = true,
+                _ => {}
+            }
+        }
+    }
+
+    rax_is_exit && rdi_is_set
 }
 
 fn validate_stack_register_use(label: &Label, stack: &StackFrame) -> Result<(), String> {
@@ -765,8 +765,8 @@ fn emit_print_operand_instruction(
 
     load_print_operand(asm, operand, strings, label_name, stack)?;
 
-    let loop_label = format!(".L.{label_name}.print_{index}_loop");
-    let done_label = format!(".L.{label_name}.print_{index}_done");
+    let loop_label = format!(".L.__subsea.{label_name}.print_{index}_loop");
+    let done_label = format!(".L.__subsea.{label_name}.print_{index}_done");
 
     asm.push_str("  push rbx\n");
     asm.push_str("  sub rsp, 40\n");
@@ -1242,7 +1242,13 @@ fn validate_immediate_range(value: i128, destination: ImmediateDestination) -> R
             i32::MIN as i128 <= value && value <= i32::MAX as i128
         }
         ImmediateDestination::Memory(MemoryWidth::I64 | MemoryWidth::U64) => {
-            i32::MIN as i128 <= value && value <= i32::MAX as i128
+            if i32::MIN as i128 <= value && value <= i32::MAX as i128 {
+                true
+            } else {
+                return Err(format!(
+                    "Immediate value {value} cannot be encoded directly into a 64-bit memory destination; move it through a 64-bit register first"
+                ));
+            }
         }
         ImmediateDestination::Memory(MemoryWidth::U8) => 0 <= value && value <= u8::MAX as i128,
         ImmediateDestination::Memory(MemoryWidth::U16) => 0 <= value && value <= u16::MAX as i128,
@@ -1366,7 +1372,15 @@ fn emit_operand(
                 .get(&(label_name.to_string(), name.clone()))
             {
                 Some(binding) => Ok(binding.value.to_string()),
-                None => Ok(name.clone()),
+                None if strings
+                    .bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "String binding {name:?} in label {label_name:?} cannot be used as an operand"
+                    ))
+                }
+                None => Err(format!("Unknown binding {name:?} in label {label_name:?}")),
             },
         },
         Operand::Pointer(name) => Err(format!(
@@ -1512,29 +1526,8 @@ fn address_term_uses_register_family(term: &AddressTerm, register: &str) -> bool
 }
 
 fn same_register_family(left: &str, right: &str) -> bool {
-    register_family(left).is_some_and(|family| register_family(right) == Some(family))
-}
-
-fn register_family(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "rax" | "eax" | "ax" | "al" | "ah" => "rax",
-        "rbx" | "ebx" | "bx" | "bl" | "bh" => "rbx",
-        "rcx" | "ecx" | "cx" | "cl" | "ch" => "rcx",
-        "rdx" | "edx" | "dx" | "dl" | "dh" => "rdx",
-        "rdi" | "edi" | "di" | "dil" => "rdi",
-        "rsi" | "esi" | "si" | "sil" => "rsi",
-        "rbp" | "ebp" | "bp" | "bpl" => "rbp",
-        "rsp" | "esp" | "sp" | "spl" => "rsp",
-        "r8" | "r8d" | "r8w" | "r8b" => "r8",
-        "r9" | "r9d" | "r9w" | "r9b" => "r9",
-        "r10" | "r10d" | "r10w" | "r10b" => "r10",
-        "r11" | "r11d" | "r11w" | "r11b" => "r11",
-        "r12" | "r12d" | "r12w" | "r12b" => "r12",
-        "r13" | "r13d" | "r13w" | "r13b" => "r13",
-        "r14" | "r14d" | "r14w" | "r14b" => "r14",
-        "r15" | "r15d" | "r15w" | "r15b" => "r15",
-        _ => return None,
-    })
+    crate::register::family(left)
+        .is_some_and(|family| crate::register::family(right) == Some(family))
 }
 
 fn address_uses_register(address: &Address, predicate: fn(&str) -> bool) -> bool {
