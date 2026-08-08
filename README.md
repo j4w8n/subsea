@@ -64,23 +64,21 @@ emit-asm  Compile to x86-64 assembly and print it
 Use `-o` with `build` to choose the executable path:
 
 ```sh
-subsea build main.ss -o my_program
+subsea build -o my_program main.ss
 ```
 
-Build artifacts are written to:
+`build` writes intermediate assembly and object files to a unique per-build directory under `target/subsea/build-*`. The default executable is written to:
 
 ```text
-target/subsea/main.s
-target/subsea/main.o
 target/subsea/main
 ```
 
-When `-o` is used, the assembly and object files are still written under `target/subsea`, and the executable is written to the requested output path.
+When `-o` is used, the intermediate files are still written under `target/subsea/build-*`, and the executable is written to the requested output path. `run` uses the same per-build intermediate directory, but removes that directory after the compiled program exits so that build-specific directories don't baloon space.
 
 Use `--timings` or `-t` with `build` to show build times for various phases of the process.
 
 ```sh
-subsea build main.ss -t
+subsea build -t main.ss
 ```
 
 ## Program Structure
@@ -104,7 +102,7 @@ main: {
 }
 ```
 
-Local labels can be used as markers inside a block. They don't start a nested block, so they don't use braces or own the instructions after them. This is also why we choose to not indent a local label. Think of it as a named postion in the parent block that code can jump to.
+Local labels can be used as markers inside a block. They don't start a nested block, so they don't use braces or own the instructions after them. This is also why we choose to not indent a local label. Think of it as a named position in the parent block that code can jump to.
 
 Local labels start with `.` and are scoped to the containing top-level label, so different blocks can reuse names like `.loop:` and `.done:` without collisions:
 
@@ -177,7 +175,7 @@ Instructions work with a small set of operand forms:
 rax       // register
 42        // immediate integer
 -1        // negative immediate integer
-count     // integer binding or symbol name
+count     // integer binding
 [count]   // memory at address count
 [rax]     // memory at address in rax
 [rax]:u64 // memory at address in rax, with explicit width
