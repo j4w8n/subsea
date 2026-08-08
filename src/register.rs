@@ -15,7 +15,29 @@ pub(crate) fn width(name: &str) -> Option<Width> {
 }
 
 pub fn is_register(name: &str) -> bool {
-    width(name).is_some()
+    width(name).is_some() || is_xmm(name)
+}
+
+pub(crate) fn is_xmm(name: &str) -> bool {
+    matches!(
+        name,
+        "xmm0"
+            | "xmm1"
+            | "xmm2"
+            | "xmm3"
+            | "xmm4"
+            | "xmm5"
+            | "xmm6"
+            | "xmm7"
+            | "xmm8"
+            | "xmm9"
+            | "xmm10"
+            | "xmm11"
+            | "xmm12"
+            | "xmm13"
+            | "xmm14"
+            | "xmm15"
+    )
 }
 
 pub(crate) fn family(name: &str) -> Option<&'static str> {

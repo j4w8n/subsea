@@ -2,7 +2,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
+    Program,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -238,6 +239,29 @@ fn formats_integer_binding() {
     assert!(asm.contains(".Lstr_main_literal_1:\n  .byte 99, 111, 117, 110, 116, 32, 61, 32\n"));
     assert!(asm.contains(".Lint_main_count:\n  .byte 51\n"));
     assert!(asm.contains(".Lstr_main_literal_2:\n  .byte 10\n"));
+}
+
+#[test]
+fn prints_float_binding_as_literal_text() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: String::from("ratio"),
+            value: BindingValue::Float {
+                value: String::from("1.5"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Print {
+            parts: vec![PrintPart::Binding(String::from("ratio"))],
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloat_main_ratio:\n  .byte 49, 46, 53\n"));
+    assert!(asm.contains("  lea rsi, [rip + .Lfloat_main_ratio]\n"));
+    assert!(asm.contains("  mov rdx, 3\n"));
 }
 
 #[test]
@@ -896,6 +920,303 @@ fn emits_memory_scalars_and_buffers() {
 
     assert!(asm.contains(".section .data\ncount:\n  .word 3\n\n"));
     assert!(asm.contains(".section .bss\nbuf:\n  .zero 128\n\n"));
+}
+
+#[test]
+fn emits_float_memory_scalars() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![
+            MemoryDeclaration::FloatScalar {
+                name: String::from("single"),
+                width: MemoryWidth::F32,
+                value: String::from("1.5"),
+            },
+            MemoryDeclaration::FloatScalar {
+                name: String::from("double"),
+                width: MemoryWidth::F64,
+                value: String::from("-2.25"),
+            },
+        ],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![Instruction::Exit { code: 0 }],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("single:\n  .float 1.5\n"));
+    assert!(asm.contains("double:\n  .double -2.25\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_xmm_float_loads_and_stores() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![
+            MemoryDeclaration::FloatScalar {
+                name: String::from("single"),
+                width: MemoryWidth::F32,
+                value: String::from("1.5"),
+            },
+            MemoryDeclaration::FloatScalar {
+                name: String::from("double"),
+                width: MemoryWidth::F64,
+                value: String::from("2.25"),
+            },
+        ],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+                    value: AssignmentValue::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("single")),
+                            rest: Vec::new(),
+                        },
+                        width: Some(MemoryWidth::F32),
+                    }),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm1"))),
+                    value: AssignmentValue::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("double")),
+                            rest: Vec::new(),
+                        },
+                        width: Some(MemoryWidth::F64),
+                    }),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("single")),
+                            rest: Vec::new(),
+                        },
+                        width: Some(MemoryWidth::F32),
+                    }),
+                    value: AssignmentValue::Operand(Operand::Register(String::from("xmm0"))),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("double")),
+                            rest: Vec::new(),
+                        },
+                        width: Some(MemoryWidth::F64),
+                    }),
+                    value: AssignmentValue::Operand(Operand::Register(String::from("xmm1"))),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movss xmm0, dword ptr [single]\n"));
+    assert!(asm.contains("  movsd xmm1, qword ptr [double]\n"));
+    assert!(asm.contains("  movss dword ptr [single], xmm0\n"));
+    assert!(asm.contains("  movsd qword ptr [double], xmm1\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_integer_register_float_memory_load() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        value: AssignmentValue::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Ident(String::from("double")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::F64),
+        }),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Floating-point memory operands require an XMM register source or destination"
+    );
+}
+
+#[test]
+fn rejects_xmm_integer_memory_load() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        value: AssignmentValue::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(String::from("rax")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::U64),
+        }),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "XMM moves require one XMM register and one explicitly f32 or f64 memory operand"
+    );
+}
+
+#[test]
+fn rejects_xmm_register_to_register_move_for_now() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        value: AssignmentValue::Operand(Operand::Register(String::from("xmm1"))),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "XMM moves require one XMM register and one explicitly f32 or f64 memory operand"
+    );
+}
+
+#[test]
+fn emits_xmm_float_register_arithmetic() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F32,
+                op: FloatMathOp::Add,
+                lhs: Operand::Register(String::from("xmm0")),
+                rhs: Operand::Register(String::from("xmm1")),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm2"))),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F64,
+                op: FloatMathOp::Multiply,
+                lhs: Operand::Register(String::from("xmm3")),
+                rhs: Operand::Register(String::from("xmm4")),
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  addss xmm0, xmm1\n"));
+    assert!(asm.contains("  movsd xmm2, xmm3\n"));
+    assert!(asm.contains("  mulsd xmm2, xmm4\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_xmm_float_memory_arithmetic() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![
+            MemoryDeclaration::FloatScalar {
+                name: String::from("single"),
+                width: MemoryWidth::F32,
+                value: String::from("1.5"),
+            },
+            MemoryDeclaration::FloatScalar {
+                name: String::from("double"),
+                width: MemoryWidth::F64,
+                value: String::from("2.25"),
+            },
+        ],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+                    value: AssignmentValue::FloatBinary {
+                        width: MemoryWidth::F32,
+                        op: FloatMathOp::Subtract,
+                        lhs: Operand::Register(String::from("xmm0")),
+                        rhs: Operand::Dereference {
+                            address: Address {
+                                first: AddressTerm::Ident(String::from("single")),
+                                rest: Vec::new(),
+                            },
+                            width: Some(MemoryWidth::F32),
+                        },
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm1"))),
+                    value: AssignmentValue::FloatBinary {
+                        width: MemoryWidth::F64,
+                        op: FloatMathOp::Divide,
+                        lhs: Operand::Dereference {
+                            address: Address {
+                                first: AddressTerm::Ident(String::from("double")),
+                                rest: Vec::new(),
+                            },
+                            width: Some(MemoryWidth::F64),
+                        },
+                        rhs: Operand::Register(String::from("xmm2")),
+                    },
+                },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  subss xmm0, dword ptr [single]\n"));
+    assert!(asm.contains("  movsd xmm1, qword ptr [double]\n"));
+    assert!(asm.contains("  divsd xmm1, xmm2\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_float_arithmetic_to_integer_register() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        value: AssignmentValue::FloatBinary {
+            width: MemoryWidth::F64,
+            op: FloatMathOp::Add,
+            lhs: Operand::Register(String::from("xmm0")),
+            rhs: Operand::Register(String::from("xmm1")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Floating-point arithmetic destination must be an XMM register"
+    );
+}
+
+#[test]
+fn rejects_float_arithmetic_width_mismatch() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        value: AssignmentValue::FloatBinary {
+            width: MemoryWidth::F64,
+            op: FloatMathOp::Add,
+            lhs: Operand::Register(String::from("xmm0")),
+            rhs: Operand::Dereference {
+                address: Address {
+                    first: AddressTerm::Register(String::from("rax")),
+                    rest: Vec::new(),
+                },
+                width: Some(MemoryWidth::F32),
+            },
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Floating-point arithmetic right operand width must match the floating-point operator width"
+    );
 }
 
 #[test]

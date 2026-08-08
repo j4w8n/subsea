@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
-    PrintPart, Program,
+    CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
+    Operand, PrintPart, Program,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -107,6 +107,12 @@ impl Parser {
         match self.peek() {
             Some(Token::Equals) => {
                 self.advance();
+                if is_float_width(width) {
+                    let value = self.parse_float_literal("memory initializer", width)?;
+
+                    return Ok(MemoryDeclaration::FloatScalar { name, width, value });
+                }
+
                 let value = self.parse_integer_literal("memory initializer")?;
                 validate_integer_binding_width(value, width)?;
 
@@ -157,12 +163,18 @@ impl Parser {
                         parts: vec![PrintPart::Operand(Operand::Immediate(value))],
                     })
                     .map_err(|_| format!("Invalid integer literal {value:?}")),
+                Some(Token::FloatLiteral(value)) => Err(format!(
+                    "Float literal {value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
+                )),
                 Some(Token::Minus) => match self.advance() {
                     Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
                         .map_err(|_| format!("Invalid integer literal -{value}"))
                         .map(|value| Instruction::Print {
                             parts: vec![PrintPart::Operand(Operand::Immediate(value))],
                         }),
+                    Some(Token::FloatLiteral(value)) => Err(format!(
+                        "Float literal -{value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
+                    )),
                     Some(token) => Err(format!(
                         "Expected number after '-' in print operand, found {token:?}"
                     )),
@@ -273,6 +285,12 @@ impl Parser {
             }
         };
 
+        if is_float_width(width) {
+            return Err(String::from(
+                "Floating-point stack variables require XMM support, which is not implemented yet",
+            ));
+        }
+
         self.expect(Token::Equals, "Expected '=' after stack variable width")?;
         let value = self.parse_operand()?;
 
@@ -376,6 +394,14 @@ impl Parser {
             Some(
                 Token::ISlash
                 | Token::IStar
+                | Token::F32Minus
+                | Token::F32Plus
+                | Token::F32Slash
+                | Token::F32Star
+                | Token::F64Minus
+                | Token::F64Plus
+                | Token::F64Slash
+                | Token::F64Star
                 | Token::Plus
                 | Token::Minus
                 | Token::Slash
@@ -411,6 +437,36 @@ impl Parser {
                     return Err(String::from(
                         "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
                     ));
+                }
+                Some(
+                    operator @ (Token::F32Minus
+                    | Token::F32Plus
+                    | Token::F32Slash
+                    | Token::F32Star
+                    | Token::F64Minus
+                    | Token::F64Plus
+                    | Token::F64Slash
+                    | Token::F64Star),
+                ) => {
+                    let (width, op) = match operator {
+                        Token::F32Plus => (MemoryWidth::F32, FloatMathOp::Add),
+                        Token::F32Minus => (MemoryWidth::F32, FloatMathOp::Subtract),
+                        Token::F32Star => (MemoryWidth::F32, FloatMathOp::Multiply),
+                        Token::F32Slash => (MemoryWidth::F32, FloatMathOp::Divide),
+                        Token::F64Plus => (MemoryWidth::F64, FloatMathOp::Add),
+                        Token::F64Minus => (MemoryWidth::F64, FloatMathOp::Subtract),
+                        Token::F64Star => (MemoryWidth::F64, FloatMathOp::Multiply),
+                        Token::F64Slash => (MemoryWidth::F64, FloatMathOp::Divide),
+                        _ => unreachable!(),
+                    };
+                    let rhs = self.parse_operand()?;
+
+                    AssignmentValue::FloatBinary {
+                        width,
+                        op,
+                        lhs,
+                        rhs,
+                    }
                 }
                 Some(operator @ (Token::ISlash | Token::IStar | Token::USlash | Token::UStar)) => {
                     let (is_division, signed) = match operator {
@@ -510,12 +566,22 @@ impl Parser {
 
                 Ok(BindingValue::String(value))
             }
+            Some(Token::NumberLiteral(value)) if width.is_some_and(is_float_width) => {
+                parse_float_binding_value(&value, width)
+            }
             Some(Token::NumberLiteral(value)) => parse_integer_binding_value(&value, width),
+            Some(Token::FloatLiteral(value)) => parse_float_binding_value(&value, width),
             Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) if width.is_some_and(is_float_width) => {
+                    parse_float_binding_value(&format!("-{value}"), width)
+                }
                 Some(Token::NumberLiteral(value)) => {
                     let value = parse_signed_integer(&value, true)
                         .map_err(|_| format!("Invalid integer binding value -{value}"))?;
                     parse_integer_binding_value(&value.to_string(), width)
+                }
+                Some(Token::FloatLiteral(value)) => {
+                    parse_float_binding_value(&format!("-{value}"), width)
                 }
                 Some(token) => Err(format!(
                     "Expected number after '-' in binding value, found {token:?}"
@@ -550,6 +616,30 @@ impl Parser {
             },
             Some(token) => Err(format!("Expected integer {context}, found {token:?}")),
             None => Err(format!("Expected integer {context}, found end of input")),
+        }
+    }
+
+    fn parse_float_literal(&mut self, context: &str, width: MemoryWidth) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value) | Token::FloatLiteral(value)) => {
+                validate_float_literal(&value, width, context)?;
+                Ok(value)
+            }
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value) | Token::FloatLiteral(value)) => {
+                    let value = format!("-{value}");
+                    validate_float_literal(&value, width, context)?;
+                    Ok(value)
+                }
+                Some(token) => Err(format!(
+                    "Expected number after '-' in {context}, found {token:?}"
+                )),
+                None => Err(format!(
+                    "Expected number after '-' in {context}, found end of input"
+                )),
+            },
+            Some(token) => Err(format!("Expected float {context}, found {token:?}")),
+            None => Err(format!("Expected float {context}, found end of input")),
         }
     }
 
@@ -597,6 +687,9 @@ impl Parser {
                 Some(Token::NumberLiteral(value)) => Err(format!(
                     "Cannot take the address of immediate value {value}; expected a label after '&'"
                 )),
+                Some(Token::FloatLiteral(value)) => Err(format!(
+                    "Cannot take the address of float literal {value}; expected a label after '&'"
+                )),
                 Some(Token::LBracket) => Err(String::from(
                     "Cannot take the address of a dereference; '&[...]' is invalid syntax",
                 )),
@@ -614,6 +707,9 @@ impl Parser {
                 Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
                     .map(Operand::Immediate)
                     .map_err(|_| format!("Invalid integer literal -{value}")),
+                Some(Token::FloatLiteral(value)) => Err(format!(
+                    "Float literal -{value} is only supported in typed const and mem initializers for now"
+                )),
                 Some(token) => Err(format!("Expected number after '-', found {token:?}")),
                 None => Err(String::from(
                     "Expected number after '-', found end of input",
@@ -623,6 +719,9 @@ impl Parser {
                 .parse::<i128>()
                 .map(Operand::Immediate)
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
+            Some(Token::FloatLiteral(value)) => Err(format!(
+                "Float literal {value} is only supported in typed const and mem initializers for now"
+            )),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
             Some(Token::Ident(name)) => Ok(Operand::Ident(name)),
             Some(Token::Pointer(name)) => {
@@ -686,7 +785,16 @@ impl Parser {
                     .map(AddressTerm::Immediate)
                     .map_err(|_| format!("Invalid integer literal {value:?}"))
             }
+            Some(Token::FloatLiteral(value)) => Err(format!(
+                "Float literal {value} is not valid inside a memory operand"
+            )),
             Some(Token::Register(name)) => {
+                if is_xmm_register_name(&name) {
+                    return Err(format!(
+                        "XMM register {name} cannot be used as a memory address"
+                    ));
+                }
+
                 if matches!(self.peek(), Some(Token::Star)) {
                     self.advance();
 
@@ -766,6 +874,8 @@ impl Parser {
 
 fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
     match name {
+        "f32" => Ok(MemoryWidth::F32),
+        "f64" => Ok(MemoryWidth::F64),
         "i8" => Ok(MemoryWidth::I8),
         "i16" => Ok(MemoryWidth::I16),
         "i32" => Ok(MemoryWidth::I32),
@@ -775,7 +885,7 @@ fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
         "u32" => Ok(MemoryWidth::U32),
         "u64" => Ok(MemoryWidth::U64),
         _ => Err(format!(
-            "Invalid memory width {name:?}; expected i8, i16, i32, i64, u8, u16, u32, or u64"
+            "Invalid memory width {name:?}; expected f32, f64, i8, i16, i32, i64, u8, u16, u32, or u64"
         )),
     }
 }
@@ -788,6 +898,12 @@ fn parse_integer_binding_value(
     value: &str,
     width: Option<MemoryWidth>,
 ) -> Result<BindingValue, String> {
+    if width.is_some_and(is_float_width) {
+        return Err(format!(
+            "Integer binding value {value:?} cannot use floating-point width"
+        ));
+    }
+
     let value = value
         .parse::<i128>()
         .map_err(|_| format!("Invalid integer binding value {value:?}"))?;
@@ -797,6 +913,46 @@ fn parse_integer_binding_value(
     }
 
     Ok(BindingValue::Integer { value, width })
+}
+
+fn parse_float_binding_value(
+    value: &str,
+    width: Option<MemoryWidth>,
+) -> Result<BindingValue, String> {
+    let width = width.ok_or_else(|| {
+        format!("Float binding value {value:?} requires an explicit f32 or f64 width")
+    })?;
+
+    if !is_float_width(width) {
+        return Err(format!(
+            "Float binding value {value:?} requires f32 or f64 width"
+        ));
+    }
+
+    validate_float_literal(value, width, "binding value")?;
+
+    Ok(BindingValue::Float {
+        value: value.to_string(),
+        width,
+    })
+}
+
+fn validate_float_literal(value: &str, width: MemoryWidth, context: &str) -> Result<(), String> {
+    let valid = match width {
+        MemoryWidth::F32 => value.parse::<f32>().is_ok_and(f32::is_finite),
+        MemoryWidth::F64 => value.parse::<f64>().is_ok_and(f64::is_finite),
+        _ => return Err(format!("Float {context} requires f32 or f64 width")),
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("Invalid float {context} {value:?}"))
+    }
+}
+
+fn is_float_width(width: MemoryWidth) -> bool {
+    matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
 }
 
 fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
@@ -809,6 +965,12 @@ fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
 
 fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(), String> {
     let valid = match width {
+        MemoryWidth::F32 | MemoryWidth::F64 => {
+            return Err(format!(
+                "Integer binding value {value} cannot use {}",
+                memory_width_name(width)
+            ));
+        }
         MemoryWidth::I8 => i8::MIN as i128 <= value && value <= i8::MAX as i128,
         MemoryWidth::I16 => i16::MIN as i128 <= value && value <= i16::MAX as i128,
         MemoryWidth::I32 => i32::MIN as i128 <= value && value <= i32::MAX as i128,
@@ -831,6 +993,8 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
 
 fn memory_width_name(width: MemoryWidth) -> &'static str {
     match width {
+        MemoryWidth::F32 => "f32",
+        MemoryWidth::F64 => "f64",
         MemoryWidth::I8 => "i8",
         MemoryWidth::I16 => "i16",
         MemoryWidth::I32 => "i32",
@@ -847,7 +1011,9 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
 
     for declaration in memory {
         let name = match declaration {
-            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => name,
+            MemoryDeclaration::Scalar { name, .. }
+            | MemoryDeclaration::FloatScalar { name, .. }
+            | MemoryDeclaration::Buffer { name, .. } => name,
         };
 
         if !names.insert(name) {
@@ -865,7 +1031,9 @@ fn validate_label_storage_names(
     let memory_names: HashSet<_> = memory
         .iter()
         .map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => name,
+            MemoryDeclaration::Scalar { name, .. }
+            | MemoryDeclaration::FloatScalar { name, .. }
+            | MemoryDeclaration::Buffer { name, .. } => name,
         })
         .collect();
 
@@ -911,9 +1079,9 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
     let memory_names: HashSet<&str> = memory
         .iter()
         .map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => {
-                name.as_str()
-            }
+            MemoryDeclaration::Scalar { name, .. }
+            | MemoryDeclaration::FloatScalar { name, .. }
+            | MemoryDeclaration::Buffer { name, .. } => name.as_str(),
         })
         .collect();
     let mut label_names = HashSet::new();
@@ -1008,6 +1176,7 @@ fn validate_instruction_symbols(
             match value {
                 AssignmentValue::Operand(operand) => operands.push(operand),
                 AssignmentValue::Binary { lhs, rhs, .. }
+                | AssignmentValue::FloatBinary { lhs, rhs, .. }
                 | AssignmentValue::WideMultiply { lhs, rhs, .. }
                 | AssignmentValue::WideDivide { lhs, rhs, .. } => {
                     operands.push(lhs);
@@ -1140,4 +1309,8 @@ fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
 
 fn is_register_name(s: &str) -> bool {
     crate::register::is_register(s)
+}
+
+fn is_xmm_register_name(s: &str) -> bool {
+    crate::register::is_xmm(s)
 }

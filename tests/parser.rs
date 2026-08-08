@@ -1,6 +1,6 @@
 use subsea::ast::{
-    AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, Instruction, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart,
+    AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, FloatMathOp,
+    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -116,6 +116,50 @@ fn parses_typed_integer_binding() {
                 width: Some(MemoryWidth::U8),
             },
         }
+    );
+}
+
+#[test]
+fn parses_typed_float_binding() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Const,
+        Token::Ident(String::from("ratio")),
+        Token::Colon,
+        Token::Ident(String::from("f64")),
+        Token::Equals,
+        Token::FloatLiteral(String::from("1.5")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Const {
+            name: String::from("ratio"),
+            value: BindingValue::Float {
+                value: String::from("1.5"),
+                width: MemoryWidth::F64,
+            },
+        }
+    );
+}
+
+#[test]
+fn rejects_untyped_float_binding() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Const,
+        Token::Ident(String::from("ratio")),
+        Token::Equals,
+        Token::FloatLiteral(String::from("1.5")),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Float binding value \"1.5\" requires an explicit f32 or f64 width"
     );
 }
 
@@ -490,6 +534,127 @@ fn parses_memory_scalar_declaration() {
             width: MemoryWidth::U16,
             value: 3,
         }
+    );
+}
+
+#[test]
+fn parses_float_memory_scalar_declaration() {
+    let program = parse(vec![
+        Token::Mem,
+        Token::Ident(String::from("ratio")),
+        Token::Colon,
+        Token::Ident(String::from("f32")),
+        Token::Equals,
+        Token::FloatLiteral(String::from("1.5")),
+        Token::Ident(String::from("main")),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.memory[0],
+        MemoryDeclaration::FloatScalar {
+            name: String::from("ratio"),
+            width: MemoryWidth::F32,
+            value: String::from("1.5"),
+        }
+    );
+}
+
+#[test]
+fn rejects_float_literal_as_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("rax")),
+        Token::Equals,
+        Token::FloatLiteral(String::from("1.5")),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Float literal 1.5 is only supported in typed const and mem initializers for now"
+    );
+}
+
+#[test]
+fn parses_xmm_float_memory_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("xmm0")),
+        Token::Equals,
+        Token::LBracket,
+        Token::Ident(String::from("ratio")),
+        Token::RBracket,
+        Token::Colon,
+        Token::Ident(String::from("f64")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::Operand(Operand::Dereference {
+                address: subsea::ast::Address {
+                    first: subsea::ast::AddressTerm::Ident(String::from("ratio")),
+                    rest: Vec::new(),
+                },
+                width: Some(MemoryWidth::F64),
+            }),
+        }
+    );
+}
+
+#[test]
+fn parses_float_arithmetic_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("xmm0")),
+        Token::Equals,
+        Token::Register(String::from("xmm1")),
+        Token::F64Plus,
+        Token::Register(String::from("xmm2")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F64,
+                op: FloatMathOp::Add,
+                lhs: Operand::Register(String::from("xmm1")),
+                rhs: Operand::Register(String::from("xmm2")),
+            },
+        }
+    );
+}
+
+#[test]
+fn rejects_xmm_register_as_memory_address() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("xmm0")),
+        Token::Equals,
+        Token::LBracket,
+        Token::Register(String::from("xmm1")),
+        Token::RBracket,
+        Token::Colon,
+        Token::Ident(String::from("f64")),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "XMM register xmm1 cannot be used as a memory address"
     );
 }
 

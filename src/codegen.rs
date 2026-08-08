@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
-    PrintPart, Program,
+    CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
+    Operand, PrintPart, Program,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -224,6 +224,16 @@ fn validate_compare_operands(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
+    if operand_uses_xmm_register(lhs)
+        || operand_uses_xmm_register(rhs)
+        || is_float_memory_operand(lhs)
+        || is_float_memory_operand(rhs)
+    {
+        return Err(String::from(
+            "Floating-point operands cannot be compared yet",
+        ));
+    }
+
     if matches!(lhs, Operand::Pointer(_)) || matches!(rhs, Operand::Pointer(_)) {
         return Err(String::from("Comparison cannot use an address-of operand"));
     }
@@ -326,6 +336,10 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                             integers.insert(key.clone(), IntegerBinding { value: *value });
                             (format!(".Lint_{}_{}", label.name, name), value.to_string())
                         }
+                        BindingValue::Float { value, width } => {
+                            validate_float_width(*width)?;
+                            (format!(".Lfloat_{}_{}", label.name, name), value.clone())
+                        }
                     };
 
                     let binding = StringBinding {
@@ -363,6 +377,14 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         literals,
         integers,
     })
+}
+
+fn validate_float_width(width: MemoryWidth) -> Result<(), String> {
+    if matches!(width, MemoryWidth::F32 | MemoryWidth::F64) {
+        Ok(())
+    } else {
+        Err(String::from("Float bindings require f32 or f64 width"))
+    }
 }
 
 fn build_stack_frame(label: &Label) -> Result<StackFrame, String> {
@@ -548,6 +570,7 @@ fn validate_instruction_does_not_use_rbp(
             match value {
                 AssignmentValue::Operand(operand) => operands.push(operand),
                 AssignmentValue::Binary { lhs, rhs, .. }
+                | AssignmentValue::FloatBinary { lhs, rhs, .. }
                 | AssignmentValue::WideMultiply { lhs, rhs, .. }
                 | AssignmentValue::WideDivide { lhs, rhs, .. } => {
                     operands.push(lhs);
@@ -662,7 +685,12 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
     let scalars: Vec<_> = memory
         .iter()
         .filter_map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { name, width, value } => Some((name, width, value)),
+            MemoryDeclaration::Scalar { name, width, value } => {
+                Some((name, width, value.to_string()))
+            }
+            MemoryDeclaration::FloatScalar { name, width, value } => {
+                Some((name, width, value.clone()))
+            }
             MemoryDeclaration::Buffer { .. } => None,
         })
         .collect();
@@ -685,7 +713,7 @@ fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
     let buffers: Vec<_> = memory
         .iter()
         .filter_map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { .. } => None,
+            MemoryDeclaration::Scalar { .. } | MemoryDeclaration::FloatScalar { .. } => None,
             MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
         })
         .collect();
@@ -751,6 +779,12 @@ fn emit_print_operand_instruction(
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
+    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand) {
+        return Err(String::from(
+            "print operand does not support floating-point values yet",
+        ));
+    }
+
     if matches!(operand, Operand::Pointer(_)) {
         return Err(String::from(
             "print operand cannot be an address-of operand",
@@ -905,6 +939,14 @@ fn emit_assignment(
                 emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name, stack)
             }
         }
+        AssignmentValue::FloatBinary {
+            width,
+            op,
+            lhs,
+            rhs,
+        } => emit_float_binary_assignment(
+            asm, dst, *width, *op, lhs, rhs, strings, label_name, stack,
+        ),
         AssignmentValue::WideMultiply { signed, lhs, rhs } => {
             validate_wide_math_target("Widened multiply", dst)?;
             validate_wide_math_operand(
@@ -967,6 +1009,115 @@ fn emit_assignment(
 
             Ok(())
         }
+    }
+}
+
+fn emit_float_binary_assignment(
+    asm: &mut String,
+    dst: &AssignmentTarget,
+    width: MemoryWidth,
+    op: FloatMathOp,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_width(width)?;
+
+    let dst = assignment_operand_target(dst)?;
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Floating-point arithmetic destination must be an XMM register",
+        ));
+    };
+
+    if !is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Floating-point arithmetic destination must be an XMM register",
+        ));
+    }
+
+    validate_float_math_operand("Floating-point arithmetic left operand", lhs, width)?;
+    validate_float_math_operand("Floating-point arithmetic right operand", rhs, width)?;
+
+    if lhs != dst {
+        emit_float_copy_instruction(asm, lhs, dst, width, strings, label_name, stack)?;
+    }
+
+    let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {rhs}\n",
+        float_math_opcode(op, width)
+    ));
+
+    Ok(())
+}
+
+fn emit_float_copy_instruction(
+    asm: &mut String,
+    src: &Operand,
+    dst: &Operand,
+    width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let src = emit_operand(src, strings, label_name, stack)?;
+    let dst = emit_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst}, {src}\n",
+        float_move_opcode_for_width(width)?
+    ));
+
+    Ok(())
+}
+
+fn validate_float_math_operand(
+    name: &str,
+    operand: &Operand,
+    width: MemoryWidth,
+) -> Result<(), String> {
+    match operand {
+        Operand::Register(register) if is_xmm_register(register) => Ok(()),
+        Operand::Dereference {
+            width: Some(memory_width),
+            ..
+        } if *memory_width == width => Ok(()),
+        Operand::Dereference {
+            width: Some(MemoryWidth::F32 | MemoryWidth::F64),
+            ..
+        } => Err(format!(
+            "{name} width must match the floating-point operator width"
+        )),
+        Operand::Dereference { width: None, .. } => Err(format!(
+            "{name} memory operand requires an explicit f32 or f64 width"
+        )),
+        Operand::Dereference { .. } => Err(format!(
+            "{name} must be an XMM register or floating-point memory operand"
+        )),
+        Operand::Immediate(_) => Err(format!(
+            "{name} cannot be an immediate value; use a floating-point memory operand for now"
+        )),
+        Operand::Ident(_) => Err(format!("{name} cannot be a const or stack binding for now")),
+        Operand::Pointer(_) => Err(format!("{name} cannot be an address-of operand")),
+        Operand::Register(register) => Err(format!(
+            "{name} must be an XMM register, found integer register {register}"
+        )),
+    }
+}
+
+fn float_math_opcode(op: FloatMathOp, width: MemoryWidth) -> &'static str {
+    match (op, width) {
+        (FloatMathOp::Add, MemoryWidth::F32) => "addss",
+        (FloatMathOp::Add, MemoryWidth::F64) => "addsd",
+        (FloatMathOp::Divide, MemoryWidth::F32) => "divss",
+        (FloatMathOp::Divide, MemoryWidth::F64) => "divsd",
+        (FloatMathOp::Multiply, MemoryWidth::F32) => "mulss",
+        (FloatMathOp::Multiply, MemoryWidth::F64) => "mulsd",
+        (FloatMathOp::Subtract, MemoryWidth::F32) => "subss",
+        (FloatMathOp::Subtract, MemoryWidth::F64) => "subsd",
+        _ => unreachable!(),
     }
 }
 
@@ -1063,7 +1214,21 @@ fn emit_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    if let Operand::Pointer(name) = src {
+    if let Some(opcode) = float_move_opcode(src, dst)? {
+        let src = emit_operand(src, strings, label_name, stack)?;
+        let dst = emit_operand(dst, strings, label_name, stack)?;
+        asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
+
+        Ok(())
+    } else if operand_uses_xmm_register(src) || operand_uses_xmm_register(dst) {
+        Err(String::from(
+            "XMM moves require one XMM register and one explicitly f32 or f64 memory operand",
+        ))
+    } else if is_float_memory_operand(src) || is_float_memory_operand(dst) {
+        Err(String::from(
+            "Floating-point memory operands require an XMM register source or destination",
+        ))
+    } else if let Operand::Pointer(name) = src {
         validate_address_copy_dst(dst)?;
 
         let dst = emit_operand(dst, strings, label_name, stack)?;
@@ -1083,6 +1248,17 @@ fn validate_binary_operands(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
+    if opcode != "mov"
+        && (operand_uses_xmm_register(src)
+            || operand_uses_xmm_register(dst)
+            || is_float_memory_operand(src)
+            || is_float_memory_operand(dst))
+    {
+        return Err(format!(
+            "{opcode} does not support floating-point operands yet"
+        ));
+    }
+
     if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_))
         || matches!(dst, Operand::Ident(name) if !stack.slots.contains_key(name))
     {
@@ -1235,6 +1411,11 @@ fn validate_immediate_range(value: i128, destination: ImmediateDestination) -> R
         ImmediateDestination::Memory(MemoryWidth::I8) => {
             i8::MIN as i128 <= value && value <= i8::MAX as i128
         }
+        ImmediateDestination::Memory(MemoryWidth::F32 | MemoryWidth::F64) => {
+            return Err(String::from(
+                "Integer immediate values cannot be assigned to floating-point memory destinations yet",
+            ));
+        }
         ImmediateDestination::Memory(MemoryWidth::I16) => {
             i16::MIN as i128 <= value && value <= i16::MAX as i128
         }
@@ -1267,6 +1448,9 @@ fn validate_immediate_range(value: i128, destination: ImmediateDestination) -> R
 
 fn validate_address_copy_dst(dst: &Operand) -> Result<(), String> {
     match dst {
+        Operand::Register(register) if is_xmm_register(register) => Err(String::from(
+            "Address-of labels can only be copied into 64-bit integer registers",
+        )),
         Operand::Register(register) => match register_width(register) {
             Some(Width::Bits64) => Ok(()),
             Some(width) => Err(format!(
@@ -1312,6 +1496,9 @@ fn validate_pop_operand(dst: &Operand, stack: &StackFrame) -> Result<(), String>
 
 fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Result<(), String> {
     match operand {
+        Operand::Register(register) if is_xmm_register(register) => Err(format!(
+            "{name} must be a 64-bit integer register, found XMM register {register}"
+        )),
         Operand::Register(register) => match register_width(register) {
             Some(Width::Bits64) => Ok(()),
             Some(width) => Err(format!(
@@ -1425,8 +1612,55 @@ fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
     }
 }
 
+fn float_move_opcode(src: &Operand, dst: &Operand) -> Result<Option<&'static str>, String> {
+    match (src, dst) {
+        (Operand::Register(register), memory) if is_xmm_register(register) => {
+            float_memory_width(memory)
+                .map(float_move_opcode_for_width)
+                .transpose()
+        }
+        (memory, Operand::Register(register)) if is_xmm_register(register) => {
+            float_memory_width(memory)
+                .map(float_move_opcode_for_width)
+                .transpose()
+        }
+        _ => Ok(None),
+    }
+}
+
+fn float_move_opcode_for_width(width: MemoryWidth) -> Result<&'static str, String> {
+    match width {
+        MemoryWidth::F32 => Ok("movss"),
+        MemoryWidth::F64 => Ok("movsd"),
+        _ => Err(String::from(
+            "XMM moves require an explicitly f32 or f64 memory operand",
+        )),
+    }
+}
+
+fn float_memory_width(operand: &Operand) -> Option<MemoryWidth> {
+    match operand {
+        Operand::Dereference {
+            width: Some(MemoryWidth::F32 | MemoryWidth::F64),
+            ..
+        } => match operand {
+            Operand::Dereference {
+                width: Some(width), ..
+            } => Some(*width),
+            _ => unreachable!(),
+        },
+        _ => None,
+    }
+}
+
+fn is_float_memory_operand(operand: &Operand) -> bool {
+    float_memory_width(operand).is_some()
+}
+
 fn memory_width_bits(width: &MemoryWidth) -> Width {
     match width {
+        MemoryWidth::F32 => Width::Bits32,
+        MemoryWidth::F64 => Width::Bits64,
         MemoryWidth::I8 | MemoryWidth::U8 => Width::Bits8,
         MemoryWidth::I16 | MemoryWidth::U16 => Width::Bits16,
         MemoryWidth::I32 | MemoryWidth::U32 => Width::Bits32,
@@ -1436,6 +1670,8 @@ fn memory_width_bits(width: &MemoryWidth) -> Width {
 
 fn memory_width_size(width: &MemoryWidth) -> usize {
     match width {
+        MemoryWidth::F32 => 4,
+        MemoryWidth::F64 => 8,
         MemoryWidth::I8 | MemoryWidth::U8 => 1,
         MemoryWidth::I16 | MemoryWidth::U16 => 2,
         MemoryWidth::I32 | MemoryWidth::U32 => 4,
@@ -1445,6 +1681,8 @@ fn memory_width_size(width: &MemoryWidth) -> usize {
 
 fn memory_width_directive(width: &MemoryWidth) -> &'static str {
     match width {
+        MemoryWidth::F32 => ".float",
+        MemoryWidth::F64 => ".double",
         MemoryWidth::I8 | MemoryWidth::U8 => ".byte",
         MemoryWidth::I16 | MemoryWidth::U16 => ".word",
         MemoryWidth::I32 | MemoryWidth::U32 => ".long",
@@ -1454,6 +1692,8 @@ fn memory_width_directive(width: &MemoryWidth) -> &'static str {
 
 fn memory_width_ptr(width: &MemoryWidth) -> &'static str {
     match width {
+        MemoryWidth::F32 => "dword",
+        MemoryWidth::F64 => "qword",
         MemoryWidth::I8 | MemoryWidth::U8 => "byte",
         MemoryWidth::I16 | MemoryWidth::U16 => "word",
         MemoryWidth::I32 | MemoryWidth::U32 => "dword",
@@ -1489,6 +1729,14 @@ fn operand_uses_extended_register(operand: &Operand) -> bool {
         Operand::Dereference { address, .. } => {
             address_uses_register(address, is_extended_register)
         }
+        _ => false,
+    }
+}
+
+fn operand_uses_xmm_register(operand: &Operand) -> bool {
+    match operand {
+        Operand::Register(name) => is_xmm_register(name),
+        Operand::Dereference { address, .. } => address_uses_register(address, is_xmm_register),
         _ => false,
     }
 }
@@ -1586,6 +1834,10 @@ fn is_extended_register(name: &str) -> bool {
             | "r14b"
             | "r15b"
     )
+}
+
+fn is_xmm_register(name: &str) -> bool {
+    crate::register::is_xmm(name)
 }
 
 impl Width {

@@ -12,6 +12,11 @@ pub enum MemoryDeclaration {
         width: MemoryWidth,
         value: i128,
     },
+    FloatScalar {
+        name: String,
+        width: MemoryWidth,
+        value: String,
+    },
     Buffer {
         name: String,
         width: MemoryWidth,
@@ -101,6 +106,12 @@ pub enum AssignmentValue {
         lhs: Operand,
         rhs: Operand,
     },
+    FloatBinary {
+        width: MemoryWidth,
+        op: FloatMathOp,
+        lhs: Operand,
+        rhs: Operand,
+    },
     WideMultiply {
         signed: bool,
         lhs: Operand,
@@ -120,11 +131,23 @@ pub enum MathOp {
     Subtract,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FloatMathOp {
+    Add,
+    Divide,
+    Multiply,
+    Subtract,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum BindingValue {
     Integer {
         value: i128,
         width: Option<MemoryWidth>,
+    },
+    Float {
+        value: String,
+        width: MemoryWidth,
     },
     String(String),
 }
@@ -154,6 +177,8 @@ pub enum MemoryWidth {
     I16,
     I32,
     I64,
+    F32,
+    F64,
     U8,
     U16,
     U32,
