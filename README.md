@@ -4,6 +4,8 @@ A more readable, learnable alternative to Assembly, with the same power to direc
 
 The current compiler targets Linux x86-64 by lowering `.ss` source files to assembly, assembling with `as`, and linking with `ld`.
 
+This project is in early development. This includes some verbose syntax that I hope will be solved by type/width inference later on.
+
 ## Assembly-Like Power
 
 Subsea allows direct control over registers, memory, and Linux syscalls while keeping syntax more readable than raw assembly.
@@ -228,6 +230,16 @@ const byte_count:u8 = 3
 const offset:i16 = -8
 ```
 
+Floating-point bindings are supported as compile-time text bindings when given an explicit `f32` or `f64` width:
+
+```ss
+const ratio:f32 = 1.5
+const pi:f64 = 3.14159
+print pi
+```
+
+Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers, but they are not immediate runtime operands yet, so assignments like `rax = 1.5` are rejected.
+
 ## Stack Variables
 
 `stack` declares label-local mutable storage in the current label's stack frame:
@@ -437,6 +449,7 @@ Top-level `mem` declarations allocate writable memory for the lifetime of the pr
 
 ```ss
 mem count:u16 = 3
+mem ratio:f64 = 1.5
 mem buf:u8(128)
 
 main: {
@@ -445,6 +458,45 @@ main: {
 ```
 
 `mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`. `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
+`mem ratio:f64 = 1.5` allocates one writable `f64` memory cell initialized to `1.5`.
+
+Floating-point memory can be loaded into and stored from XMM registers with explicit `f32` or `f64` memory widths:
+
+```ss
+mem single:f32 = 1.5
+mem double:f64 = 2.25
+
+main: {
+  xmm0 = [single]:f32
+  xmm1 = [double]:f64
+  [single]:f32 = xmm0
+  [double]:f64 = xmm1
+
+  exit 0
+}
+```
+
+Scalar floating-point arithmetic uses explicit width-prefixed operators:
+
+```ss
+mem left:f64 = 1.5
+mem right:f64 = 2.25
+mem result:f64 = 0.0
+
+main: {
+  xmm0 = [left]:f64
+  xmm1 = [right]:f64
+  xmm0 = xmm0 f64+ xmm1
+  xmm0 = xmm0 f64* [right]:f64
+  [result]:f64 = xmm0
+
+  exit 0
+}
+```
+
+Supported scalar floating-point operators are `f32+`, `f32-`, `f32*`, `f32/`, `f64+`, `f64-`, `f64*`, and `f64/`. Floating-point arithmetic destinations must be XMM registers. Operands must be XMM registers or explicitly annotated floating-point memory operands matching the operator width.
+
+Floating-point comparisons, direct float immediates as operands, `const` float operands, stack float variables, and float printing are not implemented yet.
 
 `const`, `mem`, and `stack` answer different storage questions:
 
