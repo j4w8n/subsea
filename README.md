@@ -135,6 +135,8 @@ skip:
 
 Labels fall through naturally. If execution reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
 
+Labels and address targets are checked before assembly. Duplicate labels, unknown jump/call targets, and unknown bindings or memory symbols are compile-time errors.
+
 ## Registers
 
 Subsea uses real x86-64 register names.
@@ -303,6 +305,8 @@ Print clobbers:
 rax rdi rsi rdx rcx r11
 ```
 
+The current convention is that `print` preserves `rbx`, `rbp`, `rsp`, and all registers not listed above. This convention applies to both literal and runtime-integer printing; it may be expanded with explicit save/restore instructions as the runtime grows.
+
 ## Assignment Syntax
 
 Subsea uses readable assignment syntax for moving values and doing simple math:
@@ -353,6 +357,8 @@ syscall
 ```
 
 `call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
+
+Subsea functions use a caller-saved convention: callers must preserve values they need across `call`. A callee may modify `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11`; `rbx`, `rbp`, and `r12`-`r15` are callee-preserved. `rsp` and `rbp` must be restored before `ret`. Generated stack frames and `print` follow this convention.
 
 ```ss
 main: {
