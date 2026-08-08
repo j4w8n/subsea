@@ -34,7 +34,7 @@ On many Linux systems these are available through the `binutils` package.
 
 ```ss
 main: {
-  let message = "Hello World!\n"
+  const message = "Hello World!\n"
   print message
 
   exit 0
@@ -97,7 +97,7 @@ Labels contain instruction blocks:
 
 ```ss
 main: {
-  let message = "Hello World!\n"
+  const message = "Hello World!\n"
   print message
 
   exit 0
@@ -198,29 +198,62 @@ Registers can contain addresses, but registers themselves are not addressable me
 Subsea supports label-local compile-time bindings:
 
 ```ss
-let message = "Hello World!\n"
+const message = "Hello World!\n"
 print message
 
-let count = 3
+const count = 3
 print count
 
-let byte_count:u8 = 3
+const byte_count:u8 = 3
 print byte_count
 ```
 
 Integer bindings can be used as immediate operands:
 
 ```ss
-let count = 3
+const count = 3
 rax = count
 ```
 
 Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
 
 ```ss
-let byte_count:u8 = 3
-let offset:i16 = -8
+const byte_count:u8 = 3
+const offset:i16 = -8
 ```
+
+## Stack Variables
+
+`stack` declares label-local mutable storage in the current label's stack frame:
+
+```ss
+main: {
+  const limit = 5
+  stack count:u64 = 0
+
+.loop:
+  jmp .done if count u>= limit
+  print count
+  print "\n"
+  count = count + 1
+  jmp .loop
+
+.done:
+  exit 0
+}
+```
+
+Stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A stack variable loads when used as an operand and stores when assigned:
+
+```ss
+stack count:u64 = 8
+count = 5    // store to stack slot
+rax = count  // load from stack slot
+```
+
+Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
+
+If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a stack-using label.
 
 ## Printing
 
@@ -235,14 +268,14 @@ print rax
 print "\n"
 ```
 
-Formatted printing supports `{}` placeholders with bindings:
+Formatted printing supports `{}` placeholders with bindings or stack variables:
 
 ```ss
-let name = "Subsea"
+const name = "Subsea"
 print "Hello, {}\n", name
 ```
 
-Each `{}` consumes one following binding argument. The number of placeholders must match the number of arguments. Format specifiers like `{x}` or `{i64}` are not supported yet.
+Each `{}` consumes one following identifier argument. The number of placeholders must match the number of arguments. Format specifiers like `{x}` or `{i64}` are not supported yet.
 
 Runtime integer printing is intentionally simple for now. It accepts registers and integer immediates, emits unsigned decimal digits, and does not support signed decimal formatting yet:
 
@@ -299,7 +332,7 @@ rdx:rax = r10 u/ r11
 These are invalid because `100`, `10`, and `count` are immediate values:
 
 ```ss
-let count = 10
+const count = 10
 rdx:rax = 100 u* 10
 rdx:rax = r10 u/ count
 ```
@@ -356,6 +389,8 @@ main: {
 }
 ```
 
+`ret` emits stack cleanup automatically. `exit` does not need cleanup because the process terminates. Local jumps like `jmp .loop` are allowed in stack-using labels. Jumping from a stack-using label to a different top-level label is rejected. Falling through out of a stack-using label is also rejected.
+
 `push operand` stores a value on the stack and moves `rsp` down. `pop operand` loads a value from the stack and moves `rsp` up:
 
 ```ss
@@ -401,11 +436,16 @@ main: {
 
 `mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`. `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
 
-`let` and `mem` are intentionally different:
+`const`, `mem`, and `stack` answer different storage questions:
 
 ```ss
-let count:u16 = 3   // compile-time constant value
-mem count:u16 = 3   // writable memory named count
+mem total:u16 = 3     // static writable memory
+
+main: {
+  const count:u16 = 3  // compile-time constant value
+  stack local:u16 = 3  // label-local mutable stack slot
+  exit 0
+}
 ```
 
 Read and write `mem` values with memory operands:
@@ -549,7 +589,7 @@ al = -1       // valid
 al = 256      // invalid
 ax = 66000    // invalid
 
-let count:u8 = 255
+const count:u8 = 255
 al = count    // valid
 ```
 
