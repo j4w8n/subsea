@@ -133,8 +133,6 @@ skip:
 
 Labels fall through naturally. If execution reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
 
-Labels and address targets are checked before assembly. Duplicate labels, unknown jump/call targets, and unknown bindings or memory symbols are compile-time errors.
-
 ## Registers
 
 Subsea uses real x86-64 register names.
@@ -213,6 +211,14 @@ Integer bindings can be used as immediate operands:
 ```ss
 const count = 3
 rax = count
+```
+
+String bindings are printable text bindings, not numeric operands. Use them with `print` or print formatting, not register/memory assignment:
+
+```ss
+const message = "Hello World!\n"
+print message  // valid
+rax = message  // invalid
 ```
 
 Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
@@ -595,6 +601,14 @@ ax = 66000    // invalid
 
 const count:u8 = 255
 al = count    // valid
+```
+
+On x86-64, a 64-bit immediate value cannot always be encoded directly into a 64-bit memory destination. If a large value does not fit the direct memory encoding, move it through a 64-bit register first:
+
+```ss
+[addr]:u64 = 2147483648  // invalid
+rax = 2147483648
+[addr]:u64 = rax         // valid
 ```
 
 ## Control-Flow Recipes
