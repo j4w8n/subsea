@@ -3,7 +3,7 @@ use crate::ast::{
     CompareOp, Condition, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
     PrintPart, Program,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     let strings = collect_string_bindings(program)?;
@@ -236,14 +236,13 @@ fn validate_compare_operands(
 
     if let (Some(lhs_width), Some(rhs_width)) =
         (operand_width(lhs, stack), operand_width(rhs, stack))
+        && lhs_width != rhs_width
     {
-        if lhs_width != rhs_width {
-            return Err(format!(
-                "Cannot compare {}-bit operand with {}-bit operand",
-                lhs_width.bits(),
-                rhs_width.bits()
-            ));
-        }
+        return Err(format!(
+            "Cannot compare {}-bit operand with {}-bit operand",
+            lhs_width.bits(),
+            rhs_width.bits()
+        ));
     }
 
     if let (Some(value), Some(width)) = (
@@ -442,13 +441,49 @@ fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), 
         }
     }
 
-    match label.instructions.last() {
-        Some(Instruction::Ret | Instruction::Exit { .. } | Instruction::Jmp { .. }) => Ok(()),
-        _ => Err(format!(
-            "Label {:?} declares stack variables but can fall through; end with ret, exit, or local jmp",
-            label.name
-        )),
+    let label_positions: HashMap<&str, usize> = label
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| match instruction {
+            Instruction::Label { name } => Some((name.as_str(), index)),
+            _ => None,
+        })
+        .collect();
+    let mut pending = VecDeque::from([0]);
+    let mut visited = HashSet::new();
+
+    while let Some(index) = pending.pop_front() {
+        if !visited.insert(index) {
+            continue;
+        }
+
+        let instruction = label.instructions.get(index).ok_or_else(|| {
+            format!(
+                "Label {:?} declares stack variables but can fall through",
+                label.name
+            )
+        })?;
+
+        match instruction {
+            Instruction::Ret | Instruction::Exit { .. } => {}
+            Instruction::Jmp { target, condition } => {
+                let target_index = *label_positions.get(target.as_str()).ok_or_else(|| {
+                    format!(
+                        "Unknown local jump target {target:?} in label {:?}",
+                        label.name
+                    )
+                })?;
+                pending.push_back(target_index);
+                if condition.is_some() {
+                    pending.push_back(index + 1);
+                }
+            }
+            _ => pending.push_back(index + 1),
+        }
     }
+
+    Ok(())
 }
 
 fn validate_stack_register_use(label: &Label, stack: &StackFrame) -> Result<(), String> {
@@ -492,12 +527,16 @@ fn validate_instruction_does_not_use_rbp(
                 }
             }
         }
-        Instruction::Jmp { condition, .. } => {
-            if let Some(condition) = condition {
-                operands.push(&condition.lhs);
-                operands.push(&condition.rhs);
-            }
+        Instruction::Jmp {
+            condition: Some(condition),
+            ..
+        } => {
+            operands.push(&condition.lhs);
+            operands.push(&condition.rhs);
         }
+        Instruction::Jmp {
+            condition: None, ..
+        } => {}
         Instruction::Print { parts } => {
             for part in parts {
                 if let PrintPart::Operand(operand) = part {
@@ -927,13 +966,13 @@ fn validate_wide_math_operand(
         return Err(format!("{name} cannot be an immediate value"));
     }
 
-    if let Some(width) = operand_width(operand, stack) {
-        if width != Width::Bits64 {
-            return Err(format!(
-                "{name} must be 64-bit, found {}-bit operand",
-                width.bits()
-            ));
-        }
+    if let Some(width) = operand_width(operand, stack)
+        && width != Width::Bits64
+    {
+        return Err(format!(
+            "{name} must be 64-bit, found {}-bit operand",
+            width.bits()
+        ));
     }
 
     Ok(())
@@ -1002,14 +1041,13 @@ fn validate_binary_operands(
 
     if let (Some(src_width), Some(dst_width)) =
         (operand_width(src, stack), operand_width(dst, stack))
+        && src_width != dst_width
     {
-        if src_width != dst_width {
-            return Err(format!(
-                "Cannot use {}-bit source with {}-bit destination",
-                src_width.bits(),
-                dst_width.bits()
-            ));
-        }
+        return Err(format!(
+            "Cannot use {}-bit source with {}-bit destination",
+            src_width.bits(),
+            dst_width.bits()
+        ));
     }
 
     if let (Some(value), Some(width)) = (
@@ -1274,21 +1312,11 @@ fn memory_width_ptr(width: &MemoryWidth) -> &'static str {
 }
 
 fn register_width(name: &str) -> Option<Width> {
-    match name {
-        "rax" | "rbx" | "rcx" | "rdx" | "rdi" | "rsi" | "rbp" | "rsp" | "r8" | "r9" | "r10"
-        | "r11" | "r12" | "r13" | "r14" | "r15" => Some(Width::Bits64),
-        "eax" | "ebx" | "ecx" | "edx" | "edi" | "esi" | "ebp" | "esp" | "r8d" | "r9d" | "r10d"
-        | "r11d" | "r12d" | "r13d" | "r14d" | "r15d" => Some(Width::Bits32),
-        "ax" | "bx" | "cx" | "dx" | "di" | "si" | "bp" | "sp" | "r8w" | "r9w" | "r10w" | "r11w"
-        | "r12w" | "r13w" | "r14w" | "r15w" => Some(Width::Bits16),
-        "al" | "bl" | "cl" | "dl" | "ah" | "bh" | "ch" | "dh" | "dil" | "sil" | "bpl" | "spl"
-        | "r8b" | "r9b" | "r10b" | "r11b" | "r12b" | "r13b" | "r14b" | "r15b" => Some(Width::Bits8),
-        _ => None,
-    }
+    crate::register::width(name)
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Width {
+pub(crate) enum Width {
     Bits8,
     Bits16,
     Bits32,

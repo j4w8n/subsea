@@ -130,15 +130,15 @@ impl Parser {
 
     fn parse_instruction(&mut self, current_label: &str) -> Result<Instruction, String> {
         match self.advance() {
-            Some(Token::Call) => match self.parse_label_target("call", current_label)? {
-                target => Ok(Instruction::Call { target }),
-            },
-            Some(Token::Jmp) => match self.parse_label_target("jump", current_label)? {
-                target => {
-                    let condition = self.parse_optional_jump_condition()?;
-                    Ok(Instruction::Jmp { target, condition })
-                }
-            },
+            Some(Token::Call) => {
+                let target = self.parse_label_target("call", current_label)?;
+                Ok(Instruction::Call { target })
+            }
+            Some(Token::Jmp) => {
+                let target = self.parse_label_target("jump", current_label)?;
+                let condition = self.parse_optional_jump_condition()?;
+                Ok(Instruction::Jmp { target, condition })
+            }
             Some(Token::Exit) => {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
@@ -158,12 +158,11 @@ impl Parser {
                     })
                     .map_err(|_| format!("Invalid integer literal {value:?}")),
                 Some(Token::Minus) => match self.advance() {
-                    Some(Token::NumberLiteral(value)) => value
-                        .parse::<i64>()
+                    Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
+                        .map_err(|_| format!("Invalid integer literal -{value}"))
                         .map(|value| Instruction::Print {
-                            parts: vec![PrintPart::Operand(Operand::Immediate(-value))],
-                        })
-                        .map_err(|_| format!("Invalid integer literal -{value}")),
+                            parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                        }),
                     Some(token) => Err(format!(
                         "Expected number after '-' in print operand, found {token:?}"
                     )),
@@ -514,7 +513,9 @@ impl Parser {
             Some(Token::NumberLiteral(value)) => parse_integer_binding_value(&value, width),
             Some(Token::Minus) => match self.advance() {
                 Some(Token::NumberLiteral(value)) => {
-                    parse_integer_binding_value(&format!("-{value}"), width)
+                    let value = parse_signed_integer(&value, true)
+                        .map_err(|_| format!("Invalid integer binding value -{value}"))?;
+                    parse_integer_binding_value(&value.to_string(), width)
                 }
                 Some(token) => Err(format!(
                     "Expected number after '-' in binding value, found {token:?}"
@@ -538,9 +539,7 @@ impl Parser {
                 .parse::<i64>()
                 .map_err(|_| format!("Invalid integer {context} {value:?}")),
             Some(Token::Minus) => match self.advance() {
-                Some(Token::NumberLiteral(value)) => value
-                    .parse::<i64>()
-                    .map(|value| -value)
+                Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
                     .map_err(|_| format!("Invalid integer {context} -{value}")),
                 Some(token) => Err(format!(
                     "Expected number after '-' in {context}, found {token:?}"
@@ -612,9 +611,8 @@ impl Parser {
                 Ok(Operand::Dereference { address, width })
             }
             Some(Token::Minus) => match self.advance() {
-                Some(Token::NumberLiteral(value)) => value
-                    .parse::<i64>()
-                    .map(|value| Operand::Immediate(-value))
+                Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
+                    .map(Operand::Immediate)
                     .map_err(|_| format!("Invalid integer literal -{value}")),
                 Some(token) => Err(format!("Expected number after '-', found {token:?}")),
                 None => Err(String::from(
@@ -801,6 +799,19 @@ fn parse_integer_binding_value(
     Ok(BindingValue::Integer { value, width })
 }
 
+fn parse_signed_integer(value: &str, negative: bool) -> Result<i64, ()> {
+    if negative {
+        let magnitude = value.parse::<u64>().map_err(|_| ())?;
+        if magnitude == (i64::MAX as u64) + 1 {
+            Ok(i64::MIN)
+        } else {
+            i64::try_from(magnitude).map(|value| -value).map_err(|_| ())
+        }
+    } else {
+        value.parse::<i64>().map_err(|_| ())
+    }
+}
+
 fn validate_integer_binding_width(value: i64, width: MemoryWidth) -> Result<(), String> {
     let valid = match width {
         MemoryWidth::I8 => i8::MIN as i64 <= value && value <= i8::MAX as i64,
@@ -896,6 +907,156 @@ fn validate_main_label(labels: &[Label]) -> Result<(), String> {
         Ok(())
     } else {
         Err(String::from("Program must define a top-level main label"))
+    }
+}
+
+pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
+    let memory = &program.memory;
+    let labels = &program.labels;
+    let memory_names: HashSet<&str> = memory
+        .iter()
+        .map(|declaration| match declaration {
+            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => {
+                name.as_str()
+            }
+        })
+        .collect();
+    let mut label_names = HashSet::new();
+
+    for label in labels {
+        if !label_names.insert(label.name.as_str()) {
+            return Err(format!("Label {:?} is already defined", label.name));
+        }
+        for instruction in &label.instructions {
+            if let Instruction::Label { name } = instruction
+                && !label_names.insert(name.as_str())
+            {
+                return Err(format!("Label {:?} is already defined", name));
+            }
+        }
+    }
+
+    for label in labels {
+        let mut bindings = HashSet::new();
+        for instruction in &label.instructions {
+            if let Instruction::Const { name, .. } | Instruction::Stack { name, .. } = instruction {
+                bindings.insert(name.as_str());
+            }
+        }
+
+        for instruction in &label.instructions {
+            validate_instruction_symbols(
+                instruction,
+                &bindings,
+                &memory_names,
+                &label_names,
+                &label.name,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_instruction_symbols(
+    instruction: &Instruction,
+    bindings: &HashSet<&str>,
+    memory: &HashSet<&str>,
+    labels: &HashSet<&str>,
+    current_label: &str,
+) -> Result<(), String> {
+    let mut operands = Vec::new();
+    match instruction {
+        Instruction::Assign { dst, value } => {
+            match dst {
+                AssignmentTarget::Operand(operand) => operands.push(operand),
+                AssignmentTarget::RegisterPair { .. } => {}
+            }
+            match value {
+                AssignmentValue::Operand(operand) => operands.push(operand),
+                AssignmentValue::Binary { lhs, rhs, .. }
+                | AssignmentValue::WideMultiply { lhs, rhs, .. }
+                | AssignmentValue::WideDivide { lhs, rhs, .. } => {
+                    operands.push(lhs);
+                    operands.push(rhs);
+                }
+            }
+        }
+        Instruction::Call { target } | Instruction::Jmp { target, .. } => {
+            if !labels.contains(target.as_str()) {
+                return Err(format!(
+                    "Unknown label {target:?} in label {current_label:?}"
+                ));
+            }
+            if let Instruction::Jmp {
+                condition: Some(condition),
+                ..
+            } = instruction
+            {
+                operands.extend([&condition.lhs, &condition.rhs]);
+            }
+        }
+        Instruction::Print { parts } => {
+            for part in parts {
+                match part {
+                    PrintPart::Binding(name) => {
+                        if !bindings.contains(name.as_str()) {
+                            return Err(format!(
+                                "Unknown binding {name:?} in label {current_label:?}"
+                            ));
+                        }
+                    }
+                    PrintPart::Operand(operand) => operands.push(operand),
+                    PrintPart::Literal(_) => {}
+                }
+            }
+        }
+        Instruction::Pop { dst } => operands.push(dst),
+        Instruction::Push { src } => operands.push(src),
+        Instruction::Stack { value, .. } => operands.push(value),
+        _ => {}
+    }
+
+    for operand in operands {
+        validate_operand_symbol(operand, bindings, memory, labels, current_label)?;
+    }
+    Ok(())
+}
+
+fn validate_operand_symbol(
+    operand: &Operand,
+    bindings: &HashSet<&str>,
+    memory: &HashSet<&str>,
+    labels: &HashSet<&str>,
+    current_label: &str,
+) -> Result<(), String> {
+    match operand {
+        Operand::Ident(name) if !bindings.contains(name.as_str()) => Err(format!(
+            "Unknown symbol {name:?} in label {current_label:?}"
+        )),
+        Operand::Pointer(name)
+            if !memory.contains(name.as_str()) && !labels.contains(name.as_str()) =>
+        {
+            Err(format!(
+                "Unknown address target {name:?} in label {current_label:?}"
+            ))
+        }
+        Operand::Dereference { address, .. } => {
+            for term in
+                std::iter::once(&address.first).chain(address.rest.iter().map(|(_, term)| term))
+            {
+                if let AddressTerm::Ident(name) = term
+                    && !memory.contains(name.as_str())
+                    && !labels.contains(name.as_str())
+                {
+                    return Err(format!(
+                        "Unknown address symbol {name:?} in label {current_label:?}"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

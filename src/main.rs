@@ -9,7 +9,7 @@ use subsea::codegen::emit_x86_64_linux_asm;
 use subsea::driver::{self, build_executable, run_executable};
 use subsea::grammar::Token;
 use subsea::lexer::get_next_token;
-use subsea::parser::Parser;
+use subsea::parser::{Parser, validate_program_symbols};
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
@@ -157,6 +157,7 @@ fn compile_to_asm_with_timings(source_path: &str) -> Result<CompilationOutput, S
     let parse_started = Instant::now();
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program()?;
+    validate_program_symbols(&program)?;
     let parse_ast = parse_started.elapsed();
 
     let codegen_started = Instant::now();
