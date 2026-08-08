@@ -261,7 +261,7 @@ main: {
 }
 ```
 
-Stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A stack variable loads when used as an operand and stores when assigned:
+Scalar stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A scalar stack variable loads when used as an operand and stores when assigned:
 
 ```ss
 stack count:u64 = 8
@@ -272,6 +272,31 @@ rax = count  // load from stack slot
 Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
 
 If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a stack-using label.
+
+Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
+
+```ss
+stack message:str = "Hello\n"
+print message
+```
+
+Use `slice ptr, len` to create a string view over bytes that already exist in memory. It does not copy or allocate:
+
+```ss
+mem buf:u8(1024)
+
+main: {
+  rax = 0
+  rdi = 0
+  rsi = &buf
+  rdx = 1024
+  syscall
+
+  stack input:str = slice &buf, rax
+  print input
+  exit 0
+}
+```
 
 ## Printing
 
