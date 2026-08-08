@@ -44,9 +44,9 @@ pub enum Token {
     Ampersand,
     Call,
     Comma,
+    Const,
     Exit,
     Jmp,
-    Let,
     Literal,
     LocalIdent(String),
     Mem,
@@ -56,6 +56,7 @@ pub enum Token {
     Push,
     Register(String),
     Ret,
+    Stack,
     Syscall,
 }
 

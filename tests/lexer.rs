@@ -37,3 +37,9 @@ fn lexes_comparison_operators() {
     assert_eq!(lex_one("u>").unwrap(), Some(Token::UGreater));
     assert_eq!(lex_one("u>=").unwrap(), Some(Token::UGreaterEquals));
 }
+
+#[test]
+fn lexes_storage_and_cleanup_keywords() {
+    assert_eq!(lex_one("const").unwrap(), Some(Token::Const));
+    assert_eq!(lex_one("stack").unwrap(), Some(Token::Stack));
+}

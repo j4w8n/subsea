@@ -32,6 +32,7 @@ impl Parser {
         }
 
         validate_memory_names(&memory)?;
+        validate_label_storage_names(&memory, &labels)?;
         validate_main_label(&labels)?;
 
         Ok(Program {
@@ -142,26 +143,7 @@ impl Parser {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
             }
-            Some(Token::Let) => {
-                let name = match self.advance() {
-                    Some(Token::Ident(name)) => name,
-                    Some(token) => {
-                        return Err(format!("Expected binding name after let, found {token:?}"));
-                    }
-                    None => {
-                        return Err(String::from(
-                            "Expected binding name after let, found end of input",
-                        ));
-                    }
-                };
-
-                let width = self.parse_optional_binding_width()?;
-                self.expect(Token::Equals, "Expected '=' after binding name")?;
-
-                let value = self.parse_binding_value(width)?;
-
-                Ok(Instruction::Let { name, value })
-            }
+            Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => match self.advance() {
                 Some(Token::Ident(name)) => Ok(Instruction::Print {
                     parts: vec![PrintPart::Binding(name)],
@@ -206,6 +188,7 @@ impl Parser {
                 Ok(Instruction::Push { src })
             }
             Some(Token::Ret) => Ok(Instruction::Ret),
+            Some(Token::Stack) => self.parse_stack_declaration(),
             Some(Token::Syscall) => Ok(Instruction::Syscall),
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
@@ -236,6 +219,65 @@ impl Parser {
             Some(token) => Err(format!("Expected instruction, found {token:?}")),
             None => Err(String::from("Expected instruction, found end of input")),
         }
+    }
+
+    fn parse_const_declaration(&mut self) -> Result<Instruction, String> {
+        let name = match self.advance() {
+            Some(Token::Ident(name)) => name,
+            Some(token) => {
+                return Err(format!(
+                    "Expected binding name after const, found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected binding name after const, found end of input",
+                ));
+            }
+        };
+
+        let width = self.parse_optional_binding_width()?;
+        self.expect(Token::Equals, "Expected '=' after binding name")?;
+
+        let value = self.parse_binding_value(width)?;
+
+        Ok(Instruction::Const { name, value })
+    }
+
+    fn parse_stack_declaration(&mut self) -> Result<Instruction, String> {
+        let name = match self.advance() {
+            Some(Token::Ident(name)) => name,
+            Some(token) => {
+                return Err(format!(
+                    "Expected stack variable name after stack, found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected stack variable name after stack, found end of input",
+                ));
+            }
+        };
+
+        self.expect(Token::Colon, "Expected ':' after stack variable name")?;
+        let width = match self.advance() {
+            Some(Token::Ident(name)) => parse_memory_width(&name)?,
+            Some(token) => {
+                return Err(format!(
+                    "Expected stack variable width after ':', found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected stack variable width after ':', found end of input",
+                ));
+            }
+        };
+
+        self.expect(Token::Equals, "Expected '=' after stack variable width")?;
+        let value = self.parse_operand()?;
+
+        Ok(Instruction::Stack { name, width, value })
     }
 
     fn parse_label_target(
@@ -804,6 +846,45 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
 
         if !names.insert(name) {
             return Err(format!("Memory name {name:?} is already defined"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_label_storage_names(
+    memory: &[MemoryDeclaration],
+    labels: &[Label],
+) -> Result<(), String> {
+    let memory_names: HashSet<_> = memory
+        .iter()
+        .map(|declaration| match declaration {
+            MemoryDeclaration::Scalar { name, .. } | MemoryDeclaration::Buffer { name, .. } => name,
+        })
+        .collect();
+
+    for label in labels {
+        let mut names = HashSet::new();
+
+        for instruction in &label.instructions {
+            match instruction {
+                Instruction::Const { name, .. } | Instruction::Stack { name, .. } => {
+                    if memory_names.contains(name) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level memory",
+                            label.name
+                        ));
+                    }
+
+                    if !names.insert(name) {
+                        return Err(format!(
+                            "Name {name:?} is already defined in label {:?}",
+                            label.name
+                        ));
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

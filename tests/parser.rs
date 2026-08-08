@@ -26,7 +26,7 @@ fn finish_label(mut tokens: Vec<Token>) -> Vec<Token> {
 fn parses_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Let,
+        Token::Const,
         Token::Ident(String::from("count")),
         Token::Equals,
         Token::NumberLiteral(String::from("3")),
@@ -36,7 +36,7 @@ fn parses_integer_binding() {
 
     assert_eq!(
         program.labels[0].instructions[0],
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 3,
@@ -50,7 +50,7 @@ fn parses_integer_binding() {
 fn parses_negative_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Let,
+        Token::Const,
         Token::Ident(String::from("count")),
         Token::Equals,
         Token::Minus,
@@ -61,7 +61,7 @@ fn parses_negative_integer_binding() {
 
     assert_eq!(
         program.labels[0].instructions[0],
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: -3,
@@ -75,7 +75,7 @@ fn parses_negative_integer_binding() {
 fn parses_typed_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Let,
+        Token::Const,
         Token::Ident(String::from("count")),
         Token::Colon,
         Token::Ident(String::from("u8")),
@@ -87,13 +87,37 @@ fn parses_typed_integer_binding() {
 
     assert_eq!(
         program.labels[0].instructions[0],
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: Some(MemoryWidth::U8),
             },
         }
+    );
+}
+
+#[test]
+fn parses_stack_declaration() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+        Token::Ident(String::from("u64")),
+        Token::Equals,
+        Token::NumberLiteral(String::from("8")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Stack {
+            name: String::from("count"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(8),
+        }]
     );
 }
 
@@ -408,7 +432,7 @@ fn rejects_missing_main_label() {
 fn rejects_typed_integer_binding_out_of_range() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Let,
+        Token::Const,
         Token::Ident(String::from("count")),
         Token::Colon,
         Token::Ident(String::from("u8")),

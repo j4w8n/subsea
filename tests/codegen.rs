@@ -18,7 +18,7 @@ fn main_program(instructions: Vec<Instruction>) -> Program {
 #[test]
 fn prints_integer_binding() {
     let program = main_program(vec![
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 3,
@@ -55,7 +55,7 @@ fn emits_runtime_integer_print() {
 #[test]
 fn uses_integer_binding_as_immediate_operand() {
     let program = main_program(vec![
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 3,
@@ -75,9 +75,78 @@ fn uses_integer_binding_as_immediate_operand() {
 }
 
 #[test]
+fn emits_stack_frame_and_stack_assignment() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("count"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(8),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Ident(String::from("count"))),
+            value: AssignmentValue::Binary {
+                op: MathOp::Add,
+                lhs: Operand::Ident(String::from("count")),
+                rhs: Operand::Immediate(1),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("main:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], 8\n"));
+    assert!(asm.contains("  add qword ptr [rbp - 8], 1\n"));
+    assert!(asm.contains("  mov rax, qword ptr [rbp - 8]\n"));
+}
+
+#[test]
+fn emits_stack_cleanup_before_ret() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("value"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(1),
+        },
+        Instruction::Ret,
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rsp, rbp\n  pop rbp\n  ret\n"));
+}
+
+#[test]
+fn rejects_cross_label_jump_from_stack_label() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("value"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(1),
+        },
+        Instruction::Jmp {
+            target: String::from("other"),
+            condition: None,
+        },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Label \"main\" declares stack variables and cannot jump to top-level label \"other\""
+    );
+}
+
+#[test]
 fn formats_integer_binding() {
     let program = main_program(vec![
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 3,
@@ -119,7 +188,7 @@ fn rejects_immediate_that_does_not_fit_register_destination() {
 #[test]
 fn rejects_integer_binding_that_does_not_fit_memory_destination() {
     let program = main_program(vec![
-        Instruction::Let {
+        Instruction::Const {
             name: String::from("count"),
             value: BindingValue::Integer {
                 value: 256,

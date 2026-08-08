@@ -44,7 +44,7 @@ pub enum Instruction {
     Label {
         name: String,
     },
-    Let {
+    Const {
         name: String,
         value: BindingValue,
     },
@@ -58,6 +58,11 @@ pub enum Instruction {
         src: Operand,
     },
     Ret,
+    Stack {
+        name: String,
+        width: MemoryWidth,
+        value: Operand,
+    },
     Syscall,
 }
 

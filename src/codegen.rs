@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    Program,
+    CompareOp, Condition, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
+    PrintPart, Program,
 };
 use std::collections::HashMap;
 
@@ -20,14 +20,23 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     asm.push_str(&format!("  jmp {}\n\n", program.entry));
 
     for label in &program.labels {
+        let stack = build_stack_frame(label)?;
+        validate_stack_control_flow(label, &stack)?;
+        validate_stack_register_use(label, &stack)?;
+
         asm.push_str(&format!("{}:\n", label.name));
+
+        if stack.has_slots() {
+            emit_frame_prologue(&mut asm, &stack);
+            emit_stack_initializers(&mut asm, &label.instructions, &strings, &label.name, &stack)?;
+        }
 
         let mut runtime_print_index = 0;
 
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Assign { dst, value } => {
-                    emit_assignment(&mut asm, dst, value, &strings, &label.name)?;
+                    emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
                 }
                 Instruction::Call { target } => {
                     asm.push_str(&format!("  call {target}\n"));
@@ -39,7 +48,14 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 }
                 Instruction::Jmp { target, condition } => {
                     if let Some(condition) = condition {
-                        emit_conditional_jump(&mut asm, target, condition, &strings, &label.name)?;
+                        emit_conditional_jump(
+                            &mut asm,
+                            target,
+                            condition,
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
                     } else {
                         asm.push_str(&format!("  jmp {target}\n"));
                     }
@@ -47,11 +63,33 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
                 }
-                Instruction::Let { .. } => {}
+                Instruction::Const { .. } | Instruction::Stack { .. } => {}
                 Instruction::Print { parts } => {
                     for part in parts {
                         match part {
-                            PrintPart::Binding(_) | PrintPart::Literal(_) => {
+                            PrintPart::Binding(name) => {
+                                if stack.slots.contains_key(name) {
+                                    runtime_print_index += 1;
+                                    emit_print_operand_instruction(
+                                        &mut asm,
+                                        &Operand::Ident(name.clone()),
+                                        &strings,
+                                        &label.name,
+                                        &stack,
+                                        runtime_print_index,
+                                    )?;
+                                } else {
+                                    let string = resolve_print_part(
+                                        &strings,
+                                        &mut literal_indexes,
+                                        &label.name,
+                                        part,
+                                    )?;
+
+                                    emit_print_string_instruction(&mut asm, string);
+                                }
+                            }
+                            PrintPart::Literal(_) => {
                                 let string = resolve_print_part(
                                     &strings,
                                     &mut literal_indexes,
@@ -68,6 +106,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                                     operand,
                                     &strings,
                                     &label.name,
+                                    &stack,
                                     runtime_print_index,
                                 )?;
                             }
@@ -75,17 +114,24 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     }
                 }
                 Instruction::Pop { dst } => {
-                    validate_pop_operand(dst)?;
-                    let dst = emit_operand(dst, &strings, &label.name)?;
+                    validate_pop_operand(dst, &stack)?;
+                    let dst = emit_operand(dst, &strings, &label.name, &stack)?;
                     asm.push_str(&format!("  pop {dst}\n"));
                 }
                 Instruction::Push { src } => {
-                    validate_push_operand(src, &strings, &label.name)?;
-                    let src = emit_operand(src, &strings, &label.name)?;
+                    validate_push_operand(src, &strings, &label.name, &stack)?;
+                    let src = emit_operand(src, &strings, &label.name, &stack)?;
                     asm.push_str(&format!("  push {src}\n"));
                 }
-                Instruction::Ret => asm.push_str("  ret\n"),
-                Instruction::Syscall => asm.push_str("  syscall\n"),
+                Instruction::Ret => {
+                    if stack.has_slots() {
+                        emit_frame_epilogue(&mut asm);
+                    }
+                    asm.push_str("  ret\n");
+                }
+                Instruction::Syscall => {
+                    asm.push_str("  syscall\n");
+                }
             }
         }
 
@@ -101,6 +147,7 @@ fn emit_conditional_jump(
     condition: &Condition,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     let (lhs, rhs, op) = normalize_compare(
         &condition.lhs,
@@ -108,12 +155,13 @@ fn emit_conditional_jump(
         condition.op,
         strings,
         label_name,
+        stack,
     )?;
 
-    validate_compare_operands(lhs, rhs, strings, label_name)?;
+    validate_compare_operands(lhs, rhs, strings, label_name, stack)?;
 
-    let lhs = emit_operand(lhs, strings, label_name)?;
-    let rhs = emit_operand(rhs, strings, label_name)?;
+    let lhs = emit_operand(lhs, strings, label_name, stack)?;
+    let rhs = emit_operand(rhs, strings, label_name, stack)?;
     asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
     asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
 
@@ -126,9 +174,10 @@ fn normalize_compare<'a>(
     op: CompareOp,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(&'a Operand, &'a Operand, CompareOp), String> {
-    if is_immediate_operand(lhs, strings, label_name) {
-        if is_immediate_operand(rhs, strings, label_name) {
+    if is_immediate_operand(lhs, strings, label_name, stack) {
+        if is_immediate_operand(rhs, strings, label_name, stack) {
             return Err(String::from("Comparison cannot use two immediate operands"));
         }
 
@@ -173,18 +222,21 @@ fn validate_compare_operands(
     rhs: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     if matches!(lhs, Operand::Pointer(_)) || matches!(rhs, Operand::Pointer(_)) {
         return Err(String::from("Comparison cannot use an address-of operand"));
     }
 
-    if matches!(lhs, Operand::Dereference { .. }) && matches!(rhs, Operand::Dereference { .. }) {
+    if is_memory_operand(lhs, stack) && is_memory_operand(rhs, stack) {
         return Err(String::from(
             "Comparison cannot use memory for both operands",
         ));
     }
 
-    if let (Some(lhs_width), Some(rhs_width)) = (operand_width(lhs), operand_width(rhs)) {
+    if let (Some(lhs_width), Some(rhs_width)) =
+        (operand_width(lhs, stack), operand_width(rhs, stack))
+    {
         if lhs_width != rhs_width {
             return Err(format!(
                 "Cannot compare {}-bit operand with {}-bit operand",
@@ -195,13 +247,13 @@ fn validate_compare_operands(
     }
 
     if let (Some(value), Some(width)) = (
-        immediate_value(rhs, strings, label_name),
-        destination_width(lhs),
+        immediate_value(rhs, strings, label_name, stack),
+        destination_width(lhs, stack),
     ) {
         validate_immediate_range(value, width)?;
     }
 
-    if is_immediate_operand(rhs, strings, label_name)
+    if is_immediate_operand(rhs, strings, label_name, stack)
         && matches!(lhs, Operand::Dereference { width: None, .. })
     {
         return Err(String::from(
@@ -225,6 +277,23 @@ struct StringTable {
     integers: HashMap<(String, String), IntegerBinding>,
 }
 
+struct StackFrame {
+    slots: HashMap<String, StackSlot>,
+    size: usize,
+}
+
+#[derive(Clone, Copy)]
+struct StackSlot {
+    offset: usize,
+    width: MemoryWidth,
+}
+
+impl StackFrame {
+    fn has_slots(&self) -> bool {
+        !self.slots.is_empty()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct IntegerBinding {
     value: i64,
@@ -240,7 +309,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     for label in &program.labels {
         for instruction in &label.instructions {
             match instruction {
-                Instruction::Let { name, value } => {
+                Instruction::Const { name, value } => {
                     let key = (label.name.clone(), name.clone());
 
                     if bindings.contains_key(&key) {
@@ -295,6 +364,205 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         literals,
         integers,
     })
+}
+
+fn build_stack_frame(label: &Label) -> Result<StackFrame, String> {
+    let mut slots = HashMap::new();
+    let mut offset = 0;
+
+    for instruction in &label.instructions {
+        if let Instruction::Stack { name, width, .. } = instruction {
+            offset += memory_width_size(width).max(8);
+            slots.insert(
+                name.clone(),
+                StackSlot {
+                    offset,
+                    width: *width,
+                },
+            );
+        }
+    }
+
+    Ok(StackFrame {
+        slots,
+        size: align_to(offset, 16),
+    })
+}
+
+fn emit_frame_prologue(asm: &mut String, stack: &StackFrame) {
+    asm.push_str("  push rbp\n");
+    asm.push_str("  mov rbp, rsp\n");
+    if stack.size > 0 {
+        asm.push_str(&format!("  sub rsp, {}\n", stack.size));
+    }
+}
+
+fn emit_frame_epilogue(asm: &mut String) {
+    asm.push_str("  mov rsp, rbp\n");
+    asm.push_str("  pop rbp\n");
+}
+
+fn emit_stack_initializers(
+    asm: &mut String,
+    instructions: &[Instruction],
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    for instruction in instructions {
+        if let Instruction::Stack { name, value, .. } = instruction {
+            if !is_immediate_operand(value, strings, label_name, stack) {
+                return Err(format!(
+                    "Stack variable {name:?} initializer must be an integer immediate or const"
+                ));
+            }
+
+            let dst = Operand::Ident(name.clone());
+            emit_copy_instruction(asm, value, &dst, strings, label_name, stack)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), String> {
+    if !stack.has_slots() {
+        return Ok(());
+    }
+
+    for instruction in &label.instructions {
+        match instruction {
+            Instruction::Jmp { target, .. } if !is_local_label_target(target) => {
+                return Err(format!(
+                    "Label {:?} declares stack variables and cannot jump to top-level label {target:?}",
+                    label.name
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    match label.instructions.last() {
+        Some(Instruction::Ret | Instruction::Exit { .. } | Instruction::Jmp { .. }) => Ok(()),
+        _ => Err(format!(
+            "Label {:?} declares stack variables but can fall through; end with ret, exit, or local jmp",
+            label.name
+        )),
+    }
+}
+
+fn validate_stack_register_use(label: &Label, stack: &StackFrame) -> Result<(), String> {
+    if !stack.has_slots() {
+        return Ok(());
+    }
+
+    for instruction in &label.instructions {
+        validate_instruction_does_not_use_rbp(instruction, &label.name)?;
+    }
+
+    Ok(())
+}
+
+fn validate_instruction_does_not_use_rbp(
+    instruction: &Instruction,
+    label_name: &str,
+) -> Result<(), String> {
+    let mut operands = Vec::new();
+
+    match instruction {
+        Instruction::Assign { dst, value } => {
+            match dst {
+                AssignmentTarget::Operand(operand) => operands.push(operand),
+                AssignmentTarget::RegisterPair { high, low } => {
+                    if is_rbp_register(high) || is_rbp_register(low) {
+                        return Err(format!(
+                            "Label {label_name:?} declares stack variables, so rbp is reserved"
+                        ));
+                    }
+                }
+            }
+
+            match value {
+                AssignmentValue::Operand(operand) => operands.push(operand),
+                AssignmentValue::Binary { lhs, rhs, .. }
+                | AssignmentValue::WideMultiply { lhs, rhs, .. }
+                | AssignmentValue::WideDivide { lhs, rhs, .. } => {
+                    operands.push(lhs);
+                    operands.push(rhs);
+                }
+            }
+        }
+        Instruction::Jmp { condition, .. } => {
+            if let Some(condition) = condition {
+                operands.push(&condition.lhs);
+                operands.push(&condition.rhs);
+            }
+        }
+        Instruction::Print { parts } => {
+            for part in parts {
+                if let PrintPart::Operand(operand) = part {
+                    operands.push(operand);
+                }
+            }
+        }
+        Instruction::Pop { dst } => operands.push(dst),
+        Instruction::Push { src } => operands.push(src),
+        Instruction::Stack { value, .. } => operands.push(value),
+        _ => {}
+    }
+
+    if operands.iter().any(|operand| operand_uses_rbp(operand)) {
+        return Err(format!(
+            "Label {label_name:?} declares stack variables, so rbp is reserved"
+        ));
+    }
+
+    Ok(())
+}
+
+fn operand_is_stack_slot(operand: &Operand, stack: &StackFrame) -> bool {
+    matches!(operand, Operand::Ident(name) if stack.slots.contains_key(name))
+}
+
+fn is_memory_operand(operand: &Operand, stack: &StackFrame) -> bool {
+    matches!(operand, Operand::Dereference { .. }) || operand_is_stack_slot(operand, stack)
+}
+
+fn is_local_label_target(target: &str) -> bool {
+    target.starts_with(".L.")
+}
+
+fn align_to(value: usize, alignment: usize) -> usize {
+    value.div_ceil(alignment) * alignment
+}
+
+fn is_rbp_register(name: &str) -> bool {
+    matches!(name, "rbp" | "ebp" | "bp" | "bpl")
+}
+
+fn operand_uses_rbp(operand: &Operand) -> bool {
+    match operand {
+        Operand::Register(name) => is_rbp_register(name),
+        Operand::Dereference { address, .. } => address_uses_rbp(address),
+        _ => false,
+    }
+}
+
+fn address_uses_rbp(address: &Address) -> bool {
+    address_term_uses_rbp(&address.first)
+        || address
+            .rest
+            .iter()
+            .any(|(_, term)| address_term_uses_rbp(term))
+}
+
+fn address_term_uses_rbp(term: &AddressTerm) -> bool {
+    match term {
+        AddressTerm::Register(name) | AddressTerm::ScaledRegister { register: name, .. } => {
+            is_rbp_register(name)
+        }
+        _ => false,
+    }
 }
 
 fn resolve_print_part<'a>(
@@ -413,6 +681,7 @@ fn emit_print_operand_instruction(
     operand: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
     if matches!(operand, Operand::Pointer(_)) {
@@ -421,7 +690,7 @@ fn emit_print_operand_instruction(
         ));
     }
 
-    load_print_operand(asm, operand, strings, label_name)?;
+    load_print_operand(asm, operand, strings, label_name, stack)?;
 
     let loop_label = format!(".L.{label_name}.print_{index}_loop");
     let done_label = format!(".L.{label_name}.print_{index}_done");
@@ -455,18 +724,19 @@ fn load_print_operand(
     operand: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
-    match operand_width(operand) {
+    match operand_width(operand, stack) {
         Some(Width::Bits8 | Width::Bits16) => {
-            let operand = emit_operand(operand, strings, label_name)?;
+            let operand = emit_operand(operand, strings, label_name, stack)?;
             asm.push_str(&format!("  movzx rax, {operand}\n"));
         }
         Some(Width::Bits32) => {
-            let operand = emit_operand(operand, strings, label_name)?;
+            let operand = emit_operand(operand, strings, label_name, stack)?;
             asm.push_str(&format!("  mov eax, {operand}\n"));
         }
         _ => {
-            let operand = emit_operand(operand, strings, label_name)?;
+            let operand = emit_operand(operand, strings, label_name, stack)?;
             asm.push_str(&format!("  mov rax, {operand}\n"));
         }
     }
@@ -481,11 +751,12 @@ fn emit_binary_instruction(
     dst: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
-    validate_binary_operands(opcode, src, dst, strings, label_name)?;
+    validate_binary_operands(opcode, src, dst, strings, label_name, stack)?;
 
-    let src = emit_operand(src, strings, label_name)?;
-    let dst = emit_operand(dst, strings, label_name)?;
+    let src = emit_operand(src, strings, label_name, stack)?;
+    let dst = emit_operand(dst, strings, label_name, stack)?;
     asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
 
     Ok(())
@@ -497,18 +768,19 @@ fn emit_assignment(
     value: &AssignmentValue,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     match value {
         AssignmentValue::Operand(src) => {
             let dst = assignment_operand_target(dst)?;
-            emit_copy_instruction(asm, src, dst, strings, label_name)
+            emit_copy_instruction(asm, src, dst, strings, label_name, stack)
         }
         AssignmentValue::Binary { op, lhs, rhs } => {
             let dst = assignment_operand_target(dst)?;
 
-            if !matches!(dst, Operand::Register(_)) {
+            if !matches!(dst, Operand::Register(_)) && *op == MathOp::Multiply {
                 return Err(String::from(
-                    "Math assignment destination must be a register for now",
+                    "Multiply assignment destination must be a register for now",
                 ));
             }
 
@@ -519,7 +791,7 @@ fn emit_assignment(
                     MathOp::Subtract => "sub",
                 };
 
-                return emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name);
+                return emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name, stack);
             }
 
             if rhs == dst {
@@ -531,19 +803,23 @@ fn emit_assignment(
                             MathOp::Subtract => unreachable!(),
                         };
 
-                        return emit_binary_instruction(asm, opcode, lhs, dst, strings, label_name);
+                        return emit_binary_instruction(
+                            asm, opcode, lhs, dst, strings, label_name, stack,
+                        );
                     }
                     MathOp::Subtract => {
-                        let dst_operand = emit_operand(dst, strings, label_name)?;
+                        let dst_operand = emit_operand(dst, strings, label_name, stack)?;
                         asm.push_str(&format!("  neg {dst_operand}\n"));
 
-                        return emit_binary_instruction(asm, "add", lhs, dst, strings, label_name);
+                        return emit_binary_instruction(
+                            asm, "add", lhs, dst, strings, label_name, stack,
+                        );
                     }
                 }
             }
 
             {
-                emit_copy_instruction(asm, lhs, dst, strings, label_name)?;
+                emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
 
                 let opcode = match op {
                     MathOp::Add => "add",
@@ -551,30 +827,54 @@ fn emit_assignment(
                     MathOp::Subtract => "sub",
                 };
 
-                emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name)
+                emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name, stack)
             }
         }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => {
             validate_wide_math_target("Widened multiply", dst)?;
-            validate_wide_math_operand("Widened multiply left operand", lhs, strings, label_name)?;
-            validate_wide_math_operand("Widened multiply right operand", rhs, strings, label_name)?;
+            validate_wide_math_operand(
+                "Widened multiply left operand",
+                lhs,
+                strings,
+                label_name,
+                stack,
+            )?;
+            validate_wide_math_operand(
+                "Widened multiply right operand",
+                rhs,
+                strings,
+                label_name,
+                stack,
+            )?;
 
             let rax = Operand::Register(String::from("rax"));
-            emit_copy_instruction(asm, lhs, &rax, strings, label_name)?;
+            emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
             let opcode = if *signed { "imul" } else { "mul" };
-            let rhs = emit_operand(rhs, strings, label_name)?;
+            let rhs = emit_operand(rhs, strings, label_name, stack)?;
             asm.push_str(&format!("  {opcode} {rhs}\n"));
 
             Ok(())
         }
         AssignmentValue::WideDivide { signed, lhs, rhs } => {
             validate_wide_math_target("Widened division", dst)?;
-            validate_wide_math_operand("Widened division left operand", lhs, strings, label_name)?;
-            validate_wide_math_operand("Widened division right operand", rhs, strings, label_name)?;
+            validate_wide_math_operand(
+                "Widened division left operand",
+                lhs,
+                strings,
+                label_name,
+                stack,
+            )?;
+            validate_wide_math_operand(
+                "Widened division right operand",
+                rhs,
+                strings,
+                label_name,
+                stack,
+            )?;
 
             let rax = Operand::Register(String::from("rax"));
-            emit_copy_instruction(asm, lhs, &rax, strings, label_name)?;
+            emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
             if *signed {
                 asm.push_str("  cqo\n");
@@ -583,7 +883,7 @@ fn emit_assignment(
             }
 
             let opcode = if *signed { "idiv" } else { "div" };
-            let rhs = emit_operand(rhs, strings, label_name)?;
+            let rhs = emit_operand(rhs, strings, label_name, stack)?;
             asm.push_str(&format!("  {opcode} {rhs}\n"));
 
             Ok(())
@@ -617,16 +917,17 @@ fn validate_wide_math_operand(
     operand: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     if matches!(operand, Operand::Pointer(_)) {
         return Err(format!("{name} cannot be an address-of operand"));
     }
 
-    if is_immediate_operand(operand, strings, label_name) {
+    if is_immediate_operand(operand, strings, label_name, stack) {
         return Err(format!("{name} cannot be an immediate value"));
     }
 
-    if let Some(width) = operand_width(operand) {
+    if let Some(width) = operand_width(operand, stack) {
         if width != Width::Bits64 {
             return Err(format!(
                 "{name} must be 64-bit, found {}-bit operand",
@@ -644,16 +945,17 @@ fn emit_copy_instruction(
     dst: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     if let Operand::Pointer(name) = src {
         validate_address_copy_dst(dst)?;
 
-        let dst = emit_operand(dst, strings, label_name)?;
+        let dst = emit_operand(dst, strings, label_name, stack)?;
         asm.push_str(&format!("  lea {dst}, [rip + {name}]\n"));
 
         Ok(())
     } else {
-        emit_binary_instruction(asm, "mov", src, dst, strings, label_name)
+        emit_binary_instruction(asm, "mov", src, dst, strings, label_name, stack)
     }
 }
 
@@ -663,11 +965,11 @@ fn validate_binary_operands(
     dst: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
-    if matches!(
-        dst,
-        Operand::Immediate(_) | Operand::Ident(_) | Operand::Pointer(_)
-    ) {
+    if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_))
+        || matches!(dst, Operand::Ident(name) if !stack.slots.contains_key(name))
+    {
         return Err(format!(
             "{opcode} destination must be a register or memory operand"
         ));
@@ -677,14 +979,14 @@ fn validate_binary_operands(
         return Err(format!("{opcode} source cannot be an address-of operand"));
     }
 
-    if matches!(src, Operand::Dereference { .. }) && matches!(dst, Operand::Dereference { .. }) {
+    if is_memory_operand(src, stack) && is_memory_operand(dst, stack) {
         return Err(format!(
             "{opcode} cannot use memory for both source and destination"
         ));
     }
 
     if opcode == "mov"
-        && is_immediate_operand(src, strings, label_name)
+        && is_immediate_operand(src, strings, label_name, stack)
         && matches!(
             dst,
             Operand::Dereference {
@@ -698,7 +1000,9 @@ fn validate_binary_operands(
         ));
     }
 
-    if let (Some(src_width), Some(dst_width)) = (operand_width(src), operand_width(dst)) {
+    if let (Some(src_width), Some(dst_width)) =
+        (operand_width(src, stack), operand_width(dst, stack))
+    {
         if src_width != dst_width {
             return Err(format!(
                 "Cannot use {}-bit source with {}-bit destination",
@@ -709,8 +1013,8 @@ fn validate_binary_operands(
     }
 
     if let (Some(value), Some(width)) = (
-        immediate_value(src, strings, label_name),
-        destination_width(dst),
+        immediate_value(src, strings, label_name, stack),
+        destination_width(dst, stack),
     ) {
         validate_immediate_range(value, width)?;
     }
@@ -718,33 +1022,56 @@ fn validate_binary_operands(
     Ok(())
 }
 
-fn is_immediate_operand(operand: &Operand, strings: &StringTable, label_name: &str) -> bool {
+fn is_immediate_operand(
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> bool {
     match operand {
         Operand::Immediate(_) => true,
-        Operand::Ident(name) => strings
-            .integers
-            .contains_key(&(label_name.to_string(), name.clone())),
+        Operand::Ident(name) => {
+            !stack.slots.contains_key(name)
+                && strings
+                    .integers
+                    .contains_key(&(label_name.to_string(), name.clone()))
+        }
         _ => false,
     }
 }
 
-fn immediate_value(operand: &Operand, strings: &StringTable, label_name: &str) -> Option<i64> {
+fn immediate_value(
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Option<i64> {
     match operand {
         Operand::Immediate(value) => Some(*value),
-        Operand::Ident(name) => strings
-            .integers
-            .get(&(label_name.to_string(), name.clone()))
-            .map(|binding| binding.value),
+        Operand::Ident(name) => {
+            if stack.slots.contains_key(name) {
+                None
+            } else {
+                strings
+                    .integers
+                    .get(&(label_name.to_string(), name.clone()))
+                    .map(|binding| binding.value)
+            }
+        }
         _ => None,
     }
 }
 
-fn destination_width(operand: &Operand) -> Option<Width> {
+fn destination_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
     match operand {
         Operand::Register(name) => register_width(name),
         Operand::Dereference {
             width: Some(width), ..
         } => Some(memory_width_bits(width)),
+        Operand::Ident(name) => stack
+            .slots
+            .get(name)
+            .map(|slot| memory_width_bits(&slot.width)),
         _ => None,
     }
 }
@@ -780,32 +1107,30 @@ fn validate_push_operand(
     src: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     if matches!(src, Operand::Pointer(_)) {
         return Err(String::from("push source cannot be an address-of operand"));
     }
 
-    if is_immediate_operand(src, strings, label_name) {
+    if is_immediate_operand(src, strings, label_name, stack) {
         return Ok(());
     }
 
-    validate_stack_width("push source", src)
+    validate_stack_width("push source", src, stack)
 }
 
-fn validate_pop_operand(dst: &Operand) -> Result<(), String> {
-    if matches!(
-        dst,
-        Operand::Immediate(_) | Operand::Ident(_) | Operand::Pointer(_)
-    ) {
+fn validate_pop_operand(dst: &Operand, stack: &StackFrame) -> Result<(), String> {
+    if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_)) {
         return Err(String::from(
             "pop destination must be a 64-bit register or explicitly 64-bit memory operand",
         ));
     }
 
-    validate_stack_width("pop destination", dst)
+    validate_stack_width("pop destination", dst, stack)
 }
 
-fn validate_stack_width(name: &str, operand: &Operand) -> Result<(), String> {
+fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Result<(), String> {
     match operand {
         Operand::Register(register) => match register_width(register) {
             Some(Width::Bits64) => Ok(()),
@@ -825,6 +1150,16 @@ fn validate_stack_width(name: &str, operand: &Operand) -> Result<(), String> {
                 "{name} memory operand requires an explicit 64-bit width"
             )),
         },
+        Operand::Ident(name) if stack.slots.contains_key(name) => {
+            match operand_width(operand, stack) {
+                Some(Width::Bits64) => Ok(()),
+                Some(width) => Err(format!(
+                    "{name} must be 64-bit, found {}-bit stack variable",
+                    width.bits()
+                )),
+                None => Ok(()),
+            }
+        }
         _ => Ok(()),
     }
 }
@@ -833,6 +1168,7 @@ fn emit_operand(
     operand: &Operand,
     strings: &StringTable,
     label_name: &str,
+    stack: &StackFrame,
 ) -> Result<String, String> {
     match operand {
         Operand::Dereference { address, width } => {
@@ -845,12 +1181,19 @@ fn emit_operand(
         }
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
-        Operand::Ident(name) => match strings
-            .integers
-            .get(&(label_name.to_string(), name.clone()))
-        {
-            Some(binding) => Ok(binding.value.to_string()),
-            None => Ok(name.clone()),
+        Operand::Ident(name) => match stack.slots.get(name) {
+            Some(slot) => Ok(format!(
+                "{} ptr [rbp - {}]",
+                memory_width_ptr(&slot.width),
+                slot.offset
+            )),
+            None => match strings
+                .integers
+                .get(&(label_name.to_string(), name.clone()))
+            {
+                Some(binding) => Ok(binding.value.to_string()),
+                None => Ok(name.clone()),
+            },
         },
         Operand::Pointer(name) => Err(format!(
             "Pointer operand &{name} is only supported as the right side of assignment"
@@ -882,10 +1225,14 @@ fn emit_address_term(term: &AddressTerm) -> String {
     }
 }
 
-fn operand_width(operand: &Operand) -> Option<Width> {
+fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
     match operand {
         Operand::Register(name) => register_width(name),
         Operand::Dereference { width, .. } => width.as_ref().map(memory_width_bits),
+        Operand::Ident(name) => stack
+            .slots
+            .get(name)
+            .map(|slot| memory_width_bits(&slot.width)),
         _ => None,
     }
 }

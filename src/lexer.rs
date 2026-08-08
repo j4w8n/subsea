@@ -203,14 +203,15 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Some(Token::ISlash)
                 }
                 "call" => Some(Token::Call),
+                "const" => Some(Token::Const),
                 "exit" => Some(Token::Exit),
                 "jmp" => Some(Token::Jmp),
-                "let" => Some(Token::Let),
                 "mem" => Some(Token::Mem),
                 "pop" => Some(Token::Pop),
                 "print" => Some(Token::Print),
                 "push" => Some(Token::Push),
                 "ret" => Some(Token::Ret),
+                "stack" => Some(Token::Stack),
                 "syscall" => Some(Token::Syscall),
                 "u" if matches!(chars.peek(), Some('<')) => {
                     chars.next();
