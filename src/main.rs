@@ -17,6 +17,7 @@ fn main() {
             Ok(asm) => print!("{asm}"),
             Err(error) => exit_with_error(error),
         },
+        Ok(CommandLine::Help) => print_usage_and_exit(0),
         Ok(CommandLine::Build {
             source_path,
             output_path,
@@ -46,7 +47,13 @@ fn main() {
         Ok(CommandLine::Run { source_path }) => {
             match compile_to_asm(&source_path).and_then(|asm| build_executable(&asm, None)) {
                 Ok(output) => match run_executable(&output.executable_path) {
-                    Ok(status) => process::exit(status.code().unwrap_or(1)),
+                    Ok(status) => {
+                        if let Err(error) = driver::remove_build_dir(&output.build_dir) {
+                            eprintln!("Warning: {error}");
+                        }
+
+                        process::exit(status.code().unwrap_or(1));
+                    }
                     Err(error) => exit_with_error(error),
                 },
                 Err(error) => exit_with_error(error),
@@ -54,7 +61,7 @@ fn main() {
         }
         Err(error) => {
             eprintln!("Error: {error}");
-            print_usage_and_exit();
+            print_usage_and_exit(1);
         }
     }
 }
@@ -68,6 +75,7 @@ enum CommandLine {
         output_path: Option<PathBuf>,
         show_timings: bool,
     },
+    Help,
     Run {
         source_path: String,
     },
@@ -75,21 +83,21 @@ enum CommandLine {
 
 fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
     match args.as_slice() {
+        [flag] if flag == "--help" || flag == "-h" => Ok(CommandLine::Help),
         [command, source_path] if command == "emit-asm" => Ok(CommandLine::EmitAsm {
             source_path: source_path.clone(),
         }),
         [command, source_path] if command == "run" => Ok(CommandLine::Run {
             source_path: source_path.clone(),
         }),
-        [command, source_path, rest @ ..] if command == "build" => {
-            parse_build_command(source_path, rest)
-        }
+        [command, rest @ ..] if command == "build" => parse_build_command(rest),
         [command, ..] => Err(format!("Unknown or invalid command {command:?}")),
         [] => Err(String::from("Missing command")),
     }
 }
 
-fn parse_build_command(source_path: &str, args: &[String]) -> Result<CommandLine, String> {
+fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
+    let mut source_path = None;
     let mut output_path = None;
     let mut show_timings = false;
     let mut position = 0;
@@ -110,14 +118,23 @@ fn parse_build_command(source_path: &str, args: &[String]) -> Result<CommandLine
                 output_path = Some(PathBuf::from(path));
             }
             "--timings" | "-t" => show_timings = true,
-            flag => return Err(format!("Unknown build flag {flag:?}")),
+            flag if flag.starts_with('-') => return Err(format!("Unknown build flag {flag:?}")),
+            path => {
+                if source_path.is_some() {
+                    return Err(String::from("Source path was already provided"));
+                }
+
+                source_path = Some(path.to_string());
+            }
         }
 
         position += 1;
     }
 
+    let source_path = source_path.ok_or_else(|| String::from("Missing build source path"))?;
+
     Ok(CommandLine::Build {
-        source_path: source_path.to_string(),
+        source_path,
         output_path,
         show_timings,
     })
@@ -195,10 +212,10 @@ fn exit_with_error(error: String) -> ! {
     process::exit(1);
 }
 
-fn print_usage_and_exit() -> ! {
+fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
     eprintln!("  subsea run <file.ss>");
-    eprintln!("  subsea build <file.ss> [-o output] [--timings|-t]");
+    eprintln!("  subsea build [--timings|-t] [-o output] <file.ss>");
     eprintln!("  subsea emit-asm <file.ss>");
-    process::exit(1);
+    process::exit(code);
 }

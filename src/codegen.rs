@@ -295,7 +295,7 @@ impl StackFrame {
 
 #[derive(Clone, Copy)]
 struct IntegerBinding {
-    value: i64,
+    value: i128,
 }
 
 fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
@@ -467,6 +467,8 @@ fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), 
 
         match instruction {
             Instruction::Ret | Instruction::Exit { .. } => {}
+            Instruction::Syscall
+                if previous_instructions_set_exit_syscall(&label.instructions, index) => {}
             Instruction::Jmp { target, condition } => {
                 let target_index = *label_positions.get(target.as_str()).ok_or_else(|| {
                     format!(
@@ -484,6 +486,32 @@ fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn previous_instructions_set_exit_syscall(
+    instructions: &[Instruction],
+    syscall_index: usize,
+) -> bool {
+    let Some(Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(rax)),
+        value: AssignmentValue::Operand(Operand::Immediate(60)),
+    }) = syscall_index
+        .checked_sub(2)
+        .and_then(|index| instructions.get(index))
+    else {
+        return false;
+    };
+    let Some(Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(rdi)),
+        ..
+    }) = syscall_index
+        .checked_sub(1)
+        .and_then(|index| instructions.get(index))
+    else {
+        return false;
+    };
+
+    rax == "rax" && rdi == "rdi"
 }
 
 fn validate_stack_register_use(label: &Label, stack: &StackFrame) -> Result<(), String> {
@@ -729,6 +757,12 @@ fn emit_print_operand_instruction(
         ));
     }
 
+    if operand_uses_high_byte_register(operand) {
+        return Err(String::from(
+            "print operand cannot use high-byte registers ah, bh, ch, or dh",
+        ));
+    }
+
     load_print_operand(asm, operand, strings, label_name, stack)?;
 
     let loop_label = format!(".L.{label_name}.print_{index}_loop");
@@ -857,6 +891,8 @@ fn emit_assignment(
                 }
             }
 
+            validate_binary_assignment_does_not_clobber_rhs_address(dst, rhs)?;
+
             {
                 emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
 
@@ -889,6 +925,8 @@ fn emit_assignment(
             let rax = Operand::Register(String::from("rax"));
             emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
+            validate_wide_math_rhs_not_clobbered("Widened multiply right operand", rhs, false)?;
+
             let opcode = if *signed { "imul" } else { "mul" };
             let rhs = emit_operand(rhs, strings, label_name, stack)?;
             asm.push_str(&format!("  {opcode} {rhs}\n"));
@@ -915,6 +953,8 @@ fn emit_assignment(
             let rax = Operand::Register(String::from("rax"));
             emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
+            validate_wide_math_rhs_not_clobbered("Widened division right operand", rhs, true)?;
+
             if *signed {
                 asm.push_str("  cqo\n");
             } else {
@@ -928,6 +968,23 @@ fn emit_assignment(
             Ok(())
         }
     }
+}
+
+fn validate_binary_assignment_does_not_clobber_rhs_address(
+    dst: &Operand,
+    rhs: &Operand,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Ok(());
+    };
+
+    if operand_address_uses_register_family(rhs, dst_register) {
+        return Err(format!(
+            "Binary assignment destination {dst_register} cannot be used in the right operand address"
+        ));
+    }
+
+    Ok(())
 }
 
 fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String> {
@@ -978,6 +1035,26 @@ fn validate_wide_math_operand(
     Ok(())
 }
 
+fn validate_wide_math_rhs_not_clobbered(
+    name: &str,
+    operand: &Operand,
+    clobbers_rdx_before_rhs: bool,
+) -> Result<(), String> {
+    if operand_uses_register_family(operand, "rax") {
+        return Err(format!(
+            "{name} cannot use rax because rax is overwritten before the operation"
+        ));
+    }
+
+    if clobbers_rdx_before_rhs && operand_uses_register_family(operand, "rdx") {
+        return Err(format!(
+            "{name} cannot use rdx because rdx is overwritten before the operation"
+        ));
+    }
+
+    Ok(())
+}
+
 fn emit_copy_instruction(
     asm: &mut String,
     src: &Operand,
@@ -1016,6 +1093,18 @@ fn validate_binary_operands(
 
     if matches!(src, Operand::Pointer(_)) {
         return Err(format!("{opcode} source cannot be an address-of operand"));
+    }
+
+    if operand_uses_high_byte_register(src) && operand_uses_extended_register(dst) {
+        return Err(format!(
+            "{opcode} cannot combine high-byte registers ah, bh, ch, or dh with extended registers"
+        ));
+    }
+
+    if operand_uses_high_byte_register(dst) && operand_uses_extended_register(src) {
+        return Err(format!(
+            "{opcode} cannot combine high-byte registers ah, bh, ch, or dh with extended registers"
+        ));
     }
 
     if is_memory_operand(src, stack) && is_memory_operand(dst, stack) {
@@ -1083,7 +1172,7 @@ fn immediate_value(
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
-) -> Option<i64> {
+) -> Option<i128> {
     match operand {
         Operand::Immediate(value) => Some(*value),
         Operand::Ident(name) => {
@@ -1100,26 +1189,64 @@ fn immediate_value(
     }
 }
 
-fn destination_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
+fn destination_width(operand: &Operand, stack: &StackFrame) -> Option<ImmediateDestination> {
     match operand {
-        Operand::Register(name) => register_width(name),
+        Operand::Register(name) => register_width(name).map(ImmediateDestination::Register),
         Operand::Dereference {
             width: Some(width), ..
-        } => Some(memory_width_bits(width)),
+        } => Some(ImmediateDestination::Memory(*width)),
         Operand::Ident(name) => stack
             .slots
             .get(name)
-            .map(|slot| memory_width_bits(&slot.width)),
+            .map(|slot| ImmediateDestination::Memory(slot.width)),
         _ => None,
     }
 }
 
-fn validate_immediate_range(value: i64, width: Width) -> Result<(), String> {
-    let valid = match width {
-        Width::Bits8 => i8::MIN as i64 <= value && value <= u8::MAX as i64,
-        Width::Bits16 => i16::MIN as i64 <= value && value <= u16::MAX as i64,
-        Width::Bits32 => i32::MIN as i64 <= value && value <= u32::MAX as i64,
-        Width::Bits64 => true,
+#[derive(Clone, Copy)]
+enum ImmediateDestination {
+    Register(Width),
+    Memory(MemoryWidth),
+}
+
+impl ImmediateDestination {
+    fn bits(self) -> u8 {
+        match self {
+            ImmediateDestination::Register(width) => width.bits(),
+            ImmediateDestination::Memory(width) => memory_width_bits(&width).bits(),
+        }
+    }
+}
+
+fn validate_immediate_range(value: i128, destination: ImmediateDestination) -> Result<(), String> {
+    let valid = match destination {
+        ImmediateDestination::Register(Width::Bits8) => {
+            i8::MIN as i128 <= value && value <= u8::MAX as i128
+        }
+        ImmediateDestination::Register(Width::Bits16) => {
+            i16::MIN as i128 <= value && value <= u16::MAX as i128
+        }
+        ImmediateDestination::Register(Width::Bits32) => {
+            i32::MIN as i128 <= value && value <= u32::MAX as i128
+        }
+        ImmediateDestination::Register(Width::Bits64) => {
+            i64::MIN as i128 <= value && value <= u64::MAX as i128
+        }
+        ImmediateDestination::Memory(MemoryWidth::I8) => {
+            i8::MIN as i128 <= value && value <= i8::MAX as i128
+        }
+        ImmediateDestination::Memory(MemoryWidth::I16) => {
+            i16::MIN as i128 <= value && value <= i16::MAX as i128
+        }
+        ImmediateDestination::Memory(MemoryWidth::I32) => {
+            i32::MIN as i128 <= value && value <= i32::MAX as i128
+        }
+        ImmediateDestination::Memory(MemoryWidth::I64 | MemoryWidth::U64) => {
+            i32::MIN as i128 <= value && value <= i32::MAX as i128
+        }
+        ImmediateDestination::Memory(MemoryWidth::U8) => 0 <= value && value <= u8::MAX as i128,
+        ImmediateDestination::Memory(MemoryWidth::U16) => 0 <= value && value <= u16::MAX as i128,
+        ImmediateDestination::Memory(MemoryWidth::U32) => 0 <= value && value <= u32::MAX as i128,
     };
 
     if valid {
@@ -1127,14 +1254,23 @@ fn validate_immediate_range(value: i64, width: Width) -> Result<(), String> {
     } else {
         Err(format!(
             "Immediate value {value} does not fit in {}-bit destination",
-            width.bits()
+            destination.bits()
         ))
     }
 }
 
 fn validate_address_copy_dst(dst: &Operand) -> Result<(), String> {
     match dst {
-        Operand::Register(_) => Ok(()),
+        Operand::Register(register) => match register_width(register) {
+            Some(Width::Bits64) => Ok(()),
+            Some(width) => Err(format!(
+                "Address-of labels can only be copied into 64-bit registers, found {}-bit register",
+                width.bits()
+            )),
+            None => Err(String::from(
+                "Address-of labels can only be copied into 64-bit registers",
+            )),
+        },
         _ => Err(String::from(
             "Address-of labels can only be copied into registers for now",
         )),
@@ -1315,12 +1451,148 @@ fn register_width(name: &str) -> Option<Width> {
     crate::register::width(name)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Width {
     Bits8,
     Bits16,
     Bits32,
     Bits64,
+}
+
+fn operand_uses_high_byte_register(operand: &Operand) -> bool {
+    match operand {
+        Operand::Register(name) => is_high_byte_register(name),
+        Operand::Dereference { address, .. } => {
+            address_uses_register(address, is_high_byte_register)
+        }
+        _ => false,
+    }
+}
+
+fn operand_uses_extended_register(operand: &Operand) -> bool {
+    match operand {
+        Operand::Register(name) => is_extended_register(name),
+        Operand::Dereference { address, .. } => {
+            address_uses_register(address, is_extended_register)
+        }
+        _ => false,
+    }
+}
+
+fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
+    match operand {
+        Operand::Register(name) => same_register_family(name, register),
+        Operand::Dereference { address, .. } => address_uses_register_family(address, register),
+        _ => false,
+    }
+}
+
+fn operand_address_uses_register_family(operand: &Operand, register: &str) -> bool {
+    match operand {
+        Operand::Dereference { address, .. } => address_uses_register_family(address, register),
+        _ => false,
+    }
+}
+
+fn address_uses_register_family(address: &Address, register: &str) -> bool {
+    address_term_uses_register_family(&address.first, register)
+        || address
+            .rest
+            .iter()
+            .any(|(_, term)| address_term_uses_register_family(term, register))
+}
+
+fn address_term_uses_register_family(term: &AddressTerm, register: &str) -> bool {
+    match term {
+        AddressTerm::Register(name) | AddressTerm::ScaledRegister { register: name, .. } => {
+            same_register_family(name, register)
+        }
+        _ => false,
+    }
+}
+
+fn same_register_family(left: &str, right: &str) -> bool {
+    register_family(left).is_some_and(|family| register_family(right) == Some(family))
+}
+
+fn register_family(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "rax" | "eax" | "ax" | "al" | "ah" => "rax",
+        "rbx" | "ebx" | "bx" | "bl" | "bh" => "rbx",
+        "rcx" | "ecx" | "cx" | "cl" | "ch" => "rcx",
+        "rdx" | "edx" | "dx" | "dl" | "dh" => "rdx",
+        "rdi" | "edi" | "di" | "dil" => "rdi",
+        "rsi" | "esi" | "si" | "sil" => "rsi",
+        "rbp" | "ebp" | "bp" | "bpl" => "rbp",
+        "rsp" | "esp" | "sp" | "spl" => "rsp",
+        "r8" | "r8d" | "r8w" | "r8b" => "r8",
+        "r9" | "r9d" | "r9w" | "r9b" => "r9",
+        "r10" | "r10d" | "r10w" | "r10b" => "r10",
+        "r11" | "r11d" | "r11w" | "r11b" => "r11",
+        "r12" | "r12d" | "r12w" | "r12b" => "r12",
+        "r13" | "r13d" | "r13w" | "r13b" => "r13",
+        "r14" | "r14d" | "r14w" | "r14b" => "r14",
+        "r15" | "r15d" | "r15w" | "r15b" => "r15",
+        _ => return None,
+    })
+}
+
+fn address_uses_register(address: &Address, predicate: fn(&str) -> bool) -> bool {
+    address_term_uses_register(&address.first, predicate)
+        || address
+            .rest
+            .iter()
+            .any(|(_, term)| address_term_uses_register(term, predicate))
+}
+
+fn address_term_uses_register(term: &AddressTerm, predicate: fn(&str) -> bool) -> bool {
+    match term {
+        AddressTerm::Register(name) | AddressTerm::ScaledRegister { register: name, .. } => {
+            predicate(name)
+        }
+        _ => false,
+    }
+}
+
+fn is_high_byte_register(name: &str) -> bool {
+    matches!(name, "ah" | "bh" | "ch" | "dh")
+}
+
+fn is_extended_register(name: &str) -> bool {
+    matches!(
+        name,
+        "r8" | "r9"
+            | "r10"
+            | "r11"
+            | "r12"
+            | "r13"
+            | "r14"
+            | "r15"
+            | "r8d"
+            | "r9d"
+            | "r10d"
+            | "r11d"
+            | "r12d"
+            | "r13d"
+            | "r14d"
+            | "r15d"
+            | "r8w"
+            | "r9w"
+            | "r10w"
+            | "r11w"
+            | "r12w"
+            | "r13w"
+            | "r14w"
+            | "r15w"
+            | "r8b"
+            | "r9b"
+            | "r10b"
+            | "r11b"
+            | "r12b"
+            | "r13b"
+            | "r14b"
+            | "r15b"
+    )
 }
 
 impl Width {

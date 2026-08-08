@@ -1,3 +1,5 @@
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
@@ -13,6 +15,34 @@ fn main_program(instructions: Vec<Instruction>) -> Program {
             instructions,
         }],
     }
+}
+
+fn assert_assembles(asm: &str) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let asm_path =
+        std::env::temp_dir().join(format!("subsea-codegen-{}-{unique}.s", std::process::id()));
+    let object_path = asm_path.with_extension("o");
+
+    std::fs::write(&asm_path, asm).unwrap();
+
+    let output = Command::new("as")
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(&object_path)
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&object_path);
+
+    assert!(
+        output.status.success(),
+        "assembler failed:\n{}\nassembly:\n{asm}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -216,6 +246,48 @@ fn rejects_integer_binding_that_does_not_fit_memory_destination() {
 }
 
 #[test]
+fn rejects_unsigned_value_for_signed_memory_destination() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(String::from("rsp")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::I8),
+        }),
+        value: AssignmentValue::Operand(Operand::Immediate(200)),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Immediate value 200 does not fit in 8-bit destination"
+    );
+}
+
+#[test]
+fn rejects_large_immediate_for_64_bit_memory_destination() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(String::from("rsp")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::U64),
+        }),
+        value: AssignmentValue::Operand(Operand::Immediate(2_147_483_648)),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Immediate value 2147483648 does not fit in 64-bit destination"
+    );
+}
+
+#[test]
 fn preserves_math_rhs_when_it_is_also_the_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
@@ -230,6 +302,31 @@ fn preserves_math_rhs_when_it_is_also_the_destination() {
 
     assert!(asm.contains("  neg rax\n"));
     assert!(asm.contains("  add rax, rbx\n"));
+}
+
+#[test]
+fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        value: AssignmentValue::Binary {
+            op: MathOp::Add,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Dereference {
+                address: Address {
+                    first: AddressTerm::Register(String::from("rax")),
+                    rest: Vec::new(),
+                },
+                width: Some(MemoryWidth::U64),
+            },
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Binary assignment destination rax cannot be used in the right operand address"
+    );
 }
 
 #[test]
@@ -250,6 +347,32 @@ fn emits_unsigned_widened_multiply() {
 
     assert!(asm.contains("  mov rax, rbx\n"));
     assert!(asm.contains("  mul rcx\n"));
+}
+
+#[test]
+fn rejects_address_of_into_non_64_bit_register() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 8,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![Instruction::Assign {
+                dst: AssignmentTarget::Operand(Operand::Register(String::from("eax"))),
+                value: AssignmentValue::Operand(Operand::Pointer(String::from("buf"))),
+            }],
+        }],
+    };
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Address-of labels can only be copied into 64-bit registers, found 32-bit register"
+    );
 }
 
 #[test]
@@ -361,6 +484,28 @@ fn rejects_immediate_widened_multiply_lhs() {
 }
 
 #[test]
+fn rejects_widened_multiply_rhs_that_uses_rax() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideMultiply {
+            signed: false,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Register(String::from("rax")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Widened multiply right operand cannot use rax because rax is overwritten before the operation"
+    );
+}
+
+#[test]
 fn emits_unsigned_widened_divide() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
@@ -421,6 +566,28 @@ fn rejects_immediate_widened_divide_rhs() {
     assert_eq!(
         error,
         "Widened division right operand cannot be an immediate value"
+    );
+}
+
+#[test]
+fn rejects_widened_divide_rhs_that_uses_rdx() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair {
+            high: String::from("rdx"),
+            low: String::from("rax"),
+        },
+        value: AssignmentValue::WideDivide {
+            signed: false,
+            lhs: Operand::Register(String::from("rbx")),
+            rhs: Operand::Register(String::from("rdx")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Widened division right operand cannot use rdx because rdx is overwritten before the operation"
     );
 }
 
@@ -583,6 +750,59 @@ fn rejects_pop_memory_without_width() {
 }
 
 #[test]
+fn allows_stack_label_to_end_with_explicit_exit_syscall() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("value"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(1),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::Immediate(60)),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rdi"))),
+            value: AssignmentValue::Operand(Operand::Immediate(0)),
+        },
+        Instruction::Syscall,
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn rejects_printing_high_byte_register() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::Operand(Operand::Register(String::from("ah")))],
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "print operand cannot use high-byte registers ah, bh, ch, or dh"
+    );
+}
+
+#[test]
+fn rejects_high_byte_register_with_extended_register() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("r8b"))),
+        value: AssignmentValue::Operand(Operand::Register(String::from("ah"))),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "mov cannot combine high-byte registers ah, bh, ch, or dh with extended registers"
+    );
+}
+
+#[test]
 fn emits_memory_scalars_and_buffers() {
     let program = Program {
         entry: String::from("main"),
@@ -608,4 +828,51 @@ fn emits_memory_scalars_and_buffers() {
 
     assert!(asm.contains(".section .data\ncount:\n  .word 3\n\n"));
     assert!(asm.contains(".section .bss\nbuf:\n  .zero 128\n\n"));
+}
+
+#[test]
+fn generated_edge_case_assembly_assembles() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 16,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                    value: AssignmentValue::Operand(Operand::Pointer(String::from("buf"))),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Register(String::from("rax")),
+                            rest: Vec::new(),
+                        },
+                        width: Some(MemoryWidth::U64),
+                    }),
+                    value: AssignmentValue::Operand(Operand::Immediate(i32::MAX as i128)),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::RegisterPair {
+                        high: String::from("rdx"),
+                        low: String::from("rax"),
+                    },
+                    value: AssignmentValue::WideMultiply {
+                        signed: false,
+                        lhs: Operand::Register(String::from("rbx")),
+                        rhs: Operand::Register(String::from("rcx")),
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert_assembles(&asm);
 }

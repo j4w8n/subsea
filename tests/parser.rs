@@ -542,3 +542,54 @@ fn rejects_zero_length_memory_buffer() {
 
     assert_eq!(error, "Buffer count must be greater than 0");
 }
+
+#[test]
+fn rejects_label_that_conflicts_with_memory_name() {
+    let mut program = parse(vec![
+        Token::Mem,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+        Token::Ident(String::from("u8")),
+        Token::Equals,
+        Token::NumberLiteral(String::from("1")),
+        Token::Ident(String::from("main")),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+        Token::Ident(String::from("count")),
+        Token::Colon,
+    ])
+    .unwrap();
+
+    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(error, "Label \"count\" conflicts with top-level memory");
+    program.labels.pop();
+    subsea::parser::validate_program_symbols(&program).unwrap();
+}
+
+#[test]
+fn parses_max_u64_binding() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Const,
+        Token::Ident(String::from("max")),
+        Token::Colon,
+        Token::Ident(String::from("u64")),
+        Token::Equals,
+        Token::NumberLiteral(String::from("18446744073709551615")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Const {
+            name: String::from("max"),
+            value: BindingValue::Integer {
+                value: 18446744073709551615,
+                width: Some(MemoryWidth::U64),
+            },
+        }
+    );
+}

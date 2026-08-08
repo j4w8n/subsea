@@ -21,6 +21,13 @@ fn rejects_bare_period() {
 }
 
 #[test]
+fn rejects_non_ascii_identifier_start() {
+    let error = lex_one("étiquette").unwrap_err();
+
+    assert_eq!(error, "Unknown character 'é'");
+}
+
+#[test]
 fn lexes_comparison_operators() {
     assert_eq!(lex_one("==").unwrap(), Some(Token::EqualsEquals));
     assert_eq!(lex_one("!=").unwrap(), Some(Token::NotEquals));

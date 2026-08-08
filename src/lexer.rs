@@ -127,16 +127,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         Some('}') => Some(Token::RBrace),
         Some('[') => Some(Token::LBracket),
         Some(']') => Some(Token::RBracket),
-        Some('$') => Some(Token::Dollar),
-        Some('%') => Some(Token::Percent),
-        Some(':') => {
-            if chars.peek() == Some(&':') {
-                chars.next();
-                Some(Token::DoubleColon)
-            } else {
-                Some(Token::Colon)
-            }
-        }
+        Some(':') => Some(Token::Colon),
         Some(',') => Some(Token::Comma),
         Some('"') => {
             let mut value = String::new();
@@ -173,8 +164,6 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             }
 
             match s.as_str() {
-                "true" => Some(Token::Bool(true)),
-                "false" => Some(Token::Bool(false)),
                 "if" => Some(Token::If),
                 "i" if matches!(chars.peek(), Some('<')) => {
                     chars.next();
@@ -251,11 +240,11 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
 }
 
 fn is_ident_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic()
+    c == '_' || c.is_ascii_alphabetic()
 }
 
 fn is_ident_continue(c: char) -> bool {
-    c == '_' || c.is_alphanumeric()
+    c == '_' || c.is_ascii_alphanumeric()
 }
 
 fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> String {

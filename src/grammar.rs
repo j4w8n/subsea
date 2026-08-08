@@ -1,9 +1,6 @@
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
-    Bool(bool),
     Colon,
-    Dollar,
-    DoubleColon,
     Equals,
     EqualsEquals,
     Greater,
@@ -20,11 +17,8 @@ pub enum Token {
     LBracket,
     LParen,
     Minus,
-    Mut,
     NotEquals,
-    Number(NumericKind),
     NumberLiteral(String),
-    Percent,
     Plus,
     RBrace,
     RBracket,
@@ -47,7 +41,6 @@ pub enum Token {
     Const,
     Exit,
     Jmp,
-    Literal,
     LocalIdent(String),
     Mem,
     Pointer(String),
@@ -58,20 +51,4 @@ pub enum Token {
     Ret,
     Stack,
     Syscall,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum NumericKind {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    Int(i64),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    F32(f32),
-    F64(f64),
-    Float(f64),
 }

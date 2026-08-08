@@ -152,7 +152,7 @@ impl Parser {
                     parts: vec![PrintPart::Operand(Operand::Register(name))],
                 }),
                 Some(Token::NumberLiteral(value)) => value
-                    .parse::<i64>()
+                    .parse::<i128>()
                     .map(|value| Instruction::Print {
                         parts: vec![PrintPart::Operand(Operand::Immediate(value))],
                     })
@@ -533,10 +533,10 @@ impl Parser {
         }
     }
 
-    fn parse_integer_literal(&mut self, context: &str) -> Result<i64, String> {
+    fn parse_integer_literal(&mut self, context: &str) -> Result<i128, String> {
         match self.advance() {
             Some(Token::NumberLiteral(value)) => value
-                .parse::<i64>()
+                .parse::<i128>()
                 .map_err(|_| format!("Invalid integer {context} {value:?}")),
             Some(Token::Minus) => match self.advance() {
                 Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
@@ -620,7 +620,7 @@ impl Parser {
                 )),
             },
             Some(Token::NumberLiteral(value)) => value
-                .parse::<i64>()
+                .parse::<i128>()
                 .map(Operand::Immediate)
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
@@ -682,7 +682,7 @@ impl Parser {
                 }
 
                 value
-                    .parse::<i64>()
+                    .parse::<i128>()
                     .map(AddressTerm::Immediate)
                     .map_err(|_| format!("Invalid integer literal {value:?}"))
             }
@@ -789,7 +789,7 @@ fn parse_integer_binding_value(
     width: Option<MemoryWidth>,
 ) -> Result<BindingValue, String> {
     let value = value
-        .parse::<i64>()
+        .parse::<i128>()
         .map_err(|_| format!("Invalid integer binding value {value:?}"))?;
 
     if let Some(width) = width {
@@ -799,29 +799,24 @@ fn parse_integer_binding_value(
     Ok(BindingValue::Integer { value, width })
 }
 
-fn parse_signed_integer(value: &str, negative: bool) -> Result<i64, ()> {
+fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
     if negative {
-        let magnitude = value.parse::<u64>().map_err(|_| ())?;
-        if magnitude == (i64::MAX as u64) + 1 {
-            Ok(i64::MIN)
-        } else {
-            i64::try_from(magnitude).map(|value| -value).map_err(|_| ())
-        }
+        value.parse::<i128>().map(|value| -value).map_err(|_| ())
     } else {
-        value.parse::<i64>().map_err(|_| ())
+        value.parse::<i128>().map_err(|_| ())
     }
 }
 
-fn validate_integer_binding_width(value: i64, width: MemoryWidth) -> Result<(), String> {
+fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(), String> {
     let valid = match width {
-        MemoryWidth::I8 => i8::MIN as i64 <= value && value <= i8::MAX as i64,
-        MemoryWidth::I16 => i16::MIN as i64 <= value && value <= i16::MAX as i64,
-        MemoryWidth::I32 => i32::MIN as i64 <= value && value <= i32::MAX as i64,
-        MemoryWidth::I64 => true,
-        MemoryWidth::U8 => 0 <= value && value <= u8::MAX as i64,
-        MemoryWidth::U16 => 0 <= value && value <= u16::MAX as i64,
-        MemoryWidth::U32 => 0 <= value && value <= u32::MAX as i64,
-        MemoryWidth::U64 => 0 <= value,
+        MemoryWidth::I8 => i8::MIN as i128 <= value && value <= i8::MAX as i128,
+        MemoryWidth::I16 => i16::MIN as i128 <= value && value <= i16::MAX as i128,
+        MemoryWidth::I32 => i32::MIN as i128 <= value && value <= i32::MAX as i128,
+        MemoryWidth::I64 => i64::MIN as i128 <= value && value <= i64::MAX as i128,
+        MemoryWidth::U8 => 0 <= value && value <= u8::MAX as i128,
+        MemoryWidth::U16 => 0 <= value && value <= u16::MAX as i128,
+        MemoryWidth::U32 => 0 <= value && value <= u32::MAX as i128,
+        MemoryWidth::U64 => 0 <= value && value <= u64::MAX as i128,
     };
 
     if valid {
@@ -924,14 +919,25 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
     let mut label_names = HashSet::new();
 
     for label in labels {
+        if memory_names.contains(label.name.as_str()) {
+            return Err(format!(
+                "Label {:?} conflicts with top-level memory",
+                label.name
+            ));
+        }
+
         if !label_names.insert(label.name.as_str()) {
             return Err(format!("Label {:?} is already defined", label.name));
         }
         for instruction in &label.instructions {
-            if let Instruction::Label { name } = instruction
-                && !label_names.insert(name.as_str())
-            {
-                return Err(format!("Label {:?} is already defined", name));
+            if let Instruction::Label { name } = instruction {
+                if memory_names.contains(name.as_str()) {
+                    return Err(format!("Label {:?} conflicts with top-level memory", name));
+                }
+
+                if !label_names.insert(name.as_str()) {
+                    return Err(format!("Label {:?} is already defined", name));
+                }
             }
         }
     }

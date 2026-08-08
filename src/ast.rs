@@ -10,7 +10,7 @@ pub enum MemoryDeclaration {
     Scalar {
         name: String,
         width: MemoryWidth,
-        value: i64,
+        value: i128,
     },
     Buffer {
         name: String,
@@ -123,7 +123,7 @@ pub enum MathOp {
 #[derive(Debug, PartialEq, Clone)]
 pub enum BindingValue {
     Integer {
-        value: i64,
+        value: i128,
         width: Option<MemoryWidth>,
     },
     String(String),
@@ -142,7 +142,7 @@ pub enum Operand {
         address: Address,
         width: Option<MemoryWidth>,
     },
-    Immediate(i64),
+    Immediate(i128),
     Register(String),
     Ident(String),
     Pointer(String),
@@ -168,7 +168,7 @@ pub struct Address {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum AddressTerm {
-    Immediate(i64),
+    Immediate(i128),
     Register(String),
     ScaledRegister { register: String, scale: i64 },
     Ident(String),
