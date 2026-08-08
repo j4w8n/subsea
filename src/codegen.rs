@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program,
+    Operand, PrintPart, Program, StringInitializer,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -63,21 +63,32 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
                 }
-                Instruction::Const { .. } | Instruction::Stack { .. } => {}
+                Instruction::Const { .. }
+                | Instruction::Stack { .. }
+                | Instruction::StackString { .. } => {}
                 Instruction::Print { parts } => {
                     for part in parts {
                         match part {
                             PrintPart::Binding(name) => {
-                                if stack.slots.contains_key(name) {
+                                if let Some(slot) = stack.slots.get(name) {
                                     runtime_print_index += 1;
-                                    emit_print_operand_instruction(
-                                        &mut asm,
-                                        &Operand::Ident(name.clone()),
-                                        &strings,
-                                        &label.name,
-                                        &stack,
-                                        runtime_print_index,
-                                    )?;
+                                    match slot {
+                                        StackSlot::Scalar { .. } => {
+                                            emit_print_operand_instruction(
+                                                &mut asm,
+                                                &Operand::Ident(name.clone()),
+                                                &strings,
+                                                &label.name,
+                                                &stack,
+                                                runtime_print_index,
+                                            )?;
+                                        }
+                                        StackSlot::String { .. } => {
+                                            emit_print_stack_string_instruction(
+                                                &mut asm, name, &stack,
+                                            )?;
+                                        }
+                                    }
                                 } else {
                                     let string = resolve_print_part(
                                         &strings,
@@ -284,6 +295,7 @@ struct StringTable {
     bindings: HashMap<(String, String), StringBinding>,
     literals: HashMap<(String, usize), StringBinding>,
     integers: HashMap<(String, String), IntegerBinding>,
+    stack_strings: HashMap<(String, String), StringBinding>,
 }
 
 struct StackFrame {
@@ -292,15 +304,48 @@ struct StackFrame {
 }
 
 #[derive(Clone, Copy)]
-struct StackSlot {
-    offset: usize,
-    width: MemoryWidth,
+enum StackSlot {
+    Scalar {
+        offset: usize,
+        width: MemoryWidth,
+    },
+    String {
+        ptr_offset: usize,
+        len_offset: usize,
+    },
 }
 
 impl StackFrame {
     fn has_slots(&self) -> bool {
         !self.slots.is_empty()
     }
+}
+
+impl StackSlot {
+    fn scalar(self) -> Option<(usize, MemoryWidth)> {
+        match self {
+            StackSlot::Scalar { offset, width } => Some((offset, width)),
+            StackSlot::String { .. } => None,
+        }
+    }
+
+    fn string(self) -> Option<(usize, usize)> {
+        match self {
+            StackSlot::String {
+                ptr_offset,
+                len_offset,
+            } => Some((ptr_offset, len_offset)),
+            StackSlot::Scalar { .. } => None,
+        }
+    }
+}
+
+fn stack_scalar_slot(stack: &StackFrame, name: &str) -> Option<(usize, MemoryWidth)> {
+    stack.slots.get(name).and_then(|slot| slot.scalar())
+}
+
+fn stack_string_slot(stack: &StackFrame, name: &str) -> Option<(usize, usize)> {
+    stack.slots.get(name).and_then(|slot| slot.string())
 }
 
 #[derive(Clone, Copy)]
@@ -313,6 +358,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     let mut bindings = HashMap::new();
     let mut integers = HashMap::new();
     let mut literals = HashMap::new();
+    let mut stack_strings = HashMap::new();
     let mut literal_indexes = HashMap::new();
 
     for label in &program.labels {
@@ -366,6 +412,18 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         }
                     }
                 }
+                Instruction::StackString {
+                    name,
+                    value: StringInitializer::Literal(value),
+                } => {
+                    let binding = StringBinding {
+                        asm_label: format!(".Lstr_{}_{}", label.name, name),
+                        value: value.clone(),
+                    };
+
+                    all.push(binding.clone());
+                    stack_strings.insert((label.name.clone(), name.clone()), binding);
+                }
                 _ => {}
             }
         }
@@ -376,6 +434,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         bindings,
         literals,
         integers,
+        stack_strings,
     })
 }
 
@@ -396,9 +455,21 @@ fn build_stack_frame(label: &Label) -> Result<StackFrame, String> {
             offset += memory_width_size(width).max(8);
             slots.insert(
                 name.clone(),
-                StackSlot {
+                StackSlot::Scalar {
                     offset,
                     width: *width,
+                },
+            );
+        } else if let Instruction::StackString { name, .. } = instruction {
+            offset += 8;
+            let ptr_offset = offset;
+            offset += 8;
+            let len_offset = offset;
+            slots.insert(
+                name.clone(),
+                StackSlot::String {
+                    ptr_offset,
+                    len_offset,
                 },
             );
         }
@@ -431,15 +502,21 @@ fn emit_stack_initializers(
     stack: &StackFrame,
 ) -> Result<(), String> {
     for instruction in instructions {
-        if let Instruction::Stack { name, value, .. } = instruction {
-            if !is_immediate_operand(value, strings, label_name, stack) {
-                return Err(format!(
-                    "Stack variable {name:?} initializer must be an integer immediate or const"
-                ));
-            }
+        match instruction {
+            Instruction::Stack { name, value, .. } => {
+                if !is_immediate_operand(value, strings, label_name, stack) {
+                    return Err(format!(
+                        "Stack variable {name:?} initializer must be an integer immediate or const"
+                    ));
+                }
 
-            let dst = Operand::Ident(name.clone());
-            emit_copy_instruction(asm, value, &dst, strings, label_name, stack)?;
+                let dst = Operand::Ident(name.clone());
+                emit_copy_instruction(asm, value, &dst, strings, label_name, stack)?;
+            }
+            Instruction::StackString { name, value } => {
+                emit_stack_string_initializer(asm, name, value, strings, label_name, stack)?;
+            }
+            _ => {}
         }
     }
 
@@ -598,6 +675,13 @@ fn validate_instruction_does_not_use_rbp(
         Instruction::Pop { dst } => operands.push(dst),
         Instruction::Push { src } => operands.push(src),
         Instruction::Stack { value, .. } => operands.push(value),
+        Instruction::StackString { value, .. } => match value {
+            StringInitializer::Literal(_) => {}
+            StringInitializer::Slice { ptr, len } => {
+                operands.push(ptr);
+                operands.push(len);
+            }
+        },
         _ => {}
     }
 
@@ -611,7 +695,7 @@ fn validate_instruction_does_not_use_rbp(
 }
 
 fn operand_is_stack_slot(operand: &Operand, stack: &StackFrame) -> bool {
-    matches!(operand, Operand::Ident(name) if stack.slots.contains_key(name))
+    matches!(operand, Operand::Ident(name) if stack_scalar_slot(stack, name).is_some())
 }
 
 fn is_memory_operand(operand: &Operand, stack: &StackFrame) -> bool {
@@ -824,6 +908,124 @@ fn emit_print_operand_instruction(
     asm.push_str("  pop rbx\n");
 
     Ok(())
+}
+
+fn emit_print_stack_string_instruction(
+    asm: &mut String,
+    name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let (ptr_offset, len_offset) = stack_string_slot(stack, name)
+        .ok_or_else(|| format!("Unknown string stack variable {name:?}"))?;
+
+    asm.push_str("  mov rax, 1\n");
+    asm.push_str("  mov rdi, 1\n");
+    asm.push_str(&format!("  mov rsi, qword ptr [rbp - {ptr_offset}]\n"));
+    asm.push_str(&format!("  mov rdx, qword ptr [rbp - {len_offset}]\n"));
+    asm.push_str("  syscall\n");
+
+    Ok(())
+}
+
+fn emit_stack_string_initializer(
+    asm: &mut String,
+    name: &str,
+    value: &StringInitializer,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let (ptr_offset, len_offset) = stack_string_slot(stack, name)
+        .ok_or_else(|| format!("Unknown string stack variable {name:?}"))?;
+
+    match value {
+        StringInitializer::Literal(_) => {
+            let string = strings
+                .stack_strings
+                .get(&(label_name.to_string(), name.to_string()))
+                .ok_or_else(|| format!("Unknown string literal for stack variable {name:?}"))?;
+
+            asm.push_str(&format!("  lea rax, [rip + {}]\n", string.asm_label));
+            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], rax\n"));
+            asm.push_str(&format!(
+                "  mov qword ptr [rbp - {len_offset}], {}\n",
+                string.value.len()
+            ));
+        }
+        StringInitializer::Slice { ptr, len } => {
+            emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
+            emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_stack_string_slice_pointer(
+    asm: &mut String,
+    ptr: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    ptr_offset: usize,
+) -> Result<(), String> {
+    match ptr {
+        Operand::Pointer(name) => {
+            asm.push_str(&format!("  lea rax, [rip + {name}]\n"));
+            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], rax\n"));
+            Ok(())
+        }
+        Operand::Register(name) => match register_width(name) {
+            Some(Width::Bits64) => {
+                asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], {name}\n"));
+                Ok(())
+            }
+            Some(width) => Err(format!(
+                "slice pointer must be a 64-bit register or address-of operand, found {}-bit register",
+                width.bits()
+            )),
+            None => Err(String::from(
+                "slice pointer must be a 64-bit integer register or address-of operand",
+            )),
+        },
+        operand => {
+            let operand = emit_operand(operand, strings, label_name, stack)?;
+            Err(format!(
+                "slice pointer must be a 64-bit register or address-of operand, found {operand}"
+            ))
+        }
+    }
+}
+
+fn emit_stack_string_slice_len(
+    asm: &mut String,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    len_offset: usize,
+) -> Result<(), String> {
+    if let Some(value) = immediate_value(len, strings, label_name, stack) {
+        validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
+        asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], {value}\n"));
+        return Ok(());
+    }
+
+    match operand_width(len, stack) {
+        Some(Width::Bits64) => {
+            let len = emit_operand(len, strings, label_name, stack)?;
+            asm.push_str(&format!("  mov rax, {len}\n"));
+            asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], rax\n"));
+            Ok(())
+        }
+        Some(width) => Err(format!(
+            "slice length must be 64-bit, found {}-bit operand",
+            width.bits()
+        )),
+        None => Err(String::from(
+            "slice length must be an integer immediate, const, 64-bit register, or 64-bit stack variable",
+        )),
+    }
 }
 
 fn load_print_operand(
@@ -1260,7 +1462,7 @@ fn validate_binary_operands(
     }
 
     if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_))
-        || matches!(dst, Operand::Ident(name) if !stack.slots.contains_key(name))
+        || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
     {
         return Err(format!(
             "{opcode} destination must be a register or memory operand"
@@ -1371,10 +1573,9 @@ fn destination_width(operand: &Operand, stack: &StackFrame) -> Option<ImmediateD
         Operand::Dereference {
             width: Some(width), ..
         } => Some(ImmediateDestination::Memory(*width)),
-        Operand::Ident(name) => stack
-            .slots
-            .get(name)
-            .map(|slot| ImmediateDestination::Memory(slot.width)),
+        Operand::Ident(name) => {
+            stack_scalar_slot(stack, name).map(|(_, width)| ImmediateDestination::Memory(width))
+        }
         _ => None,
     }
 }
@@ -1517,7 +1718,7 @@ fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Re
                 "{name} memory operand requires an explicit 64-bit width"
             )),
         },
-        Operand::Ident(name) if stack.slots.contains_key(name) => {
+        Operand::Ident(name) if stack_scalar_slot(stack, name).is_some() => {
             match operand_width(operand, stack) {
                 Some(Width::Bits64) => Ok(()),
                 Some(width) => Err(format!(
@@ -1548,11 +1749,14 @@ fn emit_operand(
         }
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
-        Operand::Ident(name) => match stack.slots.get(name) {
-            Some(slot) => Ok(format!(
+        Operand::Ident(name) => match stack_scalar_slot(stack, name) {
+            Some((offset, width)) => Ok(format!(
                 "{} ptr [rbp - {}]",
-                memory_width_ptr(&slot.width),
-                slot.offset
+                memory_width_ptr(&width),
+                offset
+            )),
+            None if stack_string_slot(stack, name).is_some() => Err(format!(
+                "String stack variable {name:?} in label {label_name:?} cannot be used as an operand"
             )),
             None => match strings
                 .integers
@@ -1604,10 +1808,9 @@ fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
     match operand {
         Operand::Register(name) => register_width(name),
         Operand::Dereference { width, .. } => width.as_ref().map(memory_width_bits),
-        Operand::Ident(name) => stack
-            .slots
-            .get(name)
-            .map(|slot| memory_width_bits(&slot.width)),
+        Operand::Ident(name) => {
+            stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(&width))
+        }
         _ => None,
     }
 }

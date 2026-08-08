@@ -1,6 +1,6 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, FloatMathOp,
-    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
+    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, StringInitializer,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -183,6 +183,58 @@ fn parses_stack_declaration() {
             name: String::from("count"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(8),
+        }]
+    );
+}
+
+#[test]
+fn parses_stack_string_literal() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        Token::Ident(String::from("message")),
+        Token::Colon,
+        Token::Ident(String::from("str")),
+        Token::Equals,
+        Token::Text(String::from("hello")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::StackString {
+            name: String::from("message"),
+            value: StringInitializer::Literal(String::from("hello")),
+        }]
+    );
+}
+
+#[test]
+fn parses_stack_string_slice() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        Token::Ident(String::from("input")),
+        Token::Colon,
+        Token::Ident(String::from("str")),
+        Token::Equals,
+        Token::Slice,
+        Token::Pointer(String::from("buf")),
+        Token::Comma,
+        Token::Register(String::from("rax")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::StackString {
+            name: String::from("input"),
+            value: StringInitializer::Slice {
+                ptr: Operand::Pointer(String::from("buf")),
+                len: Operand::Register(String::from("rax")),
+            },
         }]
     );
 }

@@ -4,14 +4,8 @@ main: {
 
   print "Printed directly!\n"
 
-  jmp end
-}
-
-end: {
-  print "jmp works!\n"
-
-  const count = 6
-  print "count = {}\n", count
+  stack stack_message:str = "Hello from the stack!\n"
+  print stack_message
 
   exit 0
 }

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    Program,
+    Program, StringInitializer,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -174,6 +174,67 @@ fn emits_stack_frame_and_stack_assignment() {
     assert!(asm.contains("  mov qword ptr [rbp - 8], 8\n"));
     assert!(asm.contains("  add qword ptr [rbp - 8], 1\n"));
     assert!(asm.contains("  mov rax, qword ptr [rbp - 8]\n"));
+}
+
+#[test]
+fn emits_stack_string_literal_print() {
+    let program = main_program(vec![
+        Instruction::StackString {
+            name: String::from("message"),
+            value: StringInitializer::Literal(String::from("hello")),
+        },
+        Instruction::Print {
+            parts: vec![PrintPart::Binding(String::from("message"))],
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lstr_main_message:\n  .byte 104, 101, 108, 108, 111\n"));
+    assert!(asm.contains("main:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
+    assert!(asm.contains("  lea rax, [rip + .Lstr_main_message]\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], rax\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 16], 5\n"));
+    assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
+    assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
+}
+
+#[test]
+fn emits_stack_string_slice_print() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 8,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::StackString {
+                    name: String::from("input"),
+                    value: StringInitializer::Slice {
+                        ptr: Operand::Pointer(String::from("buf")),
+                        len: Operand::Register(String::from("rax")),
+                    },
+                },
+                Instruction::Print {
+                    parts: vec![PrintPart::Binding(String::from("input"))],
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  lea rax, [rip + buf]\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], rax\n"));
+    assert!(asm.contains("  mov rax, rax\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 16], rax\n"));
+    assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
+    assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
 }
 
 #[test]

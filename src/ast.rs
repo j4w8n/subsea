@@ -68,7 +68,17 @@ pub enum Instruction {
         width: MemoryWidth,
         value: Operand,
     },
+    StackString {
+        name: String,
+        value: StringInitializer,
+    },
     Syscall,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum StringInitializer {
+    Literal(String),
+    Slice { ptr: Operand, len: Operand },
 }
 
 #[derive(Debug, PartialEq, Clone)]

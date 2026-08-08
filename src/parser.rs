@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program,
+    Operand, PrintPart, Program, StringInitializer,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -271,19 +271,28 @@ impl Parser {
         };
 
         self.expect(Token::Colon, "Expected ':' after stack variable name")?;
-        let width = match self.advance() {
-            Some(Token::Ident(name)) => parse_memory_width(&name)?,
+        let width_name = match self.advance() {
+            Some(Token::Ident(name)) => name,
             Some(token) => {
                 return Err(format!(
-                    "Expected stack variable width after ':', found {token:?}"
+                    "Expected stack variable type after ':', found {token:?}"
                 ));
             }
             None => {
                 return Err(String::from(
-                    "Expected stack variable width after ':', found end of input",
+                    "Expected stack variable type after ':', found end of input",
                 ));
             }
         };
+
+        if width_name == "str" {
+            self.expect(Token::Equals, "Expected '=' after stack string type")?;
+            let value = self.parse_string_initializer()?;
+
+            return Ok(Instruction::StackString { name, value });
+        }
+
+        let width = parse_memory_width(&width_name)?;
 
         if is_float_width(width) {
             return Err(String::from(
@@ -295,6 +304,28 @@ impl Parser {
         let value = self.parse_operand()?;
 
         Ok(Instruction::Stack { name, width, value })
+    }
+
+    fn parse_string_initializer(&mut self) -> Result<StringInitializer, String> {
+        match self.advance() {
+            Some(Token::Text(value)) => Ok(StringInitializer::Literal(value)),
+            Some(Token::Slice) => {
+                let ptr = self.parse_operand()?;
+                self.expect(Token::Comma, "Expected ',' after slice pointer")?;
+                let len = self.parse_operand()?;
+
+                Ok(StringInitializer::Slice { ptr, len })
+            }
+            Some(Token::Ident(name)) => Err(format!(
+                "Expected string literal or slice initializer after '=', found {name:?}"
+            )),
+            Some(token) => Err(format!(
+                "Expected string literal or slice initializer after '=', found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected string literal or slice initializer after '=', found end of input",
+            )),
+        }
     }
 
     fn parse_label_target(
@@ -1042,7 +1073,9 @@ fn validate_label_storage_names(
 
         for instruction in &label.instructions {
             match instruction {
-                Instruction::Const { name, .. } | Instruction::Stack { name, .. } => {
+                Instruction::Const { name, .. }
+                | Instruction::Stack { name, .. }
+                | Instruction::StackString { name, .. } => {
                     if memory_names.contains(name) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level memory",
@@ -1139,6 +1172,16 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     bindings.insert(name.as_str());
                     operand_bindings.insert(name.as_str());
                 }
+                Instruction::StackString { name, .. } => {
+                    if label_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level label",
+                            label.name
+                        ));
+                    }
+
+                    bindings.insert(name.as_str());
+                }
                 _ => {}
             }
         }
@@ -1216,6 +1259,13 @@ fn validate_instruction_symbols(
         Instruction::Pop { dst } => operands.push(dst),
         Instruction::Push { src } => operands.push(src),
         Instruction::Stack { value, .. } => operands.push(value),
+        Instruction::StackString { value, .. } => match value {
+            StringInitializer::Literal(_) => {}
+            StringInitializer::Slice { ptr, len } => {
+                operands.push(ptr);
+                operands.push(len);
+            }
+        },
         _ => {}
     }
 

@@ -21,6 +21,18 @@ fn compiles_and_runs_example_program() {
 }
 
 #[test]
+fn compiles_and_runs_runtime_string_program() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/runtime_strings.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "literal\nHi\n");
+}
+
+#[test]
 fn help_exits_successfully() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

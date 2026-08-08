@@ -58,6 +58,7 @@ pub enum Token {
     Push,
     Register(String),
     Ret,
+    Slice,
     Stack,
     Syscall,
 }
