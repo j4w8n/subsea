@@ -298,6 +298,14 @@ main: {
 }
 ```
 
+Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
+
+```ss
+stack message:str = "Hello\n"
+rsi = message.ptr
+rdx = message.len
+```
+
 ## Printing
 
 `print "..."` prints literal text directly. `print rax` prints a runtime integer operand as unsigned decimal text. Printing does not add a newline automatically:
