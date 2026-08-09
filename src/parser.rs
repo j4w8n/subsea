@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, StringInitializer,
+    Operand, PrintPart, Program, ReadSource, StringInitializer,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -198,6 +198,7 @@ impl Parser {
                 let src = self.parse_operand()?;
                 Ok(Instruction::Push { src })
             }
+            Some(Token::Read) => self.parse_read_instruction(),
             Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Stack) => self.parse_stack_declaration(),
             Some(Token::Syscall) => Ok(Instruction::Syscall),
@@ -304,6 +305,27 @@ impl Parser {
         let value = self.parse_operand()?;
 
         Ok(Instruction::Stack { name, width, value })
+    }
+
+    fn parse_read_instruction(&mut self) -> Result<Instruction, String> {
+        let src = match self.advance() {
+            Some(Token::Stdin) => ReadSource::Stdin,
+            Some(token) => {
+                return Err(format!("Expected read source stdin, found {token:?}"));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected read source stdin, found end of input",
+                ));
+            }
+        };
+
+        self.expect(Token::Comma, "Expected ',' after read source")?;
+        let dst = self.parse_operand()?;
+        self.expect(Token::Comma, "Expected ',' after read destination")?;
+        let len = self.parse_operand()?;
+
+        Ok(Instruction::Read { src, dst, len })
     }
 
     fn parse_string_initializer(&mut self) -> Result<StringInitializer, String> {
@@ -1258,6 +1280,18 @@ fn validate_instruction_symbols(
         }
         Instruction::Pop { dst } => operands.push(dst),
         Instruction::Push { src } => operands.push(src),
+        Instruction::Read { dst, len, .. } => {
+            if let Operand::Pointer(name) = dst
+                && !memory.contains(name.as_str())
+            {
+                return Err(format!(
+                    "Read destination {name:?} in label {current_label:?} must be top-level memory"
+                ));
+            }
+
+            operands.push(dst);
+            operands.push(len);
+        }
         Instruction::Stack { value, .. } => operands.push(value),
         Instruction::StackString { value, .. } => match value {
             StringInitializer::Literal(_) => {}

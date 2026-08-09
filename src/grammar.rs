@@ -56,9 +56,11 @@ pub enum Token {
     Pop,
     Print,
     Push,
+    Read,
     Register(String),
     Ret,
     Slice,
     Stack,
+    Stdin,
     Syscall,
 }

@@ -16,7 +16,7 @@ fn compiles_and_runs_example_program() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "Hello World!\nPrinted directly!\njmp works!\ncount = 6\n"
+        "Hello World!\nPrinted directly!\nHello from the stack!\n"
     );
 }
 
@@ -30,6 +30,29 @@ fn compiles_and_runs_runtime_string_program() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "literal\nHi\n");
+}
+
+#[test]
+fn reads_stdin_into_runtime_string() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/read_stdin.ss"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start subsea");
+
+    {
+        use std::io::Write;
+
+        let stdin = child.stdin.as_mut().expect("child stdin missing");
+        stdin.write_all(b"typed input\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "typed input\n");
 }
 
 #[test]

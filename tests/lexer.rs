@@ -68,8 +68,10 @@ fn lexes_float_arithmetic_operators() {
 #[test]
 fn lexes_storage_and_cleanup_keywords() {
     assert_eq!(lex_one("const").unwrap(), Some(Token::Const));
+    assert_eq!(lex_one("read").unwrap(), Some(Token::Read));
     assert_eq!(lex_one("slice").unwrap(), Some(Token::Slice));
     assert_eq!(lex_one("stack").unwrap(), Some(Token::Stack));
+    assert_eq!(lex_one("stdin").unwrap(), Some(Token::Stdin));
 }
 
 #[test]

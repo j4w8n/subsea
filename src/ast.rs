@@ -62,6 +62,11 @@ pub enum Instruction {
     Push {
         src: Operand,
     },
+    Read {
+        src: ReadSource,
+        dst: Operand,
+        len: Operand,
+    },
     Ret,
     Stack {
         name: String,
@@ -73,6 +78,11 @@ pub enum Instruction {
         value: StringInitializer,
     },
     Syscall,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ReadSource {
+    Stdin,
 }
 
 #[derive(Debug, PartialEq, Clone)]

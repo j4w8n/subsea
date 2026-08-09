@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, StringInitializer,
+    Operand, PrintPart, Program, ReadSource, StringInitializer,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -63,9 +63,17 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
                 }
-                Instruction::Const { .. }
-                | Instruction::Stack { .. }
-                | Instruction::StackString { .. } => {}
+                Instruction::Const { .. } | Instruction::Stack { .. } => {}
+                Instruction::StackString { name, value } => {
+                    emit_stack_string_initializer(
+                        &mut asm,
+                        name,
+                        value,
+                        &strings,
+                        &label.name,
+                        &stack,
+                    )?;
+                }
                 Instruction::Print { parts } => {
                     for part in parts {
                         match part {
@@ -133,6 +141,9 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     validate_push_operand(src, &strings, &label.name, &stack)?;
                     let src = emit_operand(src, &strings, &label.name, &stack)?;
                     asm.push_str(&format!("  push {src}\n"));
+                }
+                Instruction::Read { src, dst, len } => {
+                    emit_read_instruction(&mut asm, src, dst, len, &strings, &label.name, &stack)?;
                 }
                 Instruction::Ret => {
                     if stack.has_slots() {
@@ -513,9 +524,7 @@ fn emit_stack_initializers(
                 let dst = Operand::Ident(name.clone());
                 emit_copy_instruction(asm, value, &dst, strings, label_name, stack)?;
             }
-            Instruction::StackString { name, value } => {
-                emit_stack_string_initializer(asm, name, value, strings, label_name, stack)?;
-            }
+            Instruction::StackString { .. } => {}
             _ => {}
         }
     }
@@ -674,6 +683,10 @@ fn validate_instruction_does_not_use_rbp(
         }
         Instruction::Pop { dst } => operands.push(dst),
         Instruction::Push { src } => operands.push(src),
+        Instruction::Read { dst, len, .. } => {
+            operands.push(dst);
+            operands.push(len);
+        }
         Instruction::Stack { value, .. } => operands.push(value),
         Instruction::StackString { value, .. } => match value {
             StringInitializer::Literal(_) => {}
@@ -953,8 +966,13 @@ fn emit_stack_string_initializer(
             ));
         }
         StringInitializer::Slice { ptr, len } => {
-            emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
-            emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
+            if operand_uses_register_family(ptr, "rax") {
+                emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
+                emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
+            } else {
+                emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
+                emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
+            }
         }
     }
 
@@ -1024,6 +1042,92 @@ fn emit_stack_string_slice_len(
         )),
         None => Err(String::from(
             "slice length must be an integer immediate, const, 64-bit register, or 64-bit stack variable",
+        )),
+    }
+}
+
+fn emit_read_instruction(
+    asm: &mut String,
+    src: &ReadSource,
+    dst: &Operand,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_read_len_arg(asm, len, strings, label_name, stack)?;
+    emit_read_dst_arg(asm, dst)?;
+    emit_read_src_arg(asm, src);
+    asm.push_str("  mov rax, 0\n");
+    asm.push_str("  syscall\n");
+
+    Ok(())
+}
+
+fn emit_read_src_arg(asm: &mut String, src: &ReadSource) {
+    match src {
+        ReadSource::Stdin => asm.push_str("  mov rdi, 0\n"),
+    }
+}
+
+fn emit_read_dst_arg(asm: &mut String, dst: &Operand) -> Result<(), String> {
+    match dst {
+        Operand::Pointer(name) => {
+            asm.push_str(&format!("  lea rsi, [rip + {name}]\n"));
+            Ok(())
+        }
+        Operand::Register(name) => {
+            if name == "rdx" {
+                return Err(String::from(
+                    "read destination cannot use rdx because read uses rdx for the buffer size",
+                ));
+            }
+
+            match register_width(name) {
+                Some(Width::Bits64) => {
+                    asm.push_str(&format!("  mov rsi, {name}\n"));
+                    Ok(())
+                }
+                Some(width) => Err(format!(
+                    "read destination must be address-of memory or a 64-bit pointer register, found {}-bit register",
+                    width.bits()
+                )),
+                None => Err(String::from(
+                    "read destination must be address-of memory or a 64-bit integer register",
+                )),
+            }
+        }
+        _ => Err(String::from(
+            "read destination must be address-of memory or a 64-bit pointer register",
+        )),
+    }
+}
+
+fn emit_read_len_arg(
+    asm: &mut String,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if let Some(value) = immediate_value(len, strings, label_name, stack) {
+        validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
+        asm.push_str(&format!("  mov rdx, {value}\n"));
+        return Ok(());
+    }
+
+    match operand_width(len, stack) {
+        Some(Width::Bits64) => {
+            let len = emit_operand(len, strings, label_name, stack)?;
+            asm.push_str(&format!("  mov rdx, {len}\n"));
+            Ok(())
+        }
+        Some(width) => Err(format!(
+            "read buffer size must be 64-bit, found {}-bit operand",
+            width.bits()
+        )),
+        None => Err(String::from(
+            "read buffer size must be an integer immediate, const, 64-bit register, or 64-bit stack variable",
         )),
     }
 }

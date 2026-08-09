@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    Program, StringInitializer,
+    Program, ReadSource, StringInitializer,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -235,6 +235,37 @@ fn emits_stack_string_slice_print() {
     assert!(asm.contains("  mov qword ptr [rbp - 16], rax\n"));
     assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
     assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
+}
+
+#[test]
+fn emits_read_from_stdin() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 1024,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Read {
+                    src: ReadSource::Stdin,
+                    dst: Operand::Pointer(String::from("buf")),
+                    len: Operand::Immediate(1024),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rdx, 1024\n"));
+    assert!(asm.contains("  lea rsi, [rip + buf]\n"));
+    assert!(asm.contains("  mov rdi, 0\n"));
+    assert!(asm.contains("  mov rax, 0\n"));
+    assert!(asm.contains("  syscall\n"));
 }
 
 #[test]

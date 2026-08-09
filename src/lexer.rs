@@ -228,9 +228,11 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "pop" => Some(Token::Pop),
                 "print" => Some(Token::Print),
                 "push" => Some(Token::Push),
+                "read" => Some(Token::Read),
                 "ret" => Some(Token::Ret),
                 "slice" => Some(Token::Slice),
                 "stack" => Some(Token::Stack),
+                "stdin" => Some(Token::Stdin),
                 "syscall" => Some(Token::Syscall),
                 "u" if matches!(chars.peek(), Some('<')) => {
                     chars.next();

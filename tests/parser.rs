@@ -1,6 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, FloatMathOp,
-    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, StringInitializer,
+    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, ReadSource,
+    StringInitializer,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -235,6 +236,30 @@ fn parses_stack_string_slice() {
                 ptr: Operand::Pointer(String::from("buf")),
                 len: Operand::Register(String::from("rax")),
             },
+        }]
+    );
+}
+
+#[test]
+fn parses_read_from_stdin() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Read,
+        Token::Stdin,
+        Token::Comma,
+        Token::Pointer(String::from("buf")),
+        Token::Comma,
+        Token::NumberLiteral(String::from("1024")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Read {
+            src: ReadSource::Stdin,
+            dst: Operand::Pointer(String::from("buf")),
+            len: Operand::Immediate(1024),
         }]
     );
 }
