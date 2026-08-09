@@ -958,25 +958,26 @@ fn emit_stack_string_initializer(
                 .get(&(label_name.to_string(), name.to_string()))
                 .ok_or_else(|| format!("Unknown string literal for stack variable {name:?}"))?;
 
-            asm.push_str(&format!("  lea rax, [rip + {}]\n", string.asm_label));
-            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], rax\n"));
+            emit_stack_string_address(asm, &string.asm_label, ptr_offset);
             asm.push_str(&format!(
                 "  mov qword ptr [rbp - {len_offset}], {}\n",
                 string.value.len()
             ));
         }
         StringInitializer::Slice { ptr, len } => {
-            if operand_uses_register_family(ptr, "rax") {
-                emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
-                emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
-            } else {
-                emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
-                emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
-            }
+            emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
+            emit_stack_string_slice_len(asm, len, strings, label_name, stack, len_offset)?;
         }
     }
 
     Ok(())
+}
+
+fn emit_stack_string_address(asm: &mut String, label: &str, ptr_offset: usize) {
+    asm.push_str("  push r10\n");
+    asm.push_str(&format!("  lea r10, [rip + {label}]\n"));
+    asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], r10\n"));
+    asm.push_str("  pop r10\n");
 }
 
 fn emit_stack_string_slice_pointer(
@@ -989,8 +990,7 @@ fn emit_stack_string_slice_pointer(
 ) -> Result<(), String> {
     match ptr {
         Operand::Pointer(name) => {
-            asm.push_str(&format!("  lea rax, [rip + {name}]\n"));
-            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], rax\n"));
+            emit_stack_string_address(asm, name, ptr_offset);
             Ok(())
         }
         Operand::Register(name) => match register_width(name) {
@@ -1031,9 +1031,17 @@ fn emit_stack_string_slice_len(
 
     match operand_width(len, stack) {
         Some(Width::Bits64) => {
-            let len = emit_operand(len, strings, label_name, stack)?;
-            asm.push_str(&format!("  mov rax, {len}\n"));
-            asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], rax\n"));
+            let emitted_len = emit_operand(len, strings, label_name, stack)?;
+            if is_memory_operand(len, stack) {
+                asm.push_str("  push r10\n");
+                asm.push_str(&format!("  mov r10, {emitted_len}\n"));
+                asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], r10\n"));
+                asm.push_str("  pop r10\n");
+            } else {
+                asm.push_str(&format!(
+                    "  mov qword ptr [rbp - {len_offset}], {emitted_len}\n"
+                ));
+            }
             Ok(())
         }
         Some(width) => Err(format!(

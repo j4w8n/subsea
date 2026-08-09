@@ -193,8 +193,10 @@ fn emits_stack_string_literal_print() {
 
     assert!(asm.contains(".Lstr_main_message:\n  .byte 104, 101, 108, 108, 111\n"));
     assert!(asm.contains("main:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
-    assert!(asm.contains("  lea rax, [rip + .Lstr_main_message]\n"));
-    assert!(asm.contains("  mov qword ptr [rbp - 8], rax\n"));
+    assert!(asm.contains("  push r10\n"));
+    assert!(asm.contains("  lea r10, [rip + .Lstr_main_message]\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], r10\n"));
+    assert!(asm.contains("  pop r10\n"));
     assert!(asm.contains("  mov qword ptr [rbp - 16], 5\n"));
     assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
     assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
@@ -229,9 +231,10 @@ fn emits_stack_string_slice_print() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  lea rax, [rip + buf]\n"));
-    assert!(asm.contains("  mov qword ptr [rbp - 8], rax\n"));
-    assert!(asm.contains("  mov rax, rax\n"));
+    assert!(asm.contains("  push r10\n"));
+    assert!(asm.contains("  lea r10, [rip + buf]\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], r10\n"));
+    assert!(asm.contains("  pop r10\n"));
     assert!(asm.contains("  mov qword ptr [rbp - 16], rax\n"));
     assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
     assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
