@@ -85,7 +85,7 @@ subsea build -t main.ss
 
 ## Program Structure
 
-A program starts at a required top-level `main` label:
+A program starts at a required top-level `main` function, which contains instructions:
 
 ```ss
 main: {
@@ -93,20 +93,24 @@ main: {
 }
 ```
 
-Labels contain instruction blocks:
+Top-level definitions use label-like syntax, but Subsea treats them as functions. Use `call` to enter another top-level function and `ret` to return from one. Use `jmp` only with local labels inside the current function.
+
+Top-level functions must end with explicit control flow. Use `ret` to return to the caller or `exit` to terminate the process:
 
 ```ss
 main: {
-  const message = "Hello World!\n"
-  print message
-
+  call helper
   exit 0
+}
+
+helper: {
+  ret
 }
 ```
 
-Local labels can be used as markers inside a block. They don't start a nested block, so they don't use braces or own the instructions after them. This is also why we choose to not indent a local label. Think of it as a named position in the parent block that code can jump to.
+Local labels can be used as markers inside a function. They don't start a nested block, so they don't use braces or own the instructions after them. This is also why we choose to not indent a local label. Think of it as a named position in the current function that code can jump to.
 
-Local labels start with `.` and are scoped to the containing top-level label, so different blocks can reuse names like `.loop:` and `.done:` without collisions:
+Local labels start with `.` and are scoped to the containing top-level function, so different functions can reuse names like `.loop:` and `.done:` without collisions:
 
 ```ss
 main: {
@@ -123,17 +127,7 @@ other: {
 }
 ```
 
-Top-level bare labels are allowed when you only need a jump or call target:
-
-```ss
-main: {
-  jmp skip
-}
-
-skip:
-```
-
-Labels fall through naturally. If execution reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
+Local labels fall through naturally inside a function. If execution reaches a local label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution. Top-level functions do not fall through into the next top-level function.
 
 ## Registers
 
@@ -393,11 +387,11 @@ rdx:rax = r10 u/ count
 ## Instructions
 
 ```text
-call label
-jmp label
-jmp label if operand == operand
-jmp label if operand i< operand
-jmp label if operand u< operand
+call function
+jmp .label
+jmp .label if operand == operand
+jmp .label if operand i< operand
+jmp .label if operand u< operand
 push operand
 pop operand
 read stdin, destination, buffer_size
@@ -406,7 +400,7 @@ exit code
 syscall
 ```
 
-`call label` pushes a return address and jumps to the label. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
+`call function` pushes a return address and enters a top-level function. `ret` returns to the caller. Arguments and return values are manual for now; pass them explicitly with registers or memory:
 
 Subsea functions use a caller-saved convention: callers must preserve values they need across `call`. A callee may modify `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11`; `rbx`, `rbp`, and `r12`-`r15` are callee-preserved. `rsp` and `rbp` must be restored before `ret`. Generated stack frames and `print` follow this convention.
 
@@ -426,7 +420,7 @@ add: {
 }
 ```
 
-`jmp label if lhs op rhs` compares two operands and jumps only when the condition is true. Relational comparisons require explicit signedness; plain `<`, `<=`, `>`, and `>=` are rejected. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons. `==` and `!=` are shared because equality does not depend on signedness:
+`jmp .label if lhs op rhs` compares two operands and jumps only when the condition is true. `jmp` targets must be local labels in the current function; use `call` to enter another top-level function. Relational comparisons require explicit signedness; plain `<`, `<=`, `>`, and `>=` are rejected. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons. `==` and `!=` are shared because equality does not depend on signedness:
 
 ```ss
 main: {
@@ -445,7 +439,7 @@ main: {
 }
 ```
 
-`ret` emits stack cleanup automatically. `exit` does not need cleanup because the process terminates. Local jumps like `jmp .loop` are allowed in stack-using labels. Jumping from a stack-using label to a different top-level label is rejected. Falling through out of a stack-using label is also rejected.
+`ret` emits generated stack-frame cleanup automatically. `exit` does not need cleanup because the process terminates. Local jumps like `jmp .loop` stay inside the current function frame. Jumping to a top-level function with `jmp` is rejected.
 
 `push operand` stores a value on the stack and moves `rsp` down. `pop operand` loads a value from the stack and moves `rsp` up:
 
@@ -466,6 +460,21 @@ pop [addr]:u64    // valid
 push eax          // invalid: not 64-bit
 pop [addr]        // invalid: memory width is ambiguous
 pop 10            // invalid: destination cannot be immediate
+```
+
+Subsea checks manual stack balance across function control flow. Every reachable `ret` and non-terminating function end must have the same manual stack depth as function entry. Local labels must be reached with one consistent stack depth from every path:
+
+```ss
+main: {
+  push rax
+  call helper
+  pop rax
+  exit 0
+}
+
+helper: {
+  ret
+}
 ```
 
 `read stdin, destination, buffer_size` reads bytes from stdin into writable memory. The destination must be address-of top-level memory or a 64-bit register containing an address. The buffer size must be an integer immediate, integer `const`, 64-bit register, or 64-bit stack variable. `read` leaves the number of bytes read in `rax`:
