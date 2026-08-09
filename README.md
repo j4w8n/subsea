@@ -392,6 +392,7 @@ jmp label if operand i< operand
 jmp label if operand u< operand
 push operand
 pop operand
+read stdin, destination, buffer_size
 ret
 exit code
 syscall
@@ -458,6 +459,21 @@ push eax          // invalid: not 64-bit
 pop [addr]        // invalid: memory width is ambiguous
 pop 10            // invalid: destination cannot be immediate
 ```
+
+`read stdin, destination, buffer_size` reads bytes from stdin into writable memory. The destination must be address-of top-level memory or a 64-bit register containing an address. The buffer size must be an integer immediate, integer `const`, 64-bit register, or 64-bit stack variable. `read` leaves the number of bytes read in `rax`:
+
+```ss
+mem buf:u8(1024)
+
+main: {
+  read stdin, &buf, 1024
+  stack input:str = slice &buf, rax
+  print input
+  exit 0
+}
+```
+
+`read` lowers to the Linux x86-64 `read` syscall. Negative return values in `rax` are syscall errors.
 
 `exit <code>` lowers to the Linux x86-64 `exit` syscall. Exit codes must be between `0` and `255`:
 
