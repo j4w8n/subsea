@@ -56,6 +56,18 @@ fn reads_stdin_into_runtime_string() {
 }
 
 #[test]
+fn reads_stack_string_properties() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/string_properties.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "props\n6\n");
+}
+
+#[test]
 fn stack_string_initialization_preserves_r10() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

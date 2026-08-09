@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer,
+    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -151,9 +151,19 @@ impl Parser {
             }
             Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => match self.advance() {
-                Some(Token::Ident(name)) => Ok(Instruction::Print {
-                    parts: vec![PrintPart::Binding(name)],
-                }),
+                Some(Token::Ident(name)) => {
+                    if matches!(self.peek(), Some(Token::LocalIdent(_))) {
+                        return self
+                            .parse_ident_operand(name)
+                            .map(|operand| Instruction::Print {
+                                parts: vec![PrintPart::Operand(operand)],
+                            });
+                    }
+
+                    Ok(Instruction::Print {
+                        parts: vec![PrintPart::Binding(name)],
+                    })
+                }
                 Some(Token::Register(name)) => Ok(Instruction::Print {
                     parts: vec![PrintPart::Operand(Operand::Register(name))],
                 }),
@@ -776,7 +786,7 @@ impl Parser {
                 "Float literal {value} is only supported in typed const and mem initializers for now"
             )),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
-            Some(Token::Ident(name)) => Ok(Operand::Ident(name)),
+            Some(Token::Ident(name)) => self.parse_ident_operand(name),
             Some(Token::Pointer(name)) => {
                 if is_register_name(&name) {
                     Err(format!(
@@ -805,6 +815,26 @@ impl Parser {
                 "Expected memory width after ':', found end of input",
             )),
         }
+    }
+
+    fn parse_ident_operand(&mut self, name: String) -> Result<Operand, String> {
+        let Some(Token::LocalIdent(property)) = self.peek().cloned() else {
+            return Ok(Operand::Ident(name));
+        };
+
+        self.advance();
+
+        let property = match property.as_str() {
+            "len" => StringProperty::Len,
+            "ptr" => StringProperty::Ptr,
+            _ => {
+                return Err(format!(
+                    "Unknown property .{property}; expected .ptr or .len"
+                ));
+            }
+        };
+
+        Ok(Operand::StringProperty { name, property })
     }
 
     fn parse_address(&mut self) -> Result<Address, String> {
@@ -1168,6 +1198,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
     for label in labels {
         let mut bindings = HashSet::new();
         let mut operand_bindings = HashSet::new();
+        let mut string_bindings = HashSet::new();
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Const { name, value } => {
@@ -1203,6 +1234,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     }
 
                     bindings.insert(name.as_str());
+                    string_bindings.insert(name.as_str());
                 }
                 _ => {}
             }
@@ -1213,6 +1245,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                 instruction,
                 &bindings,
                 &operand_bindings,
+                &string_bindings,
                 &memory_names,
                 &label_names,
                 &label.name,
@@ -1227,6 +1260,7 @@ fn validate_instruction_symbols(
     instruction: &Instruction,
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
+    string_bindings: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
@@ -1308,6 +1342,7 @@ fn validate_instruction_symbols(
             operand,
             bindings,
             operand_bindings,
+            string_bindings,
             memory,
             labels,
             current_label,
@@ -1320,6 +1355,7 @@ fn validate_operand_symbol(
     operand: &Operand,
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
+    string_bindings: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
@@ -1336,6 +1372,12 @@ fn validate_operand_symbol(
                 ))
             }
         }
+        Operand::StringProperty { name, .. } if !bindings.contains(name.as_str()) => Err(format!(
+            "Unknown string binding {name:?} in label {current_label:?}"
+        )),
+        Operand::StringProperty { name, .. } if !string_bindings.contains(name.as_str()) => Err(
+            format!("Stack variable {name:?} in label {current_label:?} is not a string"),
+        ),
         Operand::Pointer(name)
             if !memory.contains(name.as_str()) && !labels.contains(name.as_str()) =>
         {

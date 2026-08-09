@@ -188,7 +188,17 @@ pub enum Operand {
     Immediate(i128),
     Register(String),
     Ident(String),
+    StringProperty {
+        name: String,
+        property: StringProperty,
+    },
     Pointer(String),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum StringProperty {
+    Len,
+    Ptr,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

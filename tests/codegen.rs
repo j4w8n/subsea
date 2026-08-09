@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    Program, ReadSource, StringInitializer,
+    Program, ReadSource, StringInitializer, StringProperty,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -238,6 +238,60 @@ fn emits_stack_string_slice_print() {
     assert!(asm.contains("  mov qword ptr [rbp - 16], rax\n"));
     assert!(asm.contains("  mov rsi, qword ptr [rbp - 8]\n"));
     assert!(asm.contains("  mov rdx, qword ptr [rbp - 16]\n"));
+}
+
+#[test]
+fn emits_stack_string_property_loads() {
+    let program = main_program(vec![
+        Instruction::StackString {
+            name: String::from("message"),
+            value: StringInitializer::Literal(String::from("hello")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::StringProperty {
+                name: String::from("message"),
+                property: StringProperty::Ptr,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+            value: AssignmentValue::Operand(Operand::StringProperty {
+                name: String::from("message"),
+                property: StringProperty::Len,
+            }),
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, qword ptr [rbp - 8]\n"));
+    assert!(asm.contains("  mov rbx, qword ptr [rbp - 16]\n"));
+}
+
+#[test]
+fn rejects_stack_string_property_as_destination() {
+    let program = main_program(vec![
+        Instruction::StackString {
+            name: String::from("message"),
+            value: StringInitializer::Literal(String::from("hello")),
+        },
+        Instruction::Pop {
+            dst: Operand::StringProperty {
+                name: String::from("message"),
+                property: StringProperty::Len,
+            },
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "pop destination must be a 64-bit register or explicitly 64-bit memory operand"
+    );
 }
 
 #[test]

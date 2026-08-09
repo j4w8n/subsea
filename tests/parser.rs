@@ -1,7 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, FloatMathOp,
     Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, ReadSource,
-    StringInitializer,
+    StringInitializer, StringProperty,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -236,6 +236,65 @@ fn parses_stack_string_slice() {
                 ptr: Operand::Pointer(String::from("buf")),
                 len: Operand::Register(String::from("rax")),
             },
+        }]
+    );
+}
+
+#[test]
+fn parses_stack_string_properties_as_operands() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Register(String::from("rax")),
+        Token::Equals,
+        Token::Ident(String::from("message")),
+        Token::LocalIdent(String::from("ptr")),
+        Token::Register(String::from("rbx")),
+        Token::Equals,
+        Token::Ident(String::from("message")),
+        Token::LocalIdent(String::from("len")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                value: AssignmentValue::Operand(Operand::StringProperty {
+                    name: String::from("message"),
+                    property: StringProperty::Ptr,
+                }),
+            },
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+                value: AssignmentValue::Operand(Operand::StringProperty {
+                    name: String::from("message"),
+                    property: StringProperty::Len,
+                }),
+            },
+        ]
+    );
+}
+
+#[test]
+fn parses_stack_string_property_print_as_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Print,
+        Token::Ident(String::from("message")),
+        Token::LocalIdent(String::from("len")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Print {
+            parts: vec![PrintPart::Operand(Operand::StringProperty {
+                name: String::from("message"),
+                property: StringProperty::Len,
+            })],
         }]
     );
 }

@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer,
+    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -359,6 +359,19 @@ fn stack_string_slot(stack: &StackFrame, name: &str) -> Option<(usize, usize)> {
     stack.slots.get(name).and_then(|slot| slot.string())
 }
 
+fn stack_string_property_slot(
+    stack: &StackFrame,
+    name: &str,
+    property: StringProperty,
+) -> Option<usize> {
+    let (ptr_offset, len_offset) = stack_string_slot(stack, name)?;
+
+    Some(match property {
+        StringProperty::Len => len_offset,
+        StringProperty::Ptr => ptr_offset,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct IntegerBinding {
     value: i128,
@@ -712,7 +725,10 @@ fn operand_is_stack_slot(operand: &Operand, stack: &StackFrame) -> bool {
 }
 
 fn is_memory_operand(operand: &Operand, stack: &StackFrame) -> bool {
-    matches!(operand, Operand::Dereference { .. }) || operand_is_stack_slot(operand, stack)
+    matches!(
+        operand,
+        Operand::Dereference { .. } | Operand::StringProperty { .. }
+    ) || operand_is_stack_slot(operand, stack)
 }
 
 fn is_local_label_target(target: &str) -> bool {
@@ -1413,7 +1429,9 @@ fn validate_float_math_operand(
         Operand::Immediate(_) => Err(format!(
             "{name} cannot be an immediate value; use a floating-point memory operand for now"
         )),
-        Operand::Ident(_) => Err(format!("{name} cannot be a const or stack binding for now")),
+        Operand::Ident(_) | Operand::StringProperty { .. } => {
+            Err(format!("{name} cannot be a const or stack binding for now"))
+        }
         Operand::Pointer(_) => Err(format!("{name} cannot be an address-of operand")),
         Operand::Register(register) => Err(format!(
             "{name} must be an XMM register, found integer register {register}"
@@ -1573,8 +1591,10 @@ fn validate_binary_operands(
         ));
     }
 
-    if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_))
-        || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
+    if matches!(
+        dst,
+        Operand::Immediate(_) | Operand::Pointer(_) | Operand::StringProperty { .. }
+    ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
     {
         return Err(format!(
             "{opcode} destination must be a register or memory operand"
@@ -1798,7 +1818,10 @@ fn validate_push_operand(
 }
 
 fn validate_pop_operand(dst: &Operand, stack: &StackFrame) -> Result<(), String> {
-    if matches!(dst, Operand::Immediate(_) | Operand::Pointer(_)) {
+    if matches!(
+        dst,
+        Operand::Immediate(_) | Operand::Pointer(_) | Operand::StringProperty { .. }
+    ) {
         return Err(String::from(
             "pop destination must be a 64-bit register or explicitly 64-bit memory operand",
         ));
@@ -1840,6 +1863,7 @@ fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Re
                 None => Ok(()),
             }
         }
+        Operand::StringProperty { .. } => Ok(()),
         _ => Ok(()),
     }
 }
@@ -1886,6 +1910,13 @@ fn emit_operand(
                 None => Err(format!("Unknown binding {name:?} in label {label_name:?}")),
             },
         },
+        Operand::StringProperty { name, property } => {
+            let offset = stack_string_property_slot(stack, name, *property).ok_or_else(|| {
+                format!("Unknown string stack variable {name:?} in label {label_name:?}")
+            })?;
+
+            Ok(format!("qword ptr [rbp - {offset}]"))
+        }
         Operand::Pointer(name) => Err(format!(
             "Pointer operand &{name} is only supported as the right side of assignment"
         )),
@@ -1923,6 +1954,7 @@ fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
         Operand::Ident(name) => {
             stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(&width))
         }
+        Operand::StringProperty { .. } => Some(Width::Bits64),
         _ => None,
     }
 }
