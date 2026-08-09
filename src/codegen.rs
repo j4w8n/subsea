@@ -19,9 +19,14 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     asm.push_str("_start:\n");
     asm.push_str(&format!("  jmp {}\n\n", program.entry));
 
+    let top_level_labels: HashSet<&str> = program
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
+
     for label in &program.labels {
         let stack = build_stack_frame(label)?;
-        validate_stack_control_flow(label, &stack)?;
         validate_stack_register_use(label, &stack)?;
 
         asm.push_str(&format!("{}:\n", label.name));
@@ -156,6 +161,8 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 }
             }
         }
+
+        validate_label_control_flow(label, &top_level_labels)?;
 
         asm.push('\n');
     }
@@ -545,23 +552,10 @@ fn emit_stack_initializers(
     Ok(())
 }
 
-fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), String> {
-    if !stack.has_slots() {
-        return Ok(());
-    }
-
-    for instruction in &label.instructions {
-        match instruction {
-            Instruction::Jmp { target, .. } if !is_local_label_target(target) => {
-                return Err(format!(
-                    "Label {:?} declares stack variables and cannot jump to top-level label {target:?}",
-                    label.name
-                ));
-            }
-            _ => {}
-        }
-    }
-
+fn validate_label_control_flow(
+    label: &Label,
+    top_level_labels: &HashSet<&str>,
+) -> Result<(), String> {
     let label_positions: HashMap<&str, usize> = label
         .instructions
         .iter()
@@ -571,38 +565,88 @@ fn validate_stack_control_flow(label: &Label, stack: &StackFrame) -> Result<(), 
             _ => None,
         })
         .collect();
-    let mut pending = VecDeque::from([0]);
+    let mut pending = VecDeque::from([(0, 0isize)]);
     let mut visited = HashSet::new();
+    let mut instruction_depths = HashMap::new();
 
-    while let Some(index) = pending.pop_front() {
-        if !visited.insert(index) {
+    while let Some((index, depth)) = pending.pop_front() {
+        if depth < 0 {
+            return Err(format!(
+                "Function {:?} pops more values than it pushes",
+                label.name
+            ));
+        }
+
+        if let Some(previous_depth) = instruction_depths.insert(index, depth)
+            && previous_depth != depth
+        {
+            return Err(format!(
+                "Function {:?} reaches instruction {index} with conflicting stack depths {previous_depth} and {depth}",
+                label.name
+            ));
+        }
+
+        if !visited.insert((index, depth)) {
             continue;
         }
 
-        let instruction = label.instructions.get(index).ok_or_else(|| {
-            format!(
-                "Label {:?} declares stack variables but can fall through",
+        let Some(instruction) = label.instructions.get(index) else {
+            if depth != 0 {
+                return Err(format!(
+                    "Function {:?} can fall through with unbalanced manual stack depth {depth}. Pop pushed values before the function ends, or use `exit` if this path terminates the process.",
+                    label.name
+                ));
+            }
+
+            return Err(format!(
+                "Function {:?} can fall through. End this path with `ret`, `exit`, or an unconditional local `jmp` to code that does.",
                 label.name
-            )
-        })?;
+            ));
+        };
 
         match instruction {
-            Instruction::Ret | Instruction::Exit { .. } => {}
+            Instruction::Call { target } => {
+                if !top_level_labels.contains(target.as_str()) {
+                    return Err(format!(
+                        "call target {target:?} in function {:?} must be a top-level function",
+                        label.name
+                    ));
+                }
+                pending.push_back((index + 1, depth));
+            }
+            Instruction::Ret => {
+                if depth != 0 {
+                    return Err(format!(
+                        "Function {:?} cannot ret with unbalanced manual stack depth {depth}. Pop pushed values before the function ends, or use `exit` if this path terminates the process.",
+                        label.name
+                    ));
+                }
+            }
+            Instruction::Exit { .. } => {}
             Instruction::Syscall
                 if previous_instructions_set_exit_syscall(&label.instructions, index) => {}
             Instruction::Jmp { target, condition } => {
+                if !is_local_label_target(target) || top_level_labels.contains(target.as_str()) {
+                    return Err(format!(
+                        "jmp target {target:?} in function {:?} must be a local label",
+                        label.name
+                    ));
+                }
+
                 let target_index = *label_positions.get(target.as_str()).ok_or_else(|| {
                     format!(
                         "Unknown local jump target {target:?} in label {:?}",
                         label.name
                     )
                 })?;
-                pending.push_back(target_index);
+                pending.push_back((target_index, depth));
                 if condition.is_some() {
-                    pending.push_back(index + 1);
+                    pending.push_back((index + 1, depth));
                 }
             }
-            _ => pending.push_back(index + 1),
+            Instruction::Pop { .. } => pending.push_back((index + 1, depth - 1)),
+            Instruction::Push { .. } => pending.push_back((index + 1, depth + 1)),
+            _ => pending.push_back((index + 1, depth)),
         }
     }
 

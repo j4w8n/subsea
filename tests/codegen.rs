@@ -7,7 +7,9 @@ use subsea::ast::{
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
-fn main_program(instructions: Vec<Instruction>) -> Program {
+fn main_program(mut instructions: Vec<Instruction>) -> Program {
+    instructions.push(Instruction::Exit { code: 0 });
+
     Program {
         entry: String::from("main"),
         memory: Vec::new(),
@@ -359,7 +361,55 @@ fn rejects_cross_label_jump_from_stack_label() {
 
     assert_eq!(
         error,
-        "Label \"main\" declares stack variables and cannot jump to top-level label \"other\""
+        "jmp target \"other\" in function \"main\" must be a local label"
+    );
+}
+
+#[test]
+fn rejects_cross_function_jump_without_stack_frame() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: Vec::new(),
+        labels: vec![
+            Label {
+                name: String::from("main"),
+                instructions: vec![Instruction::Jmp {
+                    target: String::from("other"),
+                    condition: None,
+                }],
+            },
+            Label {
+                name: String::from("other"),
+                instructions: vec![Instruction::Ret],
+            },
+        ],
+    };
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "jmp target \"other\" in function \"main\" must be a local label"
+    );
+}
+
+#[test]
+fn rejects_call_to_local_label() {
+    let program = main_program(vec![
+        Instruction::Label {
+            name: String::from(".L.main.helper"),
+        },
+        Instruction::Call {
+            target: String::from(".L.main.helper"),
+        },
+        Instruction::Ret,
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "call target \".L.main.helper\" in function \"main\" must be a top-level function"
     );
 }
 
@@ -806,12 +856,25 @@ fn rejects_widened_divide_rhs_that_uses_rdx() {
 
 #[test]
 fn emits_call_and_ret() {
-    let program = main_program(vec![
-        Instruction::Call {
-            target: String::from("helper"),
-        },
-        Instruction::Ret,
-    ]);
+    let program = Program {
+        entry: String::from("main"),
+        memory: Vec::new(),
+        labels: vec![
+            Label {
+                name: String::from("main"),
+                instructions: vec![
+                    Instruction::Call {
+                        target: String::from("helper"),
+                    },
+                    Instruction::Ret,
+                ],
+            },
+            Label {
+                name: String::from("helper"),
+                instructions: vec![Instruction::Ret],
+            },
+        ],
+    };
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
@@ -831,6 +894,9 @@ fn emits_push_and_pop() {
         Instruction::Pop {
             dst: Operand::Register(String::from("rbx")),
         },
+        Instruction::Pop {
+            dst: Operand::Register(String::from("rax")),
+        },
     ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
@@ -838,6 +904,52 @@ fn emits_push_and_pop() {
     assert!(asm.contains("  push rax\n"));
     assert!(asm.contains("  push 10\n"));
     assert!(asm.contains("  pop rbx\n"));
+    assert!(asm.contains("  pop rax\n"));
+}
+
+#[test]
+fn rejects_ret_with_unbalanced_manual_stack() {
+    let program = main_program(vec![
+        Instruction::Push {
+            src: Operand::Register(String::from("rax")),
+        },
+        Instruction::Ret,
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Function \"main\" cannot ret with unbalanced manual stack depth 1. Pop pushed values before the function ends, or use `exit` if this path terminates the process."
+    );
+}
+
+#[test]
+fn rejects_local_label_with_conflicting_manual_stack_depths() {
+    let program = main_program(vec![
+        Instruction::Jmp {
+            target: String::from(".L.main.join"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rax")),
+                op: CompareOp::Equal,
+                rhs: Operand::Immediate(0),
+            }),
+        },
+        Instruction::Push {
+            src: Operand::Register(String::from("rax")),
+        },
+        Instruction::Label {
+            name: String::from(".L.main.join"),
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Function \"main\" reaches instruction 2 with conflicting stack depths 0 and 1"
+    );
 }
 
 #[test]
@@ -859,38 +971,48 @@ fn emits_inline_label() {
 
 #[test]
 fn emits_signed_conditional_jump() {
-    let program = main_program(vec![Instruction::Jmp {
-        target: String::from("done"),
-        condition: Some(Condition {
-            lhs: Operand::Register(String::from("rax")),
-            op: CompareOp::SignedLess,
-            rhs: Operand::Immediate(0),
-        }),
-    }]);
+    let program = main_program(vec![
+        Instruction::Jmp {
+            target: String::from(".L.main.done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rax")),
+                op: CompareOp::SignedLess,
+                rhs: Operand::Immediate(0),
+            }),
+        },
+        Instruction::Label {
+            name: String::from(".L.main.done"),
+        },
+    ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  cmp rax, 0\n  jl done\n"));
+    assert!(asm.contains("  cmp rax, 0\n  jl .L.main.done\n"));
 }
 
 #[test]
 fn emits_unsigned_conditional_jump() {
-    let program = main_program(vec![Instruction::Jmp {
-        target: String::from("loop"),
-        condition: Some(Condition {
-            lhs: Operand::Register(String::from("rcx")),
-            op: CompareOp::UnsignedLess,
-            rhs: Operand::Register(String::from("rbx")),
-        }),
-    }]);
+    let program = main_program(vec![
+        Instruction::Label {
+            name: String::from(".L.main.loop"),
+        },
+        Instruction::Jmp {
+            target: String::from(".L.main.loop"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rcx")),
+                op: CompareOp::UnsignedLess,
+                rhs: Operand::Register(String::from("rbx")),
+            }),
+        },
+    ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  cmp rcx, rbx\n  jb loop\n"));
+    assert!(asm.contains("  cmp rcx, rbx\n  jb .L.main.loop\n"));
 }
 
 #[test]
-fn labels_fall_through_without_implicit_jump() {
+fn rejects_function_fallthrough() {
     let program = Program {
         entry: String::from("main"),
         memory: Vec::new(),
@@ -912,9 +1034,12 @@ fn labels_fall_through_without_implicit_jump() {
         ],
     };
 
-    let asm = emit_x86_64_linux_asm(&program).unwrap();
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
 
-    assert!(asm.contains("main:\n  mov rax, 1\n\nnext:\n  mov rbx, 2\n"));
+    assert_eq!(
+        error,
+        "Function \"main\" can fall through. End this path with `ret`, `exit`, or an unconditional local `jmp` to code that does."
+    );
 }
 
 #[test]
@@ -1310,6 +1435,7 @@ fn emits_xmm_float_memory_arithmetic() {
                         rhs: Operand::Register(String::from("xmm2")),
                     },
                 },
+                Instruction::Exit { code: 0 },
             ],
         }],
     };

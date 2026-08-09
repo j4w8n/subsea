@@ -1170,6 +1170,8 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         })
         .collect();
     let mut label_names = HashSet::new();
+    let top_level_label_names: HashSet<&str> =
+        labels.iter().map(|label| label.name.as_str()).collect();
 
     for label in labels {
         if memory_names.contains(label.name.as_str()) {
@@ -1248,6 +1250,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                 &string_bindings,
                 &memory_names,
                 &label_names,
+                &top_level_label_names,
                 &label.name,
             )?;
         }
@@ -1263,6 +1266,7 @@ fn validate_instruction_symbols(
     string_bindings: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
+    top_level_labels: &HashSet<&str>,
     current_label: &str,
 ) -> Result<(), String> {
     let mut operands = Vec::new();
@@ -1283,17 +1287,28 @@ fn validate_instruction_symbols(
                 }
             }
         }
-        Instruction::Call { target } | Instruction::Jmp { target, .. } => {
+        Instruction::Call { target } => {
+            if !top_level_labels.contains(target.as_str()) {
+                return Err(format!(
+                    "call target {target:?} in label {current_label:?} must be a top-level function"
+                ));
+            }
+        }
+        Instruction::Jmp { target, condition } => {
             if !labels.contains(target.as_str()) {
                 return Err(format!(
                     "Unknown label {target:?} in label {current_label:?}"
                 ));
             }
-            if let Instruction::Jmp {
-                condition: Some(condition),
-                ..
-            } = instruction
-            {
+
+            // keep top_level_labels check for defensive AST invariants
+            if !is_local_label_name(target) || top_level_labels.contains(target.as_str()) {
+                return Err(format!(
+                    "jmp target {target:?} in label {current_label:?} must be a local label"
+                ));
+            }
+
+            if let Some(condition) = condition {
                 operands.extend([&condition.lhs, &condition.rhs]);
             }
         }
@@ -1349,6 +1364,10 @@ fn validate_instruction_symbols(
         )?;
     }
     Ok(())
+}
+
+fn is_local_label_name(name: &str) -> bool {
+    name.starts_with(".L.")
 }
 
 fn validate_operand_symbol(
