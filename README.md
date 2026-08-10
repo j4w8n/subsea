@@ -133,7 +133,7 @@ The current convention is that `print` preserves `rbx`, `rbp`, `rsp`, and all re
 
 ## Functions
 
-These are top-level entities that execute instructions within their code block. Use `call <name>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `exit`, or an equivalent `syscall`.
+These are top-level entities that execute instructions within their code block. Use `call <function>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `exit`, or an equivalent `syscall`.
 
 ```ss
 main: {
