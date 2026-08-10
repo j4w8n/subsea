@@ -272,113 +272,6 @@ print pi  // valid
 
 Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers, but they are not immediate runtime operands yet, so assignments like `rax = 1.5` are rejected.
 
-## Stack Variables
-
-Use `stack` to declare label-local mutable storage in the current label's stack frame:
-
-```ss
-main: {
-  const limit = 5
-  stack count:u64 = 0
-
-.loop:
-  jmp .done if count u>= limit
-
-  print count
-  print "\n"
-
-  count = count + 1
-  jmp .loop
-
-.done:
-  exit 0
-}
-```
-
-Scalar stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A scalar stack variable loads when used as an operand and stores when assigned:
-
-```ss
-stack count:u64 = 8
-count = 5    // store to stack slot
-rax = count  // load from stack slot
-```
-
-Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
-
-If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a label that uses `stack`.
-
-Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
-
-```ss
-stack message:str = "Hello\n"
-print message
-```
-
-Use `slice <ptr>, <len>` to create a string view over bytes that already exist in memory. It does not copy or allocate.
-
-```ss
-mem buf:u8(1024)
-
-main: {
-  rax = 0
-  rdi = 0
-  rsi = &buf
-  rdx = 1024
-  syscall
-
-  stack input:str = slice &buf, rax
-  print input
-  exit 0
-}
-```
-
-Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
-
-```ss
-stack message:str = "Hello\n"
-rsi = message.ptr
-rdx = message.len
-```
-
-## Manual Stack Operations
-
-- `push <operand>` stores a value on the stack and moves `rsp` down.
-- `pop <operand>` loads a value from the stack and moves `rsp` up.
-
-On x86-64, stack operations are pointer-width operations. `push` accepts immediate values, 64-bit registers, and explicitly 64-bit memory operands. `pop` accepts 64-bit registers and explicitly 64-bit memory operands:
-
-```ss
-push rax          // valid
-push [addr]:u64   // valid
-pop rbx           // valid
-pop [addr]:u64    // valid
-
-push eax          // invalid: not 64-bit
-pop [addr]        // invalid: memory width is ambiguous
-pop 10            // invalid: destination cannot be immediate
-```
-
-## Stack Cleanup
-
-- `ret` emits generated stack-frame cleanup automatically.
-- `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
-- Using `push` or `pop` requires you to keep the stack in balance across function control flow.
-  - Every reachable `ret` and non-terminating function end must have the same manual stack depth as function entry.
-  - Local labels must be reached with one consistent stack depth from every path.
-
-```ss
-main: {
-  push rax
-  call helper
-  pop rax   // must pop here, or you'll get a stack balance error
-  exit 0
-}
-
-helper: {
-  ret
-}
-```
-
 ## Memory And Pointers
 
 Top-level `mem` declarations allocate writable memory for the lifetime of the program. Subsea uses `[]` for dereference and `&` for address-of labels.
@@ -491,6 +384,115 @@ Nested dereferences and address-of inside memory operands are not supported:
 ```ss
 rbx = [[rax]]
 rbx = [&buf]
+```
+
+## Slices
+
+Use `slice <ptr>, <len>` to create a string view over bytes that already exist in memory. It does not copy or allocate.
+
+```ss
+mem buf:u8(1024)
+
+main: {
+  rax = 0
+  rdi = 0
+  rsi = &buf
+  rdx = 1024
+  syscall
+
+  stack input:str = slice &buf, rax
+  print input
+  exit 0
+}
+```
+
+Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
+
+```ss
+stack message:str = "Hello\n"
+rsi = message.ptr
+rdx = message.len
+```
+
+## Stack Variables
+
+Use `stack` to declare label-local mutable storage in the current label's stack frame:
+
+```ss
+main: {
+  const limit = 5
+  stack count:u64 = 0
+
+.loop:
+  jmp .done if count u>= limit
+
+  print count
+  print "\n"
+
+  count = count + 1
+  jmp .loop
+
+.done:
+  exit 0
+}
+```
+
+Scalar stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A scalar stack variable loads when used as an operand and stores when assigned:
+
+```ss
+stack count:u64 = 8
+count = 5    // store to stack slot
+rax = count  // load from stack slot
+```
+
+Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
+
+If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a label that uses `stack`.
+
+Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
+
+```ss
+stack message:str = "Hello\n"
+print message
+```
+
+## Manual Stack Operations
+
+- `push <operand>` stores a value on the stack and moves `rsp` down.
+- `pop <operand>` loads a value from the stack and moves `rsp` up.
+
+On x86-64, stack operations are pointer-width operations. `push` accepts immediate values, 64-bit registers, and explicitly 64-bit memory operands. `pop` accepts 64-bit registers and explicitly 64-bit memory operands:
+
+```ss
+push rax          // valid
+push [addr]:u64   // valid
+pop rbx           // valid
+pop [addr]:u64    // valid
+
+push eax          // invalid: not 64-bit
+pop [addr]        // invalid: memory width is ambiguous
+pop 10            // invalid: destination cannot be immediate
+```
+
+## Stack Cleanup
+
+- `ret` emits generated stack-frame cleanup automatically.
+- `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
+- Using `push` or `pop` requires you to keep the stack in balance across function control flow.
+  - Every reachable `ret` and non-terminating function end must have the same manual stack depth as function entry.
+  - Local labels must be reached with one consistent stack depth from every path.
+
+```ss
+main: {
+  push rax
+  call helper
+  pop rax   // must pop here, or you'll get a stack balance error
+  exit 0
+}
+
+helper: {
+  ret
+}
 ```
 
 ## Reading Input
@@ -623,18 +625,6 @@ Use explicit memory widths when the compiler cannot infer the width:
 [addr]:i32 = -100000
 [addr]:u64 = 100000
 [addr]:i64 = -100000
-```
-
-Memory width annotations lower to pointer-sized assembly operands:
-
-```ss
-[rax]:u8 = 5
-[rax]:i64 = -1
-```
-
-```asm
-mov byte ptr [rax], 5
-mov qword ptr [rax], -1
 ```
 
 When both a register and an explicit memory width are present, their widths must match:
