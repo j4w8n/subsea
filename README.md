@@ -48,6 +48,7 @@ rdx:rax = rbx i/ rcx
 
 - The left side is the destination that changes.
 - Math assignment currently supports `+`, `-`, and low-result `*`.
+- `i` and `u` prefixes mark whether the operation is for signed or unsigned values.
 - Use `u*` or `i*` with `rdx:rax` when you need the full widened multiply result.
 - Use `u/` or `i/` with `rdx:rax` when you need division; remainder is written to `rdx` and the quotient is written to `rax`.
 
@@ -135,6 +136,9 @@ The current convention is that `print` preserves `rbx`, `rbp`, `rsp`, and all re
 
 These are top-level entities that execute instructions within their code block. Use `call <function>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `exit`, or an equivalent `syscall`.
 
+- `ret` emits generated stack-frame cleanup automatically - unless the stack is manually changed via `push` or `pop`.
+- `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
+
 ```ss
 main: {
   call helper
@@ -153,7 +157,9 @@ Helping!
 Done
 ```
 
-Functions use a caller-saved convention: callers must preserve values they need across `call`. A callee may modify `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11`; `rbx`, `rbp`, and `r12`-`r15` are callee-preserved. `rsp` and `rbp` must be restored before `ret`. Generated stack frames and `print` follow this convention.
+Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
+
+The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
 
 ```ss
 main: {
@@ -175,7 +181,9 @@ add: {
 
 These are named positions that code execution can jump to at any time; like a bookmark. They don't start a nested block or own the instructions after them, which is why it's best practice to not indent the label name.
 
-Use `jmp .<label>` to jump to a label and start executing code from that point.
+If execution naturally reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
+
+Use `jmp .<label>` to jump to a label and continue executing code from that point.
 
 ```ss
 main: {
@@ -212,6 +220,15 @@ main: {
 }
 ```
 
+```bash
+5
+4
+3
+2
+1
+Liftoff!
+```
+
 Labels are scoped to their function, which allows different functions to use the same label names without collisions.
 
 ```ss
@@ -227,8 +244,6 @@ other: {
 ```
 
 You cannot `jmp` from one function's labels to another function's labels.
-
-Local labels fall through naturally inside a function. If execution reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
 
 ## Comparison Operators
 
@@ -362,21 +377,13 @@ rdx = [rax + rbx + 8]
 r8 = [buf + 4]
 ```
 
-Scaled index addressing is also supported, with allowed values of 1, 2, 4, and 8:
+Scaled index addressing is also supported for registers, with allowed values of 1, 2, 4, and 8:
 
 ```ss
 rbx = [rax + rcx * 1]
 rbx = [rax + rcx * 2]
 rbx = [rax + rcx * 4 + 8]
 rbx = [buf + rcx * 8 - 16]
-```
-
-Only registers can be scaled. These are invalid:
-
-```ss
-rbx = [rax + rcx * 3]
-rbx = [rax + buf * 4]
-rbx = [rax + 8 * 4]
 ```
 
 Nested dereferences and address-of inside memory operands are not supported:
@@ -404,14 +411,6 @@ main: {
   print input
   exit 0
 }
-```
-
-Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
-
-```ss
-stack message:str = "Hello\n"
-rsi = message.ptr
-rdx = message.len
 ```
 
 ## Stack Variables
@@ -456,6 +455,14 @@ stack message:str = "Hello\n"
 print message
 ```
 
+Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
+
+```ss
+stack message:str = "Hello\n"
+rsi = message.ptr
+rdx = message.len
+```
+
 ## Manual Stack Operations
 
 - `push <operand>` stores a value on the stack and moves `rsp` down.
@@ -476,10 +483,8 @@ pop 10            // invalid: destination cannot be immediate
 
 ## Stack Cleanup
 
-- `ret` emits generated stack-frame cleanup automatically.
-- `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
 - Using `push` or `pop` requires you to keep the stack in balance across function control flow.
-  - Every reachable `ret` and non-terminating function end must have the same manual stack depth as function entry.
+  - Every reachable `ret` must have no unmatched manual `push` instructions. A function path that reaches the end of the block without `ret`, `exit`, or an unconditional local `jmp` is also invalid; if that path has unmatched pushes, subsea reports it as unbalanced stack depth first.
   - Local labels must be reached with one consistent stack depth from every path.
 
 ```ss
