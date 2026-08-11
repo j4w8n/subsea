@@ -333,6 +333,7 @@ main: {
   xmm1 = [right]:f64
   xmm0 = xmm0 f64+ xmm1
   xmm0 = xmm0 f64* [right]:f64
+  xmm0 = xmm0 f64+ 1.5
   [result]:f64 = xmm0
 
   exit 0
@@ -341,15 +342,57 @@ main: {
 
 - Supported scalar floating-point operators are `f32+`, `f32-`, `f32*`, `f32/`, `f64+`, `f64-`, `f64*`, and `f64/`
 - Floating-point arithmetic destinations must be XMM registers.
-- Operands must be XMM registers or explicitly annotated floating-point memory operands matching the operator width.
+- Operands must be XMM registers, explicitly annotated floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the operator width.
+
+Floating-point literals and const operands lower to compiler-emitted readonly storage because x86-64 scalar floating-point instructions do not encode decimal float immediates directly:
+
+```ss
+mem value:f64 = 2.25
+
+main: {
+  const ratio:f64 = 1.5
+
+  xmm0 = [value]:f64
+  xmm0 = xmm0 f64+ ratio
+  xmm0 = xmm0 f64* 2.0
+
+  exit 0
+}
+```
+
+Floating-point stack variables use explicit `f32` or `f64` widths and can be loaded/stored with XMM registers:
+
+```ss
+main: {
+  stack ratio:f64 = 1.5
+
+  xmm0 = ratio
+  xmm0 = xmm0 f64+ 2.0
+  ratio = xmm0
+
+  exit 0
+}
+```
+
+Floating-point comparisons use width-prefixed operators and ordered semantics. If either operand is NaN, the jump is not taken:
+
+```ss
+main: {
+  xmm0 = [left]:f64
+
+  jmp .less if xmm0 f64< 2.0
+  exit 0
+
+.less:
+  exit 1
+}
+```
+
+Supported floating-point comparison operators are `f32==`, `f32!=`, `f32<`, `f32<=`, `f32>`, `f32>=`, and the corresponding `f64` forms.
 
 These are not yet supported:
 
-- Floating-point comparisons
-- Direct float immediates as operands
-- `const` float operands
-- `stack` float variables
-- float printing
+- Runtime float printing
 
 Use `&` to pass the address of `mem` storage:
 
