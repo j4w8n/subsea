@@ -69,6 +69,30 @@ rdx:rax = 100 u* 10
 rdx:rax = r10 u/ count
 ```
 
+## Bitwise Operations
+
+Subsea supports common integer bitwise operations with assignment syntax:
+
+```ss
+rax = rbx & rcx   // and
+rax = rbx | rcx   // or
+rax = rbx ^ rcx   // xor
+rax = ~rbx        // not
+rax = rbx << 3    // shift left
+rax = rbx >> 3    // logical shift right
+rax = rbx i>> 3   // arithmetic shift right
+```
+
+Shift counts must be immediate values or `cl`, matching x86-64 encoding rules:
+
+```ss
+rax = rax << 1   // valid
+rax = rax << cl  // valid
+rax = rax << rcx // invalid; use cl
+```
+
+Bitwise operations are integer-only. They do not support XMM registers or floating-point memory operands.
+
 ## Comments
 
 ```ss
