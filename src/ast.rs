@@ -92,6 +92,7 @@ impl Instruction {
 
                 match value {
                     AssignmentValue::Operand(operand) => operands.push(operand),
+                    AssignmentValue::BitwiseUnary { operand, .. } => operands.push(operand),
                     AssignmentValue::Binary { lhs, rhs, .. }
                     | AssignmentValue::FloatBinary { lhs, rhs, .. }
                     | AssignmentValue::WideMultiply { lhs, rhs, .. }
@@ -179,6 +180,10 @@ pub enum AssignmentValue {
         lhs: Operand,
         rhs: Operand,
     },
+    BitwiseUnary {
+        op: BitwiseUnaryOp,
+        operand: Operand,
+    },
     FloatBinary {
         width: MemoryWidth,
         op: FloatMathOp,
@@ -200,8 +205,19 @@ pub enum AssignmentValue {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MathOp {
     Add,
+    BitAnd,
+    BitOr,
+    BitXor,
     Multiply,
+    ShiftLeft,
+    ShiftRightArithmetic,
+    ShiftRightLogical,
     Subtract,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BitwiseUnaryOp {
+    Not,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

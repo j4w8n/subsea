@@ -602,6 +602,115 @@ fn preserves_math_rhs_when_it_is_also_the_destination() {
 }
 
 #[test]
+fn emits_bitwise_and_or_xor() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::BitAnd,
+                lhs: reg("rbx"),
+                rhs: reg("rcx"),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::BitOr,
+                lhs: reg("rax"),
+                rhs: Operand::Immediate(4),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::BitXor,
+                lhs: reg("rax"),
+                rhs: reg("rdx"),
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  and rax, rcx\n"));
+    assert!(asm.contains("  or rax, 4\n"));
+    assert!(asm.contains("  xor rax, rdx\n"));
+}
+
+#[test]
+fn emits_bitwise_not() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::BitwiseUnary {
+            op: subsea::ast::BitwiseUnaryOp::Not,
+            operand: reg("rbx"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  not rax\n"));
+}
+
+#[test]
+fn emits_bitwise_shifts() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::ShiftLeft,
+                lhs: reg("rbx"),
+                rhs: Operand::Immediate(3),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rdx")),
+            value: AssignmentValue::Binary {
+                op: MathOp::ShiftRightLogical,
+                lhs: reg("rdx"),
+                rhs: reg("cl"),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("r8")),
+            value: AssignmentValue::Binary {
+                op: MathOp::ShiftRightArithmetic,
+                lhs: reg("r8"),
+                rhs: Operand::Immediate(1),
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  shl rax, 3\n"));
+    assert!(asm.contains("  shr rdx, cl\n"));
+    assert!(asm.contains("  sar r8, 1\n"));
+}
+
+#[test]
+fn rejects_shift_count_other_than_immediate_or_cl() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Binary {
+            op: MathOp::ShiftLeft,
+            lhs: reg("rax"),
+            rhs: reg("rcx"),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "shl count must be an immediate value or cl, found register rcx"
+    );
+}
+
+#[test]
 fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),

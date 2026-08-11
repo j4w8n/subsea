@@ -59,10 +59,10 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             Some(&c) if is_ident_start(c) => Some(Token::LocalIdent(lex_ident(chars))),
             _ => return Err(String::from("Expected local identifier after '.'")),
         },
-        Some('&') => match chars.peek() {
-            Some(&c) if is_ident_start(c) => Some(Token::Pointer(lex_ident(chars))),
-            _ => Some(Token::Ampersand),
-        },
+        Some('&') => Some(Token::Ampersand),
+        Some('|') => Some(Token::Pipe),
+        Some('^') => Some(Token::Caret),
+        Some('~') => Some(Token::Tilde),
         Some('+') => Some(Token::Plus),
         Some('-') => Some(Token::Minus),
         Some('*') => Some(Token::Star),
@@ -84,7 +84,10 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             }
         }
         Some('<') => {
-            if chars.peek() == Some(&'=') {
+            if chars.peek() == Some(&'<') {
+                chars.next();
+                Some(Token::ShiftLeft)
+            } else if chars.peek() == Some(&'=') {
                 chars.next();
                 Some(Token::LessEquals)
             } else {
@@ -92,7 +95,10 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
             }
         }
         Some('>') => {
-            if chars.peek() == Some(&'=') {
+            if chars.peek() == Some(&'>') {
+                chars.next();
+                Some(Token::ShiftRight)
+            } else if chars.peek() == Some(&'=') {
                 chars.next();
                 Some(Token::GreaterEquals)
             } else {
@@ -218,6 +224,17 @@ fn prefixed_integer_operator(
     slash: Token,
 ) -> Option<Token> {
     match chars.peek() {
+        Some('>') if matches!(greater, Token::IGreater) => {
+            let mut clone = chars.clone();
+            clone.next();
+            if clone.peek() == Some(&'>') {
+                chars.next();
+                chars.next();
+                Some(Token::IShiftRight)
+            } else {
+                Some(prefixed_comparison(chars, greater, greater_equals))
+            }
+        }
         Some('<') => Some(prefixed_comparison(chars, less, less_equals)),
         Some('>') => Some(prefixed_comparison(chars, greater, greater_equals)),
         Some('*') => {

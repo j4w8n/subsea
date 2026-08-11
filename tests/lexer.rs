@@ -5,6 +5,17 @@ fn lex_one(source: &str) -> Result<Option<Token>, String> {
     get_next_token(&mut source.chars().peekable())
 }
 
+fn lex_all(source: &str) -> Result<Vec<Token>, String> {
+    let mut chars = source.chars().peekable();
+    let mut tokens = Vec::new();
+
+    while let Some(token) = get_next_token(&mut chars)? {
+        tokens.push(token);
+    }
+
+    Ok(tokens)
+}
+
 fn s(value: &str) -> String {
     value.to_string()
 }
@@ -72,6 +83,33 @@ fn lexes_float_arithmetic_operators() {
     ] {
         assert_eq!(lex_one(source).unwrap(), Some(token));
     }
+}
+
+#[test]
+fn lexes_bitwise_operators() {
+    for (source, token) in [
+        ("&", Token::Ampersand),
+        ("|", Token::Pipe),
+        ("^", Token::Caret),
+        ("~", Token::Tilde),
+        ("<<", Token::ShiftLeft),
+        (">>", Token::ShiftRight),
+        ("i>>", Token::IShiftRight),
+    ] {
+        assert_eq!(lex_one(source).unwrap(), Some(token));
+    }
+}
+
+#[test]
+fn lexes_bitwise_and_without_spaces() {
+    assert_eq!(
+        lex_all("rbx&rcx").unwrap(),
+        vec![
+            Token::Register(s("rbx")),
+            Token::Ampersand,
+            Token::Register(s("rcx")),
+        ]
+    );
 }
 
 #[test]

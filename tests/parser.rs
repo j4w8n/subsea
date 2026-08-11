@@ -372,6 +372,77 @@ fn parses_assignment_math() {
 }
 
 #[test]
+fn parses_bitwise_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("rbx"),
+        Token::Ampersand,
+        treg("rcx"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::BitAnd,
+                lhs: reg("rbx"),
+                rhs: reg("rcx"),
+            },
+        }
+    );
+}
+
+#[test]
+fn parses_unary_bitwise_not_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([treg("rax"), Token::Equals, Token::Tilde, treg("rbx")]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::BitwiseUnary {
+                op: subsea::ast::BitwiseUnaryOp::Not,
+                operand: reg("rbx"),
+            },
+        }
+    );
+}
+
+#[test]
+fn parses_arithmetic_shift_right_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("rbx"),
+        Token::IShiftRight,
+        tnum("3"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Binary {
+                op: MathOp::ShiftRightArithmetic,
+                lhs: reg("rbx"),
+                rhs: Operand::Immediate(3),
+            },
+        }
+    );
+}
+
+#[test]
 fn parses_widened_multiply_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

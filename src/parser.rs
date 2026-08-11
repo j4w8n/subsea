@@ -369,6 +369,18 @@ impl Parser {
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
+        if matches!(self.peek(), Some(Token::Tilde)) {
+            self.advance();
+            let operand = self.parse_operand()?;
+            return Ok(Instruction::Assign {
+                dst,
+                value: AssignmentValue::BitwiseUnary {
+                    op: crate::ast::BitwiseUnaryOp::Not,
+                    operand,
+                },
+            });
+        }
+
         let lhs = self.parse_operand()?;
         let value = match self.peek().and_then(assignment_op) {
             Some(AssignmentOp::UnsupportedDivision) => {
@@ -837,6 +849,12 @@ enum AssignmentOp {
 fn assignment_op(token: &Token) -> Option<AssignmentOp> {
     Some(match token {
         Token::Plus => AssignmentOp::Binary(MathOp::Add),
+        Token::Ampersand => AssignmentOp::Binary(MathOp::BitAnd),
+        Token::Pipe => AssignmentOp::Binary(MathOp::BitOr),
+        Token::Caret => AssignmentOp::Binary(MathOp::BitXor),
+        Token::ShiftLeft => AssignmentOp::Binary(MathOp::ShiftLeft),
+        Token::ShiftRight => AssignmentOp::Binary(MathOp::ShiftRightLogical),
+        Token::IShiftRight => AssignmentOp::Binary(MathOp::ShiftRightArithmetic),
         Token::Minus => AssignmentOp::Binary(MathOp::Subtract),
         Token::Star => AssignmentOp::Binary(MathOp::Multiply),
         Token::Slash => AssignmentOp::UnsupportedDivision,

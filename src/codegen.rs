@@ -1,7 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
+    BitwiseUnaryOp, CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -414,6 +415,12 @@ fn float_math_op_from_integer_op(op: MathOp) -> FloatMathOp {
         MathOp::Add => FloatMathOp::Add,
         MathOp::Multiply => FloatMathOp::Multiply,
         MathOp::Subtract => FloatMathOp::Subtract,
+        MathOp::BitAnd
+        | MathOp::BitOr
+        | MathOp::BitXor
+        | MathOp::ShiftLeft
+        | MathOp::ShiftRightArithmetic
+        | MathOp::ShiftRightLogical => unreachable!(),
     }
 }
 
@@ -425,8 +432,46 @@ fn is_ambiguous_float_binary_operand(operand: &Operand) -> bool {
 fn math_op_symbol(op: MathOp) -> &'static str {
     match op {
         MathOp::Add => "+",
+        MathOp::BitAnd => "&",
+        MathOp::BitOr => "|",
+        MathOp::BitXor => "^",
         MathOp::Multiply => "*",
+        MathOp::ShiftLeft => "<<",
+        MathOp::ShiftRightArithmetic => "i>>",
+        MathOp::ShiftRightLogical => ">>",
         MathOp::Subtract => "-",
+    }
+}
+
+fn integer_op_can_be_float(op: MathOp) -> bool {
+    matches!(op, MathOp::Add | MathOp::Multiply | MathOp::Subtract)
+}
+
+fn is_commutative_math_op(op: MathOp) -> bool {
+    matches!(
+        op,
+        MathOp::Add | MathOp::Multiply | MathOp::BitAnd | MathOp::BitOr | MathOp::BitXor
+    )
+}
+
+fn is_shift_math_op(op: MathOp) -> bool {
+    matches!(
+        op,
+        MathOp::ShiftLeft | MathOp::ShiftRightArithmetic | MathOp::ShiftRightLogical
+    )
+}
+
+fn integer_math_opcode(op: MathOp) -> &'static str {
+    match op {
+        MathOp::Add => "add",
+        MathOp::BitAnd => "and",
+        MathOp::BitOr => "or",
+        MathOp::BitXor => "xor",
+        MathOp::Multiply => "imul",
+        MathOp::ShiftLeft => "shl",
+        MathOp::ShiftRightArithmetic => "sar",
+        MathOp::ShiftRightLogical => "shr",
+        MathOp::Subtract => "sub",
     }
 }
 
@@ -1674,6 +1719,75 @@ fn emit_binary_instruction(
     Ok(())
 }
 
+fn emit_integer_math_instruction(
+    asm: &mut String,
+    op: MathOp,
+    src: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if is_shift_math_op(op) {
+        return emit_shift_instruction(
+            asm,
+            integer_math_opcode(op),
+            src,
+            dst,
+            strings,
+            label_name,
+            stack,
+        );
+    }
+
+    emit_binary_instruction(
+        asm,
+        integer_math_opcode(op),
+        src,
+        dst,
+        strings,
+        label_name,
+        stack,
+    )
+}
+
+fn emit_shift_instruction(
+    asm: &mut String,
+    opcode: &str,
+    count: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_shift_operands(opcode, count, dst, strings, label_name, stack)?;
+
+    let count = emit_operand(count, strings, label_name, stack)?;
+    let dst = emit_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {dst}, {count}\n"));
+
+    Ok(())
+}
+
+fn emit_bitwise_unary_instruction(
+    asm: &mut String,
+    op: BitwiseUnaryOp,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let opcode = match op {
+        BitwiseUnaryOp::Not => "not",
+    };
+
+    validate_bitwise_unary_operand(opcode, dst, strings, stack)?;
+    let dst = emit_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {dst}\n"));
+
+    Ok(())
+}
+
 fn emit_assignment(
     asm: &mut String,
     dst: &AssignmentTarget,
@@ -1687,10 +1801,18 @@ fn emit_assignment(
             let dst = assignment_operand_target(dst)?;
             emit_copy_instruction(asm, src, dst, strings, label_name, stack)
         }
+        AssignmentValue::BitwiseUnary { op, operand } => {
+            let dst = assignment_operand_target(dst)?;
+            emit_copy_instruction(asm, operand, dst, strings, label_name, stack)?;
+            emit_bitwise_unary_instruction(asm, *op, dst, strings, label_name, stack)
+        }
         AssignmentValue::Binary { op, lhs, rhs } => {
             let dst = assignment_operand_target(dst)?;
 
-            if let Some(width) = resolve_float_binary_width(lhs, rhs, strings, label_name, stack)? {
+            if integer_op_can_be_float(*op)
+                && let Some(width) =
+                    resolve_float_binary_width(lhs, rhs, strings, label_name, stack)?
+            {
                 return emit_float_binary_operand_assignment(
                     asm,
                     dst,
@@ -1722,26 +1844,16 @@ fn emit_assignment(
             }
 
             if lhs == dst {
-                let opcode = match op {
-                    MathOp::Add => "add",
-                    MathOp::Multiply => "imul",
-                    MathOp::Subtract => "sub",
-                };
-
-                return emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name, stack);
+                return emit_integer_math_instruction(
+                    asm, *op, rhs, dst, strings, label_name, stack,
+                );
             }
 
             if rhs == dst {
                 match op {
-                    MathOp::Add | MathOp::Multiply => {
-                        let opcode = match op {
-                            MathOp::Add => "add",
-                            MathOp::Multiply => "imul",
-                            MathOp::Subtract => unreachable!(),
-                        };
-
-                        return emit_binary_instruction(
-                            asm, opcode, lhs, dst, strings, label_name, stack,
+                    op if is_commutative_math_op(*op) => {
+                        return emit_integer_math_instruction(
+                            asm, *op, lhs, dst, strings, label_name, stack,
                         );
                     }
                     MathOp::Subtract => {
@@ -1752,21 +1864,23 @@ fn emit_assignment(
                             asm, "add", lhs, dst, strings, label_name, stack,
                         );
                     }
+                    op => {
+                        return Err(format!(
+                            "Binary assignment destination cannot also be the right operand for {}",
+                            math_op_symbol(*op)
+                        ));
+                    }
                 }
             }
 
             validate_binary_assignment_does_not_clobber_rhs_address(dst, rhs)?;
+            if is_shift_math_op(*op) {
+                validate_shift_assignment_does_not_clobber_count(dst, rhs)?;
+            }
 
             {
                 emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
-
-                let opcode = match op {
-                    MathOp::Add => "add",
-                    MathOp::Multiply => "imul",
-                    MathOp::Subtract => "sub",
-                };
-
-                emit_binary_instruction(asm, opcode, rhs, dst, strings, label_name, stack)
+                emit_integer_math_instruction(asm, *op, rhs, dst, strings, label_name, stack)
             }
         }
         AssignmentValue::FloatBinary {
@@ -2062,6 +2176,23 @@ fn validate_binary_assignment_does_not_clobber_rhs_address(
     Ok(())
 }
 
+fn validate_shift_assignment_does_not_clobber_count(
+    dst: &Operand,
+    count: &Operand,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Ok(());
+    };
+
+    if operand_uses_register_family(count, dst_register) {
+        return Err(format!(
+            "Shift assignment destination {dst_register} cannot also be used as the count operand"
+        ));
+    }
+
+    Ok(())
+}
+
 fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String> {
     match dst {
         AssignmentTarget::Operand(operand) => Ok(operand),
@@ -2250,6 +2381,63 @@ fn validate_binary_operands(
         destination_width(dst, strings, stack)?,
     ) {
         validate_immediate_range(value, width)?;
+    }
+
+    Ok(())
+}
+
+fn validate_shift_operands(
+    opcode: &str,
+    count: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_bitwise_unary_operand(opcode, dst, strings, stack)?;
+
+    if let Some(value) = immediate_value(count, strings, label_name, stack) {
+        if (0..=255).contains(&value) {
+            return Ok(());
+        }
+
+        return Err(format!(
+            "{opcode} count immediate must be between 0 and 255"
+        ));
+    }
+
+    match count {
+        Operand::Register(register) if register == "cl" => Ok(()),
+        Operand::Register(register) => Err(format!(
+            "{opcode} count must be an immediate value or cl, found register {register}"
+        )),
+        _ => Err(format!("{opcode} count must be an immediate value or cl")),
+    }
+}
+
+fn validate_bitwise_unary_operand(
+    opcode: &str,
+    dst: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if operand_uses_xmm_register(dst) || is_float_memory_operand(dst, strings, stack)? {
+        return Err(format!(
+            "{opcode} does not support floating-point operands yet"
+        ));
+    }
+
+    if matches!(
+        dst,
+        Operand::Immediate(_)
+            | Operand::Pointer(_)
+            | Operand::StringProperty { .. }
+            | Operand::FloatLiteral(_)
+    ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
+    {
+        return Err(format!(
+            "{opcode} destination must be a register or memory operand"
+        ));
     }
 
     Ok(())
