@@ -82,20 +82,12 @@ impl Parser {
     fn parse_memory_declaration(&mut self) -> Result<MemoryDeclaration, String> {
         self.expect(Token::Mem, "Expected mem declaration")?;
 
-        let name = match self.advance() {
-            Some(Token::Ident(name)) => name,
-            Some(token) => return Err(format!("Expected memory name after mem, found {token:?}")),
-            None => {
-                return Err(String::from(
-                    "Expected memory name after mem, found end of input",
-                ));
-            }
-        };
+        let name = self.expect_ident("memory name after mem")?;
 
         self.expect(Token::Colon, "Expected ':' after memory name")?;
 
         let width = match self.advance() {
-            Some(Token::Ident(name)) => parse_memory_width(&name)?,
+            Some(Token::Ident(name)) => MemoryWidth::parse(&name)?,
             Some(token) => return Err(format!("Expected memory width after ':', found {token:?}")),
             None => {
                 return Err(String::from(
@@ -107,7 +99,7 @@ impl Parser {
         match self.peek() {
             Some(Token::Equals) => {
                 self.advance();
-                if is_float_width(width) {
+                if width.is_float() {
                     let value = self.parse_float_literal("memory initializer", width)?;
 
                     return Ok(MemoryDeclaration::FloatScalar { name, width, value });
@@ -244,19 +236,7 @@ impl Parser {
     }
 
     fn parse_const_declaration(&mut self) -> Result<Instruction, String> {
-        let name = match self.advance() {
-            Some(Token::Ident(name)) => name,
-            Some(token) => {
-                return Err(format!(
-                    "Expected binding name after const, found {token:?}"
-                ));
-            }
-            None => {
-                return Err(String::from(
-                    "Expected binding name after const, found end of input",
-                ));
-            }
-        };
+        let name = self.expect_ident("binding name after const")?;
 
         let width = self.parse_optional_binding_width()?;
         self.expect(Token::Equals, "Expected '=' after binding name")?;
@@ -267,34 +247,10 @@ impl Parser {
     }
 
     fn parse_stack_declaration(&mut self) -> Result<Instruction, String> {
-        let name = match self.advance() {
-            Some(Token::Ident(name)) => name,
-            Some(token) => {
-                return Err(format!(
-                    "Expected stack variable name after stack, found {token:?}"
-                ));
-            }
-            None => {
-                return Err(String::from(
-                    "Expected stack variable name after stack, found end of input",
-                ));
-            }
-        };
+        let name = self.expect_ident("stack variable name after stack")?;
 
         self.expect(Token::Colon, "Expected ':' after stack variable name")?;
-        let width_name = match self.advance() {
-            Some(Token::Ident(name)) => name,
-            Some(token) => {
-                return Err(format!(
-                    "Expected stack variable type after ':', found {token:?}"
-                ));
-            }
-            None => {
-                return Err(String::from(
-                    "Expected stack variable type after ':', found end of input",
-                ));
-            }
-        };
+        let width_name = self.expect_ident("stack variable type after ':'")?;
 
         if width_name == "str" {
             self.expect(Token::Equals, "Expected '=' after stack string type")?;
@@ -303,7 +259,7 @@ impl Parser {
             return Ok(Instruction::StackString { name, value });
         }
 
-        let width = parse_memory_width(&width_name)?;
+        let width = MemoryWidth::parse(&width_name)?;
 
         self.expect(Token::Equals, "Expected '=' after stack variable width")?;
         let value = self.parse_operand()?;
@@ -387,32 +343,7 @@ impl Parser {
 
     fn parse_compare_op(&mut self) -> Result<CompareOp, String> {
         match self.advance() {
-            Some(Token::EqualsEquals) => Ok(CompareOp::Equal),
-            Some(Token::NotEquals) => Ok(CompareOp::NotEqual),
-            Some(Token::F32EqualsEquals) => Ok(CompareOp::FloatEqual(MemoryWidth::F32)),
-            Some(Token::F32NotEquals) => Ok(CompareOp::FloatNotEqual(MemoryWidth::F32)),
-            Some(Token::F32Less) => Ok(CompareOp::FloatLess(MemoryWidth::F32)),
-            Some(Token::F32LessEquals) => Ok(CompareOp::FloatLessEqual(MemoryWidth::F32)),
-            Some(Token::F32Greater) => Ok(CompareOp::FloatGreater(MemoryWidth::F32)),
-            Some(Token::F32GreaterEquals) => Ok(CompareOp::FloatGreaterEqual(MemoryWidth::F32)),
-            Some(Token::F64EqualsEquals) => Ok(CompareOp::FloatEqual(MemoryWidth::F64)),
-            Some(Token::F64NotEquals) => Ok(CompareOp::FloatNotEqual(MemoryWidth::F64)),
-            Some(Token::F64Less) => Ok(CompareOp::FloatLess(MemoryWidth::F64)),
-            Some(Token::F64LessEquals) => Ok(CompareOp::FloatLessEqual(MemoryWidth::F64)),
-            Some(Token::F64Greater) => Ok(CompareOp::FloatGreater(MemoryWidth::F64)),
-            Some(Token::F64GreaterEquals) => Ok(CompareOp::FloatGreaterEqual(MemoryWidth::F64)),
-            Some(Token::ILess) => Ok(CompareOp::SignedLess),
-            Some(Token::ILessEquals) => Ok(CompareOp::SignedLessEqual),
-            Some(Token::IGreater) => Ok(CompareOp::SignedGreater),
-            Some(Token::IGreaterEquals) => Ok(CompareOp::SignedGreaterEqual),
-            Some(Token::ULess) => Ok(CompareOp::UnsignedLess),
-            Some(Token::ULessEquals) => Ok(CompareOp::UnsignedLessEqual),
-            Some(Token::UGreater) => Ok(CompareOp::UnsignedGreater),
-            Some(Token::UGreaterEquals) => Ok(CompareOp::UnsignedGreaterEqual),
-            Some(Token::Less) => Ok(CompareOp::Less),
-            Some(Token::LessEquals) => Ok(CompareOp::LessEqual),
-            Some(Token::Greater) => Ok(CompareOp::Greater),
-            Some(Token::GreaterEquals) => Ok(CompareOp::GreaterEqual),
+            Some(token) if compare_op(&token).is_some() => Ok(compare_op(&token).unwrap()),
             Some(token) => Err(format!("Expected comparison operator, found {token:?}")),
             None => Err(String::from(
                 "Expected comparison operator, found end of input",
@@ -427,19 +358,7 @@ impl Parser {
         }
 
         self.advance();
-        let low = match self.advance() {
-            Some(Token::Register(name)) => name,
-            Some(token) => {
-                return Err(format!(
-                    "Expected low register after register-pair ':', found {token:?}"
-                ));
-            }
-            None => {
-                return Err(String::from(
-                    "Expected low register after register-pair ':', found end of input",
-                ));
-            }
-        };
+        let low = self.expect_register("low register after register-pair ':'")?;
 
         self.parse_assignment(AssignmentTarget::RegisterPair {
             high: high_or_dst,
@@ -451,102 +370,18 @@ impl Parser {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
         let lhs = self.parse_operand()?;
-        let value = match self.peek() {
-            Some(
-                Token::ISlash
-                | Token::IStar
-                | Token::F32Minus
-                | Token::F32Plus
-                | Token::F32Slash
-                | Token::F32Star
-                | Token::F64Minus
-                | Token::F64Plus
-                | Token::F64Slash
-                | Token::F64Star
-                | Token::Plus
-                | Token::Minus
-                | Token::Slash
-                | Token::Star
-                | Token::USlash
-                | Token::UStar,
-            ) => match self.advance() {
-                Some(Token::Plus) => {
-                    let rhs = self.parse_operand()?;
-                    AssignmentValue::Binary {
-                        op: MathOp::Add,
-                        lhs,
-                        rhs,
-                    }
-                }
-                Some(Token::Minus) => {
-                    let rhs = self.parse_operand()?;
-                    AssignmentValue::Binary {
-                        op: MathOp::Subtract,
-                        lhs,
-                        rhs,
-                    }
-                }
-                Some(Token::Star) => {
-                    let rhs = self.parse_operand()?;
-                    AssignmentValue::Binary {
-                        op: MathOp::Multiply,
-                        lhs,
-                        rhs,
-                    }
-                }
-                Some(Token::Slash) => {
-                    return Err(String::from(
-                        "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
-                    ));
-                }
-                Some(
-                    operator @ (Token::F32Minus
-                    | Token::F32Plus
-                    | Token::F32Slash
-                    | Token::F32Star
-                    | Token::F64Minus
-                    | Token::F64Plus
-                    | Token::F64Slash
-                    | Token::F64Star),
-                ) => {
-                    let (width, op) = match operator {
-                        Token::F32Plus => (MemoryWidth::F32, FloatMathOp::Add),
-                        Token::F32Minus => (MemoryWidth::F32, FloatMathOp::Subtract),
-                        Token::F32Star => (MemoryWidth::F32, FloatMathOp::Multiply),
-                        Token::F32Slash => (MemoryWidth::F32, FloatMathOp::Divide),
-                        Token::F64Plus => (MemoryWidth::F64, FloatMathOp::Add),
-                        Token::F64Minus => (MemoryWidth::F64, FloatMathOp::Subtract),
-                        Token::F64Star => (MemoryWidth::F64, FloatMathOp::Multiply),
-                        Token::F64Slash => (MemoryWidth::F64, FloatMathOp::Divide),
-                        _ => unreachable!(),
-                    };
-                    let rhs = self.parse_operand()?;
-
-                    AssignmentValue::FloatBinary {
-                        width,
-                        op,
-                        lhs,
-                        rhs,
-                    }
-                }
-                Some(operator @ (Token::ISlash | Token::IStar | Token::USlash | Token::UStar)) => {
-                    let (is_division, signed) = match operator {
-                        Token::ISlash => (true, true),
-                        Token::IStar => (false, true),
-                        Token::USlash => (true, false),
-                        Token::UStar => (false, false),
-                        _ => unreachable!(),
-                    };
-                    let rhs = self.parse_operand()?;
-
-                    if is_division {
-                        AssignmentValue::WideDivide { signed, lhs, rhs }
-                    } else {
-                        AssignmentValue::WideMultiply { signed, lhs, rhs }
-                    }
-                }
-                _ => unreachable!(),
-            },
+        let value = match self.peek().and_then(assignment_op) {
+            Some(AssignmentOp::UnsupportedDivision) => {
+                self.advance();
+                return Err(String::from(
+                    "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
+                ));
+            }
+            Some(op) => {
+                self.advance();
+                let rhs = self.parse_operand()?;
+                assignment_value(op, lhs, rhs)
+            }
             _ => AssignmentValue::Operand(lhs),
         };
 
@@ -603,19 +438,7 @@ impl Parser {
     }
 
     fn parse_optional_binding_width(&mut self) -> Result<Option<MemoryWidth>, String> {
-        if !matches!(self.peek(), Some(Token::Colon)) {
-            return Ok(None);
-        }
-
-        self.advance();
-
-        match self.advance() {
-            Some(Token::Ident(name)) => parse_memory_width(&name).map(Some),
-            Some(token) => Err(format!("Expected binding width after ':', found {token:?}")),
-            None => Err(String::from(
-                "Expected binding width after ':', found end of input",
-            )),
-        }
+        self.parse_optional_width("binding width")
     }
 
     fn parse_binding_value(&mut self, width: Option<MemoryWidth>) -> Result<BindingValue, String> {
@@ -627,13 +450,13 @@ impl Parser {
 
                 Ok(BindingValue::String(value))
             }
-            Some(Token::NumberLiteral(value)) if width.is_some_and(is_float_width) => {
+            Some(Token::NumberLiteral(value)) if width.is_some_and(MemoryWidth::is_float) => {
                 parse_float_binding_value(&value, width)
             }
             Some(Token::NumberLiteral(value)) => parse_integer_binding_value(&value, width),
             Some(Token::FloatLiteral(value)) => parse_float_binding_value(&value, width),
             Some(Token::Minus) => match self.advance() {
-                Some(Token::NumberLiteral(value)) if width.is_some_and(is_float_width) => {
+                Some(Token::NumberLiteral(value)) if width.is_some_and(MemoryWidth::is_float) => {
                     parse_float_binding_value(&format!("-{value}"), width)
                 }
                 Some(Token::NumberLiteral(value)) => {
@@ -796,6 +619,10 @@ impl Parser {
     }
 
     fn parse_optional_memory_width(&mut self) -> Result<Option<MemoryWidth>, String> {
+        self.parse_optional_width("memory width")
+    }
+
+    fn parse_optional_width(&mut self, expected: &str) -> Result<Option<MemoryWidth>, String> {
         if !matches!(self.peek(), Some(Token::Colon)) {
             return Ok(None);
         }
@@ -803,11 +630,9 @@ impl Parser {
         self.advance();
 
         match self.advance() {
-            Some(Token::Ident(name)) => parse_memory_width(&name).map(Some),
-            Some(token) => Err(format!("Expected memory width after ':', found {token:?}")),
-            None => Err(String::from(
-                "Expected memory width after ':', found end of input",
-            )),
+            Some(Token::Ident(name)) => MemoryWidth::parse(&name).map(Some),
+            Some(token) => Err(format!("Expected {expected} after ':', found {token:?}")),
+            None => Err(format!("Expected {expected} after ':', found end of input")),
         }
     }
 
@@ -934,6 +759,22 @@ impl Parser {
         }
     }
 
+    fn expect_ident(&mut self, expected: &str) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::Ident(name)) => Ok(name),
+            Some(token) => Err(format!("Expected {expected}, found {token:?}")),
+            None => Err(format!("Expected {expected}, found end of input")),
+        }
+    }
+
+    fn expect_register(&mut self, expected: &str) -> Result<String, String> {
+        match self.advance() {
+            Some(Token::Register(name)) => Ok(name),
+            Some(token) => Err(format!("Expected {expected}, found {token:?}")),
+            None => Err(format!("Expected {expected}, found end of input")),
+        }
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.position)
     }
@@ -949,33 +790,109 @@ impl Parser {
     }
 }
 
-fn parse_memory_width(name: &str) -> Result<MemoryWidth, String> {
-    match name {
-        "f32" => Ok(MemoryWidth::F32),
-        "f64" => Ok(MemoryWidth::F64),
-        "i8" => Ok(MemoryWidth::I8),
-        "i16" => Ok(MemoryWidth::I16),
-        "i32" => Ok(MemoryWidth::I32),
-        "i64" => Ok(MemoryWidth::I64),
-        "u8" => Ok(MemoryWidth::U8),
-        "u16" => Ok(MemoryWidth::U16),
-        "u32" => Ok(MemoryWidth::U32),
-        "u64" => Ok(MemoryWidth::U64),
-        _ => Err(format!(
-            "Invalid memory width {name:?}; expected f32, f64, i8, i16, i32, i64, u8, u16, u32, or u64"
-        )),
-    }
-}
-
 fn mangle_local_label(parent: &str, name: &str) -> String {
     format!(".L.{parent}.{name}")
+}
+
+fn compare_op(token: &Token) -> Option<CompareOp> {
+    Some(match token {
+        Token::EqualsEquals => CompareOp::Equal,
+        Token::NotEquals => CompareOp::NotEqual,
+        Token::F32EqualsEquals => CompareOp::FloatEqual(MemoryWidth::F32),
+        Token::F32NotEquals => CompareOp::FloatNotEqual(MemoryWidth::F32),
+        Token::F32Less => CompareOp::FloatLess(MemoryWidth::F32),
+        Token::F32LessEquals => CompareOp::FloatLessEqual(MemoryWidth::F32),
+        Token::F32Greater => CompareOp::FloatGreater(MemoryWidth::F32),
+        Token::F32GreaterEquals => CompareOp::FloatGreaterEqual(MemoryWidth::F32),
+        Token::F64EqualsEquals => CompareOp::FloatEqual(MemoryWidth::F64),
+        Token::F64NotEquals => CompareOp::FloatNotEqual(MemoryWidth::F64),
+        Token::F64Less => CompareOp::FloatLess(MemoryWidth::F64),
+        Token::F64LessEquals => CompareOp::FloatLessEqual(MemoryWidth::F64),
+        Token::F64Greater => CompareOp::FloatGreater(MemoryWidth::F64),
+        Token::F64GreaterEquals => CompareOp::FloatGreaterEqual(MemoryWidth::F64),
+        Token::ILess => CompareOp::SignedLess,
+        Token::ILessEquals => CompareOp::SignedLessEqual,
+        Token::IGreater => CompareOp::SignedGreater,
+        Token::IGreaterEquals => CompareOp::SignedGreaterEqual,
+        Token::ULess => CompareOp::UnsignedLess,
+        Token::ULessEquals => CompareOp::UnsignedLessEqual,
+        Token::UGreater => CompareOp::UnsignedGreater,
+        Token::UGreaterEquals => CompareOp::UnsignedGreaterEqual,
+        Token::Less => CompareOp::Less,
+        Token::LessEquals => CompareOp::LessEqual,
+        Token::Greater => CompareOp::Greater,
+        Token::GreaterEquals => CompareOp::GreaterEqual,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum AssignmentOp {
+    Binary(MathOp),
+    FloatBinary(MemoryWidth, FloatMathOp),
+    UnsupportedDivision,
+    Wide { signed: bool, division: bool },
+}
+
+fn assignment_op(token: &Token) -> Option<AssignmentOp> {
+    Some(match token {
+        Token::Plus => AssignmentOp::Binary(MathOp::Add),
+        Token::Minus => AssignmentOp::Binary(MathOp::Subtract),
+        Token::Star => AssignmentOp::Binary(MathOp::Multiply),
+        Token::Slash => AssignmentOp::UnsupportedDivision,
+        Token::F32Plus => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Add),
+        Token::F32Minus => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Subtract),
+        Token::F32Star => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Multiply),
+        Token::F32Slash => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Divide),
+        Token::F64Plus => AssignmentOp::FloatBinary(MemoryWidth::F64, FloatMathOp::Add),
+        Token::F64Minus => AssignmentOp::FloatBinary(MemoryWidth::F64, FloatMathOp::Subtract),
+        Token::F64Star => AssignmentOp::FloatBinary(MemoryWidth::F64, FloatMathOp::Multiply),
+        Token::F64Slash => AssignmentOp::FloatBinary(MemoryWidth::F64, FloatMathOp::Divide),
+        Token::ISlash => AssignmentOp::Wide {
+            signed: true,
+            division: true,
+        },
+        Token::IStar => AssignmentOp::Wide {
+            signed: true,
+            division: false,
+        },
+        Token::USlash => AssignmentOp::Wide {
+            signed: false,
+            division: true,
+        },
+        Token::UStar => AssignmentOp::Wide {
+            signed: false,
+            division: false,
+        },
+        _ => return None,
+    })
+}
+
+fn assignment_value(op: AssignmentOp, lhs: Operand, rhs: Operand) -> AssignmentValue {
+    match op {
+        AssignmentOp::Binary(op) => AssignmentValue::Binary { op, lhs, rhs },
+        AssignmentOp::FloatBinary(width, op) => AssignmentValue::FloatBinary {
+            width,
+            op,
+            lhs,
+            rhs,
+        },
+        AssignmentOp::Wide { signed, division } => {
+            if division {
+                AssignmentValue::WideDivide { signed, lhs, rhs }
+            } else {
+                AssignmentValue::WideMultiply { signed, lhs, rhs }
+            }
+        }
+        AssignmentOp::UnsupportedDivision => unreachable!(),
+    }
 }
 
 fn parse_integer_binding_value(
     value: &str,
     width: Option<MemoryWidth>,
 ) -> Result<BindingValue, String> {
-    if width.is_some_and(is_float_width) {
+    if width.is_some_and(MemoryWidth::is_float) {
         return Err(format!(
             "Integer binding value {value:?} cannot use floating-point width"
         ));
@@ -1000,7 +917,7 @@ fn parse_float_binding_value(
         format!("Float binding value {value:?} requires an explicit f32 or f64 width")
     })?;
 
-    if !is_float_width(width) {
+    if !width.is_float() {
         return Err(format!(
             "Float binding value {value:?} requires f32 or f64 width"
         ));
@@ -1028,10 +945,6 @@ fn validate_float_literal(value: &str, width: MemoryWidth, context: &str) -> Res
     }
 }
 
-fn is_float_width(width: MemoryWidth) -> bool {
-    matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
-}
-
 fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
     if negative {
         value.parse::<i128>().map(|value| -value).map_err(|_| ())
@@ -1045,7 +958,7 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
         MemoryWidth::F32 | MemoryWidth::F64 => {
             return Err(format!(
                 "Integer binding value {value} cannot use {}",
-                memory_width_name(width)
+                width.name()
             ));
         }
         MemoryWidth::I8 => i8::MIN as i128 <= value && value <= i8::MAX as i128,
@@ -1063,23 +976,8 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
     } else {
         Err(format!(
             "Integer binding value {value} does not fit in {}",
-            memory_width_name(width)
+            width.name()
         ))
-    }
-}
-
-fn memory_width_name(width: MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => "f32",
-        MemoryWidth::F64 => "f64",
-        MemoryWidth::I8 => "i8",
-        MemoryWidth::I16 => "i16",
-        MemoryWidth::I32 => "i32",
-        MemoryWidth::I64 => "i64",
-        MemoryWidth::U8 => "u8",
-        MemoryWidth::U16 => "u16",
-        MemoryWidth::U32 => "u32",
-        MemoryWidth::U64 => "u64",
     }
 }
 
@@ -1266,24 +1164,7 @@ fn validate_instruction_symbols(
     top_level_labels: &HashSet<&str>,
     current_label: &str,
 ) -> Result<(), String> {
-    let mut operands = Vec::new();
     match instruction {
-        Instruction::Assign { dst, value } => {
-            match dst {
-                AssignmentTarget::Operand(operand) => operands.push(operand),
-                AssignmentTarget::RegisterPair { .. } => {}
-            }
-            match value {
-                AssignmentValue::Operand(operand) => operands.push(operand),
-                AssignmentValue::Binary { lhs, rhs, .. }
-                | AssignmentValue::FloatBinary { lhs, rhs, .. }
-                | AssignmentValue::WideMultiply { lhs, rhs, .. }
-                | AssignmentValue::WideDivide { lhs, rhs, .. } => {
-                    operands.push(lhs);
-                    operands.push(rhs);
-                }
-            }
-        }
         Instruction::Call { target } => {
             if !top_level_labels.contains(target.as_str()) {
                 return Err(format!(
@@ -1291,7 +1172,7 @@ fn validate_instruction_symbols(
                 ));
             }
         }
-        Instruction::Jmp { target, condition } => {
+        Instruction::Jmp { target, .. } => {
             if !labels.contains(target.as_str()) {
                 return Err(format!(
                     "Unknown label {target:?} in label {current_label:?}"
@@ -1304,29 +1185,19 @@ fn validate_instruction_symbols(
                     "jmp target {target:?} in label {current_label:?} must be a local label"
                 ));
             }
-
-            if let Some(condition) = condition {
-                operands.extend([&condition.lhs, &condition.rhs]);
-            }
         }
         Instruction::Print { parts } => {
             for part in parts {
-                match part {
-                    PrintPart::Binding(name) => {
-                        if !bindings.contains(name.as_str()) {
-                            return Err(format!(
-                                "Unknown binding {name:?} in label {current_label:?}"
-                            ));
-                        }
-                    }
-                    PrintPart::Operand(operand) => operands.push(operand),
-                    PrintPart::Literal(_) => {}
+                if let PrintPart::Binding(name) = part
+                    && !bindings.contains(name.as_str())
+                {
+                    return Err(format!(
+                        "Unknown binding {name:?} in label {current_label:?}"
+                    ));
                 }
             }
         }
-        Instruction::Pop { dst } => operands.push(dst),
-        Instruction::Push { src } => operands.push(src),
-        Instruction::Read { dst, len, .. } => {
+        Instruction::Read { dst, .. } => {
             if let Operand::Pointer(name) = dst
                 && !memory.contains(name.as_str())
             {
@@ -1334,22 +1205,11 @@ fn validate_instruction_symbols(
                     "Read destination {name:?} in label {current_label:?} must be top-level memory"
                 ));
             }
-
-            operands.push(dst);
-            operands.push(len);
         }
-        Instruction::Stack { value, .. } => operands.push(value),
-        Instruction::StackString { value, .. } => match value {
-            StringInitializer::Literal(_) => {}
-            StringInitializer::Slice { ptr, len } => {
-                operands.push(ptr);
-                operands.push(len);
-            }
-        },
         _ => {}
     }
 
-    for operand in operands {
+    for operand in instruction.operands() {
         validate_operand_symbol(
             operand,
             bindings,

@@ -7,14 +7,48 @@ use subsea::ast::{
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
+fn s(value: &str) -> String {
+    value.to_string()
+}
+
+fn ident(value: &str) -> Operand {
+    Operand::Ident(s(value))
+}
+
+fn ptr(value: &str) -> Operand {
+    Operand::Pointer(s(value))
+}
+
+fn reg(value: &str) -> Operand {
+    Operand::Register(s(value))
+}
+
+fn float(value: &str) -> Operand {
+    Operand::FloatLiteral(s(value))
+}
+
+fn addr_ident(value: &str) -> Address {
+    Address {
+        first: AddressTerm::Ident(s(value)),
+        rest: Vec::new(),
+    }
+}
+
+fn deref_ident(value: &str, width: Option<MemoryWidth>) -> Operand {
+    Operand::Dereference {
+        address: addr_ident(value),
+        width,
+    }
+}
+
 fn main_program(mut instructions: Vec<Instruction>) -> Program {
     instructions.push(Instruction::Exit { code: 0 });
 
     Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: Vec::new(),
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions,
         }],
     }
@@ -52,14 +86,14 @@ fn assert_assembles(asm: &str) {
 fn prints_integer_binding() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: None,
             },
         },
         Instruction::Print {
-            parts: vec![PrintPart::Binding(String::from("count"))],
+            parts: vec![PrintPart::Binding(s("count"))],
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -74,7 +108,7 @@ fn prints_integer_binding() {
 #[test]
 fn emits_runtime_integer_print() {
     let program = main_program(vec![Instruction::Print {
-        parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+        parts: vec![PrintPart::Operand(reg("rax"))],
     }]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
@@ -89,10 +123,10 @@ fn emits_runtime_integer_print() {
 fn generated_print_labels_do_not_collide_with_local_labels() {
     let program = main_program(vec![
         Instruction::Label {
-            name: String::from(".L.main.print_1_loop"),
+            name: s(".L.main.print_1_loop"),
         },
         Instruction::Print {
-            parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+            parts: vec![PrintPart::Operand(reg("rax"))],
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -108,15 +142,15 @@ fn generated_print_labels_do_not_collide_with_local_labels() {
 fn uses_integer_binding_as_immediate_operand() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: None,
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-            value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(ident("count")),
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -130,12 +164,12 @@ fn uses_integer_binding_as_immediate_operand() {
 fn rejects_string_binding_as_operand() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("message"),
-            value: BindingValue::String(String::from("hi")),
+            name: s("message"),
+            value: BindingValue::String(s("hi")),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-            value: AssignmentValue::Operand(Operand::Ident(String::from("message"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(ident("message")),
         },
     ]);
 
@@ -151,21 +185,21 @@ fn rejects_string_binding_as_operand() {
 fn emits_stack_frame_and_stack_assignment() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("count"),
+            name: s("count"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(8),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Ident(String::from("count"))),
+            dst: AssignmentTarget::Operand(ident("count")),
             value: AssignmentValue::Binary {
                 op: MathOp::Add,
-                lhs: Operand::Ident(String::from("count")),
+                lhs: ident("count"),
                 rhs: Operand::Immediate(1),
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-            value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(ident("count")),
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -182,11 +216,11 @@ fn emits_stack_frame_and_stack_assignment() {
 fn emits_stack_string_literal_print() {
     let program = main_program(vec![
         Instruction::StackString {
-            name: String::from("message"),
-            value: StringInitializer::Literal(String::from("hello")),
+            name: s("message"),
+            value: StringInitializer::Literal(s("hello")),
         },
         Instruction::Print {
-            parts: vec![PrintPart::Binding(String::from("message"))],
+            parts: vec![PrintPart::Binding(s("message"))],
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -207,24 +241,24 @@ fn emits_stack_string_literal_print() {
 #[test]
 fn emits_stack_string_slice_print() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 8,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::StackString {
-                    name: String::from("input"),
+                    name: s("input"),
                     value: StringInitializer::Slice {
-                        ptr: Operand::Pointer(String::from("buf")),
-                        len: Operand::Register(String::from("rax")),
+                        ptr: ptr("buf"),
+                        len: reg("rax"),
                     },
                 },
                 Instruction::Print {
-                    parts: vec![PrintPart::Binding(String::from("input"))],
+                    parts: vec![PrintPart::Binding(s("input"))],
                 },
                 Instruction::Exit { code: 0 },
             ],
@@ -246,20 +280,20 @@ fn emits_stack_string_slice_print() {
 fn emits_stack_string_property_loads() {
     let program = main_program(vec![
         Instruction::StackString {
-            name: String::from("message"),
-            value: StringInitializer::Literal(String::from("hello")),
+            name: s("message"),
+            value: StringInitializer::Literal(s("hello")),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::Operand(Operand::StringProperty {
-                name: String::from("message"),
+                name: s("message"),
                 property: StringProperty::Ptr,
             }),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+            dst: AssignmentTarget::Operand(reg("rbx")),
             value: AssignmentValue::Operand(Operand::StringProperty {
-                name: String::from("message"),
+                name: s("message"),
                 property: StringProperty::Len,
             }),
         },
@@ -276,12 +310,12 @@ fn emits_stack_string_property_loads() {
 fn rejects_stack_string_property_as_destination() {
     let program = main_program(vec![
         Instruction::StackString {
-            name: String::from("message"),
-            value: StringInitializer::Literal(String::from("hello")),
+            name: s("message"),
+            value: StringInitializer::Literal(s("hello")),
         },
         Instruction::Pop {
             dst: Operand::StringProperty {
-                name: String::from("message"),
+                name: s("message"),
                 property: StringProperty::Len,
             },
         },
@@ -299,18 +333,18 @@ fn rejects_stack_string_property_as_destination() {
 #[test]
 fn emits_read_from_stdin() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 1024,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Read {
                     src: ReadSource::Stdin,
-                    dst: Operand::Pointer(String::from("buf")),
+                    dst: ptr("buf"),
                     len: Operand::Immediate(1024),
                 },
                 Instruction::Exit { code: 0 },
@@ -331,7 +365,7 @@ fn emits_read_from_stdin() {
 fn emits_stack_cleanup_before_ret() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("value"),
+            name: s("value"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(1),
         },
@@ -347,12 +381,12 @@ fn emits_stack_cleanup_before_ret() {
 fn rejects_cross_label_jump_from_stack_label() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("value"),
+            name: s("value"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(1),
         },
         Instruction::Jmp {
-            target: String::from("other"),
+            target: s("other"),
             condition: None,
         },
     ]);
@@ -368,18 +402,18 @@ fn rejects_cross_label_jump_from_stack_label() {
 #[test]
 fn rejects_cross_function_jump_without_stack_frame() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: Vec::new(),
         labels: vec![
             Label {
-                name: String::from("main"),
+                name: s("main"),
                 instructions: vec![Instruction::Jmp {
-                    target: String::from("other"),
+                    target: s("other"),
                     condition: None,
                 }],
             },
             Label {
-                name: String::from("other"),
+                name: s("other"),
                 instructions: vec![Instruction::Ret],
             },
         ],
@@ -397,10 +431,10 @@ fn rejects_cross_function_jump_without_stack_frame() {
 fn rejects_call_to_local_label() {
     let program = main_program(vec![
         Instruction::Label {
-            name: String::from(".L.main.helper"),
+            name: s(".L.main.helper"),
         },
         Instruction::Call {
-            target: String::from(".L.main.helper"),
+            target: s(".L.main.helper"),
         },
         Instruction::Ret,
     ]);
@@ -417,7 +451,7 @@ fn rejects_call_to_local_label() {
 fn formats_integer_binding() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: None,
@@ -425,9 +459,9 @@ fn formats_integer_binding() {
         },
         Instruction::Print {
             parts: vec![
-                PrintPart::Literal(String::from("count = ")),
-                PrintPart::Binding(String::from("count")),
-                PrintPart::Literal(String::from("\n")),
+                PrintPart::Literal(s("count = ")),
+                PrintPart::Binding(s("count")),
+                PrintPart::Literal(s("\n")),
             ],
         },
         Instruction::Exit { code: 0 },
@@ -444,14 +478,14 @@ fn formats_integer_binding() {
 fn prints_float_binding_as_literal_text() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("ratio"),
+            name: s("ratio"),
             value: BindingValue::Float {
-                value: String::from("1.5"),
+                value: s("1.5"),
                 width: MemoryWidth::F64,
             },
         },
         Instruction::Print {
-            parts: vec![PrintPart::Binding(String::from("ratio"))],
+            parts: vec![PrintPart::Binding(s("ratio"))],
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -466,7 +500,7 @@ fn prints_float_binding_as_literal_text() {
 #[test]
 fn rejects_immediate_that_does_not_fit_register_destination() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("ax"))),
+        dst: AssignmentTarget::Operand(reg("ax")),
         value: AssignmentValue::Operand(Operand::Immediate(66000)),
     }]);
 
@@ -482,7 +516,7 @@ fn rejects_immediate_that_does_not_fit_register_destination() {
 fn rejects_integer_binding_that_does_not_fit_memory_destination() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 256,
                 width: None,
@@ -491,12 +525,12 @@ fn rejects_integer_binding_that_does_not_fit_memory_destination() {
         Instruction::Assign {
             dst: AssignmentTarget::Operand(Operand::Dereference {
                 address: Address {
-                    first: AddressTerm::Register(String::from("rsp")),
+                    first: AddressTerm::Register(s("rsp")),
                     rest: Vec::new(),
                 },
                 width: Some(MemoryWidth::U8),
             }),
-            value: AssignmentValue::Operand(Operand::Ident(String::from("count"))),
+            value: AssignmentValue::Operand(ident("count")),
         },
     ]);
 
@@ -513,7 +547,7 @@ fn rejects_unsigned_value_for_signed_memory_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Dereference {
             address: Address {
-                first: AddressTerm::Register(String::from("rsp")),
+                first: AddressTerm::Register(s("rsp")),
                 rest: Vec::new(),
             },
             width: Some(MemoryWidth::I8),
@@ -534,7 +568,7 @@ fn rejects_large_immediate_for_64_bit_memory_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Dereference {
             address: Address {
-                first: AddressTerm::Register(String::from("rsp")),
+                first: AddressTerm::Register(s("rsp")),
                 rest: Vec::new(),
             },
             width: Some(MemoryWidth::U64),
@@ -553,11 +587,11 @@ fn rejects_large_immediate_for_64_bit_memory_destination() {
 #[test]
 fn preserves_math_rhs_when_it_is_also_the_destination() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        dst: AssignmentTarget::Operand(reg("rax")),
         value: AssignmentValue::Binary {
             op: MathOp::Subtract,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rax")),
+            lhs: reg("rbx"),
+            rhs: reg("rax"),
         },
     }]);
 
@@ -570,13 +604,13 @@ fn preserves_math_rhs_when_it_is_also_the_destination() {
 #[test]
 fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        dst: AssignmentTarget::Operand(reg("rax")),
         value: AssignmentValue::Binary {
             op: MathOp::Add,
-            lhs: Operand::Register(String::from("rbx")),
+            lhs: reg("rbx"),
             rhs: Operand::Dereference {
                 address: Address {
-                    first: AddressTerm::Register(String::from("rax")),
+                    first: AddressTerm::Register(s("rax")),
                     rest: Vec::new(),
                 },
                 width: Some(MemoryWidth::U64),
@@ -596,13 +630,13 @@ fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
 fn emits_unsigned_widened_multiply() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideMultiply {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -615,17 +649,17 @@ fn emits_unsigned_widened_multiply() {
 #[test]
 fn rejects_address_of_into_non_64_bit_register() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 8,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![Instruction::Assign {
-                dst: AssignmentTarget::Operand(Operand::Register(String::from("eax"))),
-                value: AssignmentValue::Operand(Operand::Pointer(String::from("buf"))),
+                dst: AssignmentTarget::Operand(reg("eax")),
+                value: AssignmentValue::Operand(ptr("buf")),
             }],
         }],
     };
@@ -642,13 +676,13 @@ fn rejects_address_of_into_non_64_bit_register() {
 fn emits_signed_widened_multiply() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideMultiply {
             signed: true,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -662,13 +696,13 @@ fn emits_signed_widened_multiply() {
 fn rejects_non_rdx_rax_widened_multiply_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("r9"),
-            low: String::from("r8"),
+            high: s("r9"),
+            low: s("r8"),
         },
         value: AssignmentValue::WideMultiply {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -684,13 +718,13 @@ fn rejects_non_rdx_rax_widened_multiply_destination() {
 fn rejects_non_rdx_rax_widened_divide_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("r9"),
-            low: String::from("r8"),
+            high: s("r9"),
+            low: s("r8"),
         },
         value: AssignmentValue::WideDivide {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -706,12 +740,12 @@ fn rejects_non_rdx_rax_widened_divide_destination() {
 fn rejects_immediate_widened_multiply_rhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideMultiply {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
+            lhs: reg("rbx"),
             rhs: Operand::Immediate(2),
         },
     }]);
@@ -728,13 +762,13 @@ fn rejects_immediate_widened_multiply_rhs() {
 fn rejects_immediate_widened_multiply_lhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: Operand::Immediate(10),
-            rhs: Operand::Register(String::from("rcx")),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -750,13 +784,13 @@ fn rejects_immediate_widened_multiply_lhs() {
 fn rejects_widened_multiply_rhs_that_uses_rax() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideMultiply {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rax")),
+            lhs: reg("rbx"),
+            rhs: reg("rax"),
         },
     }]);
 
@@ -772,13 +806,13 @@ fn rejects_widened_multiply_rhs_that_uses_rax() {
 fn emits_unsigned_widened_divide() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideDivide {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -793,13 +827,13 @@ fn emits_unsigned_widened_divide() {
 fn emits_signed_widened_divide() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideDivide {
             signed: true,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rcx")),
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
         },
     }]);
 
@@ -814,12 +848,12 @@ fn emits_signed_widened_divide() {
 fn rejects_immediate_widened_divide_rhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideDivide {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
+            lhs: reg("rbx"),
             rhs: Operand::Immediate(2),
         },
     }]);
@@ -836,13 +870,13 @@ fn rejects_immediate_widened_divide_rhs() {
 fn rejects_widened_divide_rhs_that_uses_rdx() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
-            high: String::from("rdx"),
-            low: String::from("rax"),
+            high: s("rdx"),
+            low: s("rax"),
         },
         value: AssignmentValue::WideDivide {
             signed: false,
-            lhs: Operand::Register(String::from("rbx")),
-            rhs: Operand::Register(String::from("rdx")),
+            lhs: reg("rbx"),
+            rhs: reg("rdx"),
         },
     }]);
 
@@ -857,20 +891,20 @@ fn rejects_widened_divide_rhs_that_uses_rdx() {
 #[test]
 fn emits_call_and_ret() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: Vec::new(),
         labels: vec![
             Label {
-                name: String::from("main"),
+                name: s("main"),
                 instructions: vec![
                     Instruction::Call {
-                        target: String::from("helper"),
+                        target: s("helper"),
                     },
                     Instruction::Ret,
                 ],
             },
             Label {
-                name: String::from("helper"),
+                name: s("helper"),
                 instructions: vec![Instruction::Ret],
             },
         ],
@@ -885,18 +919,12 @@ fn emits_call_and_ret() {
 #[test]
 fn emits_push_and_pop() {
     let program = main_program(vec![
-        Instruction::Push {
-            src: Operand::Register(String::from("rax")),
-        },
+        Instruction::Push { src: reg("rax") },
         Instruction::Push {
             src: Operand::Immediate(10),
         },
-        Instruction::Pop {
-            dst: Operand::Register(String::from("rbx")),
-        },
-        Instruction::Pop {
-            dst: Operand::Register(String::from("rax")),
-        },
+        Instruction::Pop { dst: reg("rbx") },
+        Instruction::Pop { dst: reg("rax") },
     ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
@@ -910,9 +938,7 @@ fn emits_push_and_pop() {
 #[test]
 fn rejects_ret_with_unbalanced_manual_stack() {
     let program = main_program(vec![
-        Instruction::Push {
-            src: Operand::Register(String::from("rax")),
-        },
+        Instruction::Push { src: reg("rax") },
         Instruction::Ret,
     ]);
 
@@ -928,18 +954,16 @@ fn rejects_ret_with_unbalanced_manual_stack() {
 fn rejects_local_label_with_conflicting_manual_stack_depths() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: String::from(".L.main.join"),
+            target: s(".L.main.join"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rax")),
+                lhs: reg("rax"),
                 op: CompareOp::Equal,
                 rhs: Operand::Immediate(0),
             }),
         },
-        Instruction::Push {
-            src: Operand::Register(String::from("rax")),
-        },
+        Instruction::Push { src: reg("rax") },
         Instruction::Label {
-            name: String::from(".L.main.join"),
+            name: s(".L.main.join"),
         },
         Instruction::Exit { code: 0 },
     ]);
@@ -956,10 +980,10 @@ fn rejects_local_label_with_conflicting_manual_stack_depths() {
 fn emits_inline_label() {
     let program = main_program(vec![
         Instruction::Label {
-            name: String::from(".L.main.loop"),
+            name: s(".L.main.loop"),
         },
         Instruction::Jmp {
-            target: String::from(".L.main.loop"),
+            target: s(".L.main.loop"),
             condition: None,
         },
     ]);
@@ -973,15 +997,15 @@ fn emits_inline_label() {
 fn emits_signed_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: String::from(".L.main.done"),
+            target: s(".L.main.done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rax")),
+                lhs: reg("rax"),
                 op: CompareOp::SignedLess,
                 rhs: Operand::Immediate(0),
             }),
         },
         Instruction::Label {
-            name: String::from(".L.main.done"),
+            name: s(".L.main.done"),
         },
     ]);
 
@@ -994,14 +1018,14 @@ fn emits_signed_conditional_jump() {
 fn emits_unsigned_conditional_jump() {
     let program = main_program(vec![
         Instruction::Label {
-            name: String::from(".L.main.loop"),
+            name: s(".L.main.loop"),
         },
         Instruction::Jmp {
-            target: String::from(".L.main.loop"),
+            target: s(".L.main.loop"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rcx")),
+                lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
-                rhs: Operand::Register(String::from("rbx")),
+                rhs: reg("rbx"),
             }),
         },
     ]);
@@ -1014,20 +1038,20 @@ fn emits_unsigned_conditional_jump() {
 #[test]
 fn rejects_function_fallthrough() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: Vec::new(),
         labels: vec![
             Label {
-                name: String::from("main"),
+                name: s("main"),
                 instructions: vec![Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                    dst: AssignmentTarget::Operand(reg("rax")),
                     value: AssignmentValue::Operand(Operand::Immediate(1)),
                 }],
             },
             Label {
-                name: String::from("next"),
+                name: s("next"),
                 instructions: vec![Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+                    dst: AssignmentTarget::Operand(reg("rbx")),
                     value: AssignmentValue::Operand(Operand::Immediate(2)),
                 }],
             },
@@ -1044,9 +1068,7 @@ fn rejects_function_fallthrough() {
 
 #[test]
 fn rejects_non_64_bit_push_register() {
-    let program = main_program(vec![Instruction::Push {
-        src: Operand::Register(String::from("eax")),
-    }]);
+    let program = main_program(vec![Instruction::Push { src: reg("eax") }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
 
@@ -1072,7 +1094,7 @@ fn rejects_pop_memory_without_width() {
     let program = main_program(vec![Instruction::Pop {
         dst: Operand::Dereference {
             address: Address {
-                first: AddressTerm::Register(String::from("rsp")),
+                first: AddressTerm::Register(s("rsp")),
                 rest: Vec::new(),
             },
             width: None,
@@ -1091,16 +1113,16 @@ fn rejects_pop_memory_without_width() {
 fn allows_stack_label_to_end_with_explicit_exit_syscall() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("value"),
+            name: s("value"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(1),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::Operand(Operand::Immediate(60)),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rdi"))),
+            dst: AssignmentTarget::Operand(reg("rdi")),
             value: AssignmentValue::Operand(Operand::Immediate(0)),
         },
         Instruction::Syscall,
@@ -1115,20 +1137,20 @@ fn allows_stack_label_to_end_with_explicit_exit_syscall() {
 fn allows_stack_label_to_end_with_exit_syscall_after_extra_setup() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("value"),
+            name: s("value"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(1),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::Operand(Operand::Immediate(60)),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+            dst: AssignmentTarget::Operand(reg("rbx")),
             value: AssignmentValue::Operand(Operand::Immediate(123)),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rdi"))),
+            dst: AssignmentTarget::Operand(reg("rdi")),
             value: AssignmentValue::Operand(Operand::Immediate(0)),
         },
         Instruction::Syscall,
@@ -1142,7 +1164,7 @@ fn allows_stack_label_to_end_with_exit_syscall_after_extra_setup() {
 #[test]
 fn rejects_printing_high_byte_register() {
     let program = main_program(vec![Instruction::Print {
-        parts: vec![PrintPart::Operand(Operand::Register(String::from("ah")))],
+        parts: vec![PrintPart::Operand(reg("ah"))],
     }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
@@ -1156,8 +1178,8 @@ fn rejects_printing_high_byte_register() {
 #[test]
 fn rejects_high_byte_register_with_extended_register() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("r8b"))),
-        value: AssignmentValue::Operand(Operand::Register(String::from("ah"))),
+        dst: AssignmentTarget::Operand(reg("r8b")),
+        value: AssignmentValue::Operand(reg("ah")),
     }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
@@ -1171,21 +1193,21 @@ fn rejects_high_byte_register_with_extended_register() {
 #[test]
 fn emits_memory_scalars_and_buffers() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![
             MemoryDeclaration::Scalar {
-                name: String::from("count"),
+                name: s("count"),
                 width: MemoryWidth::U16,
                 value: 3,
             },
             MemoryDeclaration::Buffer {
-                name: String::from("buf"),
+                name: s("buf"),
                 width: MemoryWidth::U8,
                 count: 128,
             },
         ],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![Instruction::Exit { code: 0 }],
         }],
     };
@@ -1199,21 +1221,21 @@ fn emits_memory_scalars_and_buffers() {
 #[test]
 fn emits_float_memory_scalars() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![
             MemoryDeclaration::FloatScalar {
-                name: String::from("single"),
+                name: s("single"),
                 width: MemoryWidth::F32,
-                value: String::from("1.5"),
+                value: s("1.5"),
             },
             MemoryDeclaration::FloatScalar {
-                name: String::from("double"),
+                name: s("double"),
                 width: MemoryWidth::F64,
-                value: String::from("-2.25"),
+                value: s("-2.25"),
             },
         ],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![Instruction::Exit { code: 0 }],
         }],
     };
@@ -1228,61 +1250,37 @@ fn emits_float_memory_scalars() {
 #[test]
 fn emits_xmm_float_loads_and_stores() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![
             MemoryDeclaration::FloatScalar {
-                name: String::from("single"),
+                name: s("single"),
                 width: MemoryWidth::F32,
-                value: String::from("1.5"),
+                value: s("1.5"),
             },
             MemoryDeclaration::FloatScalar {
-                name: String::from("double"),
+                name: s("double"),
                 width: MemoryWidth::F64,
-                value: String::from("2.25"),
+                value: s("2.25"),
             },
         ],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
-                    value: AssignmentValue::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("single")),
-                            rest: Vec::new(),
-                        },
-                        width: Some(MemoryWidth::F32),
-                    }),
+                    dst: AssignmentTarget::Operand(reg("xmm0")),
+                    value: AssignmentValue::Operand(deref_ident("single", Some(MemoryWidth::F32))),
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm1"))),
-                    value: AssignmentValue::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("double")),
-                            rest: Vec::new(),
-                        },
-                        width: Some(MemoryWidth::F64),
-                    }),
+                    dst: AssignmentTarget::Operand(reg("xmm1")),
+                    value: AssignmentValue::Operand(deref_ident("double", Some(MemoryWidth::F64))),
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("single")),
-                            rest: Vec::new(),
-                        },
-                        width: Some(MemoryWidth::F32),
-                    }),
-                    value: AssignmentValue::Operand(Operand::Register(String::from("xmm0"))),
+                    dst: AssignmentTarget::Operand(deref_ident("single", Some(MemoryWidth::F32))),
+                    value: AssignmentValue::Operand(reg("xmm0")),
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("double")),
-                            rest: Vec::new(),
-                        },
-                        width: Some(MemoryWidth::F64),
-                    }),
-                    value: AssignmentValue::Operand(Operand::Register(String::from("xmm1"))),
+                    dst: AssignmentTarget::Operand(deref_ident("double", Some(MemoryWidth::F64))),
+                    value: AssignmentValue::Operand(reg("xmm1")),
                 },
                 Instruction::Exit { code: 0 },
             ],
@@ -1301,29 +1299,23 @@ fn emits_xmm_float_loads_and_stores() {
 #[test]
 fn infers_memory_width_from_declared_base() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 8,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("buf")),
-                            rest: Vec::new(),
-                        },
-                        width: None,
-                    }),
+                    dst: AssignmentTarget::Operand(deref_ident("buf", None)),
                     value: AssignmentValue::Operand(Operand::Immediate(72)),
                 },
                 Instruction::Assign {
                     dst: AssignmentTarget::Operand(Operand::Dereference {
                         address: Address {
-                            first: AddressTerm::Ident(String::from("buf")),
+                            first: AddressTerm::Ident(s("buf")),
                             rest: vec![(
                                 subsea::ast::AddressOperator::Add,
                                 AddressTerm::Immediate(1),
@@ -1334,14 +1326,8 @@ fn infers_memory_width_from_declared_base() {
                     value: AssignmentValue::Operand(Operand::Immediate(105)),
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("al"))),
-                    value: AssignmentValue::Operand(Operand::Dereference {
-                        address: Address {
-                            first: AddressTerm::Ident(String::from("buf")),
-                            rest: Vec::new(),
-                        },
-                        width: None,
-                    }),
+                    dst: AssignmentTarget::Operand(reg("al")),
+                    value: AssignmentValue::Operand(deref_ident("buf", None)),
                 },
                 Instruction::Exit { code: 0 },
             ],
@@ -1359,23 +1345,17 @@ fn infers_memory_width_from_declared_base() {
 #[test]
 fn rejects_inferred_memory_width_mismatch() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 8,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![Instruction::Assign {
-                dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-                value: AssignmentValue::Operand(Operand::Dereference {
-                    address: Address {
-                        first: AddressTerm::Ident(String::from("buf")),
-                        rest: Vec::new(),
-                    },
-                    width: None,
-                }),
+                dst: AssignmentTarget::Operand(reg("rax")),
+                value: AssignmentValue::Operand(deref_ident("buf", None)),
             }],
         }],
     };
@@ -1390,7 +1370,7 @@ fn rejects_untyped_pointer_memory_immediate_store() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Dereference {
             address: Address {
-                first: AddressTerm::Register(String::from("rax")),
+                first: AddressTerm::Register(s("rax")),
                 rest: Vec::new(),
             },
             width: None,
@@ -1409,22 +1389,16 @@ fn rejects_untyped_pointer_memory_immediate_store() {
 #[test]
 fn rejects_negative_immediate_for_inferred_unsigned_memory() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 8,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![Instruction::Assign {
-                dst: AssignmentTarget::Operand(Operand::Dereference {
-                    address: Address {
-                        first: AddressTerm::Ident(String::from("buf")),
-                        rest: Vec::new(),
-                    },
-                    width: None,
-                }),
+                dst: AssignmentTarget::Operand(deref_ident("buf", None)),
                 value: AssignmentValue::Operand(Operand::Immediate(-1)),
             }],
         }],
@@ -1441,14 +1415,8 @@ fn rejects_negative_immediate_for_inferred_unsigned_memory() {
 #[test]
 fn rejects_integer_register_float_memory_load() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-        value: AssignmentValue::Operand(Operand::Dereference {
-            address: Address {
-                first: AddressTerm::Ident(String::from("double")),
-                rest: Vec::new(),
-            },
-            width: Some(MemoryWidth::F64),
-        }),
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Operand(deref_ident("double", Some(MemoryWidth::F64))),
     }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
@@ -1462,10 +1430,10 @@ fn rejects_integer_register_float_memory_load() {
 #[test]
 fn rejects_xmm_integer_memory_load() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        dst: AssignmentTarget::Operand(reg("xmm0")),
         value: AssignmentValue::Operand(Operand::Dereference {
             address: Address {
-                first: AddressTerm::Register(String::from("rax")),
+                first: AddressTerm::Register(s("rax")),
                 rest: Vec::new(),
             },
             width: Some(MemoryWidth::U64),
@@ -1483,8 +1451,8 @@ fn rejects_xmm_integer_memory_load() {
 #[test]
 fn rejects_xmm_register_to_register_move_for_now() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
-        value: AssignmentValue::Operand(Operand::Register(String::from("xmm1"))),
+        dst: AssignmentTarget::Operand(reg("xmm0")),
+        value: AssignmentValue::Operand(reg("xmm1")),
     }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
@@ -1499,21 +1467,21 @@ fn rejects_xmm_register_to_register_move_for_now() {
 fn emits_xmm_float_register_arithmetic() {
     let program = main_program(vec![
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::FloatBinary {
                 width: MemoryWidth::F32,
                 op: FloatMathOp::Add,
-                lhs: Operand::Register(String::from("xmm0")),
-                rhs: Operand::Register(String::from("xmm1")),
+                lhs: reg("xmm0"),
+                rhs: reg("xmm1"),
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm2"))),
+            dst: AssignmentTarget::Operand(reg("xmm2")),
             value: AssignmentValue::FloatBinary {
                 width: MemoryWidth::F64,
                 op: FloatMathOp::Multiply,
-                lhs: Operand::Register(String::from("xmm3")),
-                rhs: Operand::Register(String::from("xmm4")),
+                lhs: reg("xmm3"),
+                rhs: reg("xmm4"),
             },
         },
     ]);
@@ -1529,50 +1497,38 @@ fn emits_xmm_float_register_arithmetic() {
 #[test]
 fn emits_xmm_float_memory_arithmetic() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![
             MemoryDeclaration::FloatScalar {
-                name: String::from("single"),
+                name: s("single"),
                 width: MemoryWidth::F32,
-                value: String::from("1.5"),
+                value: s("1.5"),
             },
             MemoryDeclaration::FloatScalar {
-                name: String::from("double"),
+                name: s("double"),
                 width: MemoryWidth::F64,
-                value: String::from("2.25"),
+                value: s("2.25"),
             },
         ],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+                    dst: AssignmentTarget::Operand(reg("xmm0")),
                     value: AssignmentValue::FloatBinary {
                         width: MemoryWidth::F32,
                         op: FloatMathOp::Subtract,
-                        lhs: Operand::Register(String::from("xmm0")),
-                        rhs: Operand::Dereference {
-                            address: Address {
-                                first: AddressTerm::Ident(String::from("single")),
-                                rest: Vec::new(),
-                            },
-                            width: Some(MemoryWidth::F32),
-                        },
+                        lhs: reg("xmm0"),
+                        rhs: deref_ident("single", Some(MemoryWidth::F32)),
                     },
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm1"))),
+                    dst: AssignmentTarget::Operand(reg("xmm1")),
                     value: AssignmentValue::FloatBinary {
                         width: MemoryWidth::F64,
                         op: FloatMathOp::Divide,
-                        lhs: Operand::Dereference {
-                            address: Address {
-                                first: AddressTerm::Ident(String::from("double")),
-                                rest: Vec::new(),
-                            },
-                            width: Some(MemoryWidth::F64),
-                        },
-                        rhs: Operand::Register(String::from("xmm2")),
+                        lhs: deref_ident("double", Some(MemoryWidth::F64)),
+                        rhs: reg("xmm2"),
                     },
                 },
                 Instruction::Exit { code: 0 },
@@ -1592,28 +1548,28 @@ fn emits_xmm_float_memory_arithmetic() {
 fn emits_float_const_and_literal_arithmetic_operands() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("ratio"),
+            name: s("ratio"),
             value: BindingValue::Float {
-                value: String::from("1.5"),
+                value: s("1.5"),
                 width: MemoryWidth::F64,
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::FloatBinary {
                 width: MemoryWidth::F64,
                 op: FloatMathOp::Add,
-                lhs: Operand::Register(String::from("xmm0")),
-                rhs: Operand::Ident(String::from("ratio")),
+                lhs: reg("xmm0"),
+                rhs: ident("ratio"),
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::FloatBinary {
                 width: MemoryWidth::F64,
                 op: FloatMathOp::Multiply,
-                lhs: Operand::Register(String::from("xmm0")),
-                rhs: Operand::FloatLiteral(String::from("2.0")),
+                lhs: reg("xmm0"),
+                rhs: float("2.0"),
             },
         },
     ]);
@@ -1631,18 +1587,18 @@ fn emits_float_const_and_literal_arithmetic_operands() {
 fn infers_plain_float_arithmetic_width_from_const() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("ratio"),
+            name: s("ratio"),
             value: BindingValue::Float {
-                value: String::from("1.5"),
+                value: s("1.5"),
                 width: MemoryWidth::F64,
             },
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::Binary {
                 op: MathOp::Add,
-                lhs: Operand::Register(String::from("xmm0")),
-                rhs: Operand::Ident(String::from("ratio")),
+                lhs: reg("xmm0"),
+                rhs: ident("ratio"),
             },
         },
     ]);
@@ -1656,27 +1612,21 @@ fn infers_plain_float_arithmetic_width_from_const() {
 #[test]
 fn infers_plain_float_arithmetic_width_from_memory() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::FloatScalar {
-            name: String::from("ratio"),
+            name: s("ratio"),
             width: MemoryWidth::F32,
-            value: String::from("1.5"),
+            value: s("1.5"),
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+                    dst: AssignmentTarget::Operand(reg("xmm0")),
                     value: AssignmentValue::Binary {
                         op: MathOp::Multiply,
-                        lhs: Operand::Register(String::from("xmm0")),
-                        rhs: Operand::Dereference {
-                            address: Address {
-                                first: AddressTerm::Ident(String::from("ratio")),
-                                rest: Vec::new(),
-                            },
-                            width: None,
-                        },
+                        lhs: reg("xmm0"),
+                        rhs: deref_ident("ratio", None),
                     },
                 },
                 Instruction::Exit { code: 0 },
@@ -1693,11 +1643,11 @@ fn infers_plain_float_arithmetic_width_from_memory() {
 #[test]
 fn keeps_plain_xmm_literal_arithmetic_ambiguous() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        dst: AssignmentTarget::Operand(reg("xmm0")),
         value: AssignmentValue::Binary {
             op: MathOp::Multiply,
-            lhs: Operand::Register(String::from("xmm0")),
-            rhs: Operand::FloatLiteral(String::from("2.0")),
+            lhs: reg("xmm0"),
+            rhs: float("2.0"),
         },
     }]);
 
@@ -1713,17 +1663,17 @@ fn keeps_plain_xmm_literal_arithmetic_ambiguous() {
 fn emits_stack_float_load_store_and_initializer() {
     let program = main_program(vec![
         Instruction::Stack {
-            name: String::from("ratio"),
+            name: s("ratio"),
             width: MemoryWidth::F64,
-            value: Operand::FloatLiteral(String::from("1.5")),
+            value: float("1.5"),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
-            value: AssignmentValue::Operand(Operand::Ident(String::from("ratio"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::Operand(ident("ratio")),
         },
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Ident(String::from("ratio"))),
-            value: AssignmentValue::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(ident("ratio")),
+            value: AssignmentValue::Operand(reg("xmm0")),
         },
     ]);
 
@@ -1741,15 +1691,15 @@ fn emits_stack_float_load_store_and_initializer() {
 fn emits_ordered_float_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: String::from(".L.main.done"),
+            target: s(".L.main.done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("xmm0")),
+                lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
-                rhs: Operand::FloatLiteral(String::from("1.5")),
+                rhs: float("1.5"),
             }),
         },
         Instruction::Label {
-            name: String::from(".L.main.done"),
+            name: s(".L.main.done"),
         },
     ]);
 
@@ -1766,22 +1716,22 @@ fn emits_ordered_float_conditional_jump() {
 fn infers_plain_float_comparison_width_from_const() {
     let program = main_program(vec![
         Instruction::Const {
-            name: String::from("limit"),
+            name: s("limit"),
             value: BindingValue::Float {
-                value: String::from("1.5"),
+                value: s("1.5"),
                 width: MemoryWidth::F64,
             },
         },
         Instruction::Jmp {
-            target: String::from(".L.main.done"),
+            target: s(".L.main.done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("xmm0")),
+                lhs: reg("xmm0"),
                 op: CompareOp::Less,
-                rhs: Operand::Ident(String::from("limit")),
+                rhs: ident("limit"),
             }),
         },
         Instruction::Label {
-            name: String::from(".L.main.done"),
+            name: s(".L.main.done"),
         },
     ]);
 
@@ -1795,31 +1745,25 @@ fn infers_plain_float_comparison_width_from_const() {
 #[test]
 fn infers_plain_float_comparison_width_from_memory() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::FloatScalar {
-            name: String::from("limit"),
+            name: s("limit"),
             width: MemoryWidth::F32,
-            value: String::from("1.5"),
+            value: s("1.5"),
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Jmp {
-                    target: String::from(".L.main.done"),
+                    target: s(".L.main.done"),
                     condition: Some(Condition {
-                        lhs: Operand::Register(String::from("xmm0")),
+                        lhs: reg("xmm0"),
                         op: CompareOp::LessEqual,
-                        rhs: Operand::Dereference {
-                            address: Address {
-                                first: AddressTerm::Ident(String::from("limit")),
-                                rest: Vec::new(),
-                            },
-                            width: None,
-                        },
+                        rhs: deref_ident("limit", None),
                     }),
                 },
                 Instruction::Label {
-                    name: String::from(".L.main.done"),
+                    name: s(".L.main.done"),
                 },
                 Instruction::Exit { code: 0 },
             ],
@@ -1837,15 +1781,15 @@ fn infers_plain_float_comparison_width_from_memory() {
 fn rejects_plain_integer_ordered_comparison_without_signedness() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: String::from(".L.main.done"),
+            target: s(".L.main.done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rax")),
+                lhs: reg("rax"),
                 op: CompareOp::Less,
-                rhs: Operand::Register(String::from("rbx")),
+                rhs: reg("rbx"),
             }),
         },
         Instruction::Label {
-            name: String::from(".L.main.done"),
+            name: s(".L.main.done"),
         },
     ]);
 
@@ -1860,8 +1804,8 @@ fn rejects_plain_integer_ordered_comparison_without_signedness() {
 #[test]
 fn rejects_float_literal_without_float_width_context() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-        value: AssignmentValue::Operand(Operand::FloatLiteral(String::from("1.5"))),
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Operand(float("1.5")),
     }]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
@@ -1872,12 +1816,12 @@ fn rejects_float_literal_without_float_width_context() {
 #[test]
 fn rejects_float_arithmetic_to_integer_register() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        dst: AssignmentTarget::Operand(reg("rax")),
         value: AssignmentValue::FloatBinary {
             width: MemoryWidth::F64,
             op: FloatMathOp::Add,
-            lhs: Operand::Register(String::from("xmm0")),
-            rhs: Operand::Register(String::from("xmm1")),
+            lhs: reg("xmm0"),
+            rhs: reg("xmm1"),
         },
     }]);
 
@@ -1892,14 +1836,14 @@ fn rejects_float_arithmetic_to_integer_register() {
 #[test]
 fn rejects_float_arithmetic_width_mismatch() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        dst: AssignmentTarget::Operand(reg("xmm0")),
         value: AssignmentValue::FloatBinary {
             width: MemoryWidth::F64,
             op: FloatMathOp::Add,
-            lhs: Operand::Register(String::from("xmm0")),
+            lhs: reg("xmm0"),
             rhs: Operand::Dereference {
                 address: Address {
-                    first: AddressTerm::Register(String::from("rax")),
+                    first: AddressTerm::Register(s("rax")),
                     rest: Vec::new(),
                 },
                 width: Some(MemoryWidth::F32),
@@ -1918,23 +1862,23 @@ fn rejects_float_arithmetic_width_mismatch() {
 #[test]
 fn generated_edge_case_assembly_assembles() {
     let program = Program {
-        entry: String::from("main"),
+        entry: s("main"),
         memory: vec![MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 16,
         }],
         labels: vec![Label {
-            name: String::from("main"),
+            name: s("main"),
             instructions: vec![
                 Instruction::Assign {
-                    dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-                    value: AssignmentValue::Operand(Operand::Pointer(String::from("buf"))),
+                    dst: AssignmentTarget::Operand(reg("rax")),
+                    value: AssignmentValue::Operand(ptr("buf")),
                 },
                 Instruction::Assign {
                     dst: AssignmentTarget::Operand(Operand::Dereference {
                         address: Address {
-                            first: AddressTerm::Register(String::from("rax")),
+                            first: AddressTerm::Register(s("rax")),
                             rest: Vec::new(),
                         },
                         width: Some(MemoryWidth::U64),
@@ -1943,13 +1887,13 @@ fn generated_edge_case_assembly_assembles() {
                 },
                 Instruction::Assign {
                     dst: AssignmentTarget::RegisterPair {
-                        high: String::from("rdx"),
-                        low: String::from("rax"),
+                        high: s("rdx"),
+                        low: s("rax"),
                     },
                     value: AssignmentValue::WideMultiply {
                         signed: false,
-                        lhs: Operand::Register(String::from("rbx")),
-                        rhs: Operand::Register(String::from("rcx")),
+                        lhs: reg("rbx"),
+                        rhs: reg("rcx"),
                     },
                 },
                 Instruction::Exit { code: 0 },

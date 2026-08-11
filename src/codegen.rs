@@ -328,18 +328,14 @@ fn resolve_float_compare_width(
         return Ok(None);
     }
 
-    let lhs = operand_float_width(&condition.lhs, strings, label_name, stack)?;
-    let rhs = operand_float_width(&condition.rhs, strings, label_name, stack)?;
-
-    match (lhs, rhs) {
-        (Some(left), Some(right)) if left == right => Ok(Some(left)),
-        (Some(left), None) if can_use_float_context(&condition.rhs) => Ok(Some(left)),
-        (None, Some(right)) if can_use_float_context(&condition.lhs) => Ok(Some(right)),
-        (Some(_), Some(_)) => Err(String::from(
-            "Floating-point comparison operands must have matching widths",
-        )),
-        _ => Ok(None),
-    }
+    resolve_float_pair_width(
+        &condition.lhs,
+        &condition.rhs,
+        strings,
+        label_name,
+        stack,
+        "Floating-point comparison operands must have matching widths",
+    )
 }
 
 fn operand_float_width(
@@ -350,12 +346,11 @@ fn operand_float_width(
 ) -> Result<Option<MemoryWidth>, String> {
     match operand {
         Operand::Dereference { address, width } => {
-            Ok(resolve_memory_width(address, *width, strings)?
-                .filter(|width| is_float_width(*width)))
+            Ok(resolve_memory_width(address, *width, strings)?.filter(|width| width.is_float()))
         }
         Operand::Ident(name) => {
             if let Some((_, width)) = stack_scalar_slot(stack, name) {
-                Ok(is_float_width(width).then_some(width))
+                Ok(width.is_float().then_some(width))
             } else {
                 Ok(strings
                     .float_bindings
@@ -384,6 +379,24 @@ fn resolve_float_binary_width(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<Option<MemoryWidth>, String> {
+    resolve_float_pair_width(
+        lhs,
+        rhs,
+        strings,
+        label_name,
+        stack,
+        "Floating-point arithmetic operands must have matching widths",
+    )
+}
+
+fn resolve_float_pair_width(
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    mismatch_error: &str,
+) -> Result<Option<MemoryWidth>, String> {
     let lhs_width = operand_float_width(lhs, strings, label_name, stack)?;
     let rhs_width = operand_float_width(rhs, strings, label_name, stack)?;
 
@@ -391,9 +404,7 @@ fn resolve_float_binary_width(
         (Some(left), Some(right)) if left == right => Ok(Some(left)),
         (Some(left), None) if can_use_float_context(rhs) => Ok(Some(left)),
         (None, Some(right)) if can_use_float_context(lhs) => Ok(Some(right)),
-        (Some(_), Some(_)) => Err(String::from(
-            "Floating-point arithmetic operands must have matching widths",
-        )),
+        (Some(_), Some(_)) => Err(String::from(mismatch_error)),
         _ => Ok(None),
     }
 }
@@ -770,7 +781,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         )?;
                     }
                 }
-                Instruction::Stack { width, value, .. } if is_float_width(*width) => {
+                Instruction::Stack { width, value, .. } if width.is_float() => {
                     collect_float_literal_operand(
                         &mut floats,
                         &mut float_literals,
@@ -874,15 +885,11 @@ fn collect_float_literal_operand(
 }
 
 fn validate_float_width(width: MemoryWidth) -> Result<(), String> {
-    if matches!(width, MemoryWidth::F32 | MemoryWidth::F64) {
+    if width.is_float() {
         Ok(())
     } else {
         Err(String::from("Float bindings require f32 or f64 width"))
     }
-}
-
-fn is_float_width(width: MemoryWidth) -> bool {
-    matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
 }
 
 fn validate_float_literal(value: &str, width: MemoryWidth) -> Result<(), String> {
@@ -905,7 +912,7 @@ fn build_stack_frame(label: &Label) -> Result<StackFrame, String> {
 
     for instruction in &label.instructions {
         if let Instruction::Stack { name, width, .. } = instruction {
-            offset += memory_width_size(width).max(8);
+            offset += width.size().max(8);
             slots.insert(
                 name.clone(),
                 StackSlot::Scalar {
@@ -956,7 +963,7 @@ fn emit_stack_initializers(
 ) -> Result<(), String> {
     for instruction in instructions {
         match instruction {
-            Instruction::Stack { name, width, value } if is_float_width(*width) => {
+            Instruction::Stack { name, width, value } if width.is_float() => {
                 emit_stack_float_initializer(asm, name, *width, value, strings, label_name, stack)?;
             }
             Instruction::Stack { name, value, .. } => {
@@ -998,7 +1005,7 @@ fn emit_stack_float_initializer(
     let (offset, _) =
         stack_scalar_slot(stack, name).ok_or_else(|| format!("Unknown stack variable {name:?}"))?;
     let src = emit_float_operand(value, width, strings, label_name, stack)?;
-    let ptr = memory_width_ptr(&width);
+    let ptr = width.ptr();
 
     asm.push_str("  push rax\n");
     match width {
@@ -1160,67 +1167,18 @@ fn validate_instruction_does_not_use_rbp(
     instruction: &Instruction,
     label_name: &str,
 ) -> Result<(), String> {
-    let mut operands = Vec::new();
-
-    match instruction {
-        Instruction::Assign { dst, value } => {
-            match dst {
-                AssignmentTarget::Operand(operand) => operands.push(operand),
-                AssignmentTarget::RegisterPair { high, low } => {
-                    if is_rbp_register(high) || is_rbp_register(low) {
-                        return Err(format!(
-                            "Label {label_name:?} declares stack variables, so rbp is reserved"
-                        ));
-                    }
-                }
-            }
-
-            match value {
-                AssignmentValue::Operand(operand) => operands.push(operand),
-                AssignmentValue::Binary { lhs, rhs, .. }
-                | AssignmentValue::FloatBinary { lhs, rhs, .. }
-                | AssignmentValue::WideMultiply { lhs, rhs, .. }
-                | AssignmentValue::WideDivide { lhs, rhs, .. } => {
-                    operands.push(lhs);
-                    operands.push(rhs);
-                }
-            }
-        }
-        Instruction::Jmp {
-            condition: Some(condition),
-            ..
-        } => {
-            operands.push(&condition.lhs);
-            operands.push(&condition.rhs);
-        }
-        Instruction::Jmp {
-            condition: None, ..
-        } => {}
-        Instruction::Print { parts } => {
-            for part in parts {
-                if let PrintPart::Operand(operand) = part {
-                    operands.push(operand);
-                }
-            }
-        }
-        Instruction::Pop { dst } => operands.push(dst),
-        Instruction::Push { src } => operands.push(src),
-        Instruction::Read { dst, len, .. } => {
-            operands.push(dst);
-            operands.push(len);
-        }
-        Instruction::Stack { value, .. } => operands.push(value),
-        Instruction::StackString { value, .. } => match value {
-            StringInitializer::Literal(_) => {}
-            StringInitializer::Slice { ptr, len } => {
-                operands.push(ptr);
-                operands.push(len);
-            }
-        },
-        _ => {}
+    if let Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair { high, low },
+        ..
+    } = instruction
+        && (is_rbp_register(high) || is_rbp_register(low))
+    {
+        return Err(format!(
+            "Label {label_name:?} declares stack variables, so rbp is reserved"
+        ));
     }
 
-    if operands.iter().any(|operand| operand_uses_rbp(operand)) {
+    if instruction.operands().into_iter().any(operand_uses_rbp) {
         return Err(format!(
             "Label {label_name:?} declares stack variables, so rbp is reserved"
         ));
@@ -1325,7 +1283,7 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
 
     for (name, width, value) in scalars {
         asm.push_str(&format!("{name}:\n"));
-        asm.push_str(&format!("  {} {value}\n", memory_width_directive(width)));
+        asm.push_str(&format!("  {} {value}\n", width.directive()));
     }
 
     asm.push('\n');
@@ -1348,7 +1306,7 @@ fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
 
     for (name, width, count) in buffers {
         asm.push_str(&format!("{name}:\n"));
-        asm.push_str(&format!("  .zero {}\n", memory_width_size(width) * count));
+        asm.push_str(&format!("  .zero {}\n", width.size() * count));
     }
 
     asm.push('\n');
@@ -1387,11 +1345,7 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
 
     for float in float_bindings {
         asm.push_str(&format!("{}:\n", float.asm_label));
-        asm.push_str(&format!(
-            "  {} {}\n",
-            memory_width_directive(&float.width),
-            float.value
-        ));
+        asm.push_str(&format!("  {} {}\n", float.width.directive(), float.value));
     }
 
     asm.push('\n');
@@ -1823,69 +1777,70 @@ fn emit_assignment(
         } => emit_float_binary_assignment(
             asm, dst, *width, *op, lhs, rhs, strings, label_name, stack,
         ),
-        AssignmentValue::WideMultiply { signed, lhs, rhs } => {
-            validate_wide_math_target("Widened multiply", dst)?;
-            validate_wide_math_operand(
-                "Widened multiply left operand",
-                lhs,
-                strings,
-                label_name,
-                stack,
-            )?;
-            validate_wide_math_operand(
-                "Widened multiply right operand",
-                rhs,
-                strings,
-                label_name,
-                stack,
-            )?;
+        AssignmentValue::WideMultiply { signed, lhs, rhs } => emit_wide_math_assignment(
+            asm, dst, *signed, false, lhs, rhs, strings, label_name, stack,
+        ),
+        AssignmentValue::WideDivide { signed, lhs, rhs } => emit_wide_math_assignment(
+            asm, dst, *signed, true, lhs, rhs, strings, label_name, stack,
+        ),
+    }
+}
 
-            let rax = Operand::Register(String::from("rax"));
-            emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
+fn emit_wide_math_assignment(
+    asm: &mut String,
+    dst: &AssignmentTarget,
+    signed: bool,
+    division: bool,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let prefix = if division {
+        "Widened division"
+    } else {
+        "Widened multiply"
+    };
 
-            validate_wide_math_rhs_not_clobbered("Widened multiply right operand", rhs, false)?;
+    validate_wide_math_target(prefix, dst)?;
+    validate_wide_math_operand(
+        &format!("{prefix} left operand"),
+        lhs,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_wide_math_operand(
+        &format!("{prefix} right operand"),
+        rhs,
+        strings,
+        label_name,
+        stack,
+    )?;
 
-            let opcode = if *signed { "imul" } else { "mul" };
-            let rhs = emit_operand(rhs, strings, label_name, stack)?;
-            asm.push_str(&format!("  {opcode} {rhs}\n"));
+    let rax = Operand::Register(String::from("rax"));
+    emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
+    validate_wide_math_rhs_not_clobbered(&format!("{prefix} right operand"), rhs, division)?;
 
-            Ok(())
-        }
-        AssignmentValue::WideDivide { signed, lhs, rhs } => {
-            validate_wide_math_target("Widened division", dst)?;
-            validate_wide_math_operand(
-                "Widened division left operand",
-                lhs,
-                strings,
-                label_name,
-                stack,
-            )?;
-            validate_wide_math_operand(
-                "Widened division right operand",
-                rhs,
-                strings,
-                label_name,
-                stack,
-            )?;
-
-            let rax = Operand::Register(String::from("rax"));
-            emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
-
-            validate_wide_math_rhs_not_clobbered("Widened division right operand", rhs, true)?;
-
-            if *signed {
-                asm.push_str("  cqo\n");
-            } else {
-                asm.push_str("  xor rdx, rdx\n");
-            }
-
-            let opcode = if *signed { "idiv" } else { "div" };
-            let rhs = emit_operand(rhs, strings, label_name, stack)?;
-            asm.push_str(&format!("  {opcode} {rhs}\n"));
-
-            Ok(())
+    if division {
+        if signed {
+            asm.push_str("  cqo\n");
+        } else {
+            asm.push_str("  xor rdx, rdx\n");
         }
     }
+
+    let opcode = match (division, signed) {
+        (false, true) => "imul",
+        (false, false) => "mul",
+        (true, true) => "idiv",
+        (true, false) => "div",
+    };
+    let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {rhs}\n"));
+
+    Ok(())
 }
 
 fn emit_float_binary_assignment(
@@ -1995,7 +1950,7 @@ fn emit_float_operand(
 
             Ok(format!(
                 "{} ptr [rip + {}]",
-                memory_width_ptr(&binding.width),
+                binding.width.ptr(),
                 binding.asm_label
             ))
         }
@@ -2007,7 +1962,7 @@ fn emit_float_operand(
 
             Ok(format!(
                 "{} ptr [rip + {}]",
-                memory_width_ptr(&binding.width),
+                binding.width.ptr(),
                 binding.asm_label
             ))
         }
@@ -2028,9 +1983,7 @@ fn validate_float_math_operand(
         Operand::FloatLiteral(value) => validate_float_literal(value, width),
         Operand::Ident(binding) if stack_scalar_slot(stack, binding).is_some() => {
             match stack_scalar_slot(stack, binding) {
-                Some((_, stack_width)) if stack_width == width && is_float_width(stack_width) => {
-                    Ok(())
-                }
+                Some((_, stack_width)) if stack_width == width && stack_width.is_float() => Ok(()),
                 Some((_, MemoryWidth::F32 | MemoryWidth::F64)) => Err(format!(
                     "{name} width must match the floating-point operator width"
                 )),
@@ -2369,7 +2322,7 @@ impl ImmediateDestination {
     fn bits(self) -> u8 {
         match self {
             ImmediateDestination::Register(width) => width.bits(),
-            ImmediateDestination::Memory(width) => memory_width_bits(&width).bits(),
+            ImmediateDestination::Memory(width) => memory_width_bits(width).bits(),
         }
     }
 }
@@ -2501,9 +2454,7 @@ fn validate_stack_width(
             None => Ok(()),
         },
         Operand::Dereference { address, width } => {
-            match resolve_memory_width(address, *width, strings)?
-                .map(|width| memory_width_bits(&width))
-            {
+            match resolve_memory_width(address, *width, strings)?.map(memory_width_bits) {
                 Some(Width::Bits64) => Ok(()),
                 Some(width) => Err(format!(
                     "{name} must be 64-bit, found {}-bit memory operand",
@@ -2540,7 +2491,7 @@ fn emit_operand(
             let emitted_address = emit_address(address);
 
             Ok(match resolve_memory_width(address, *width, strings)? {
-                Some(width) => format!("{} ptr [{}]", memory_width_ptr(&width), emitted_address),
+                Some(width) => format!("{} ptr [{}]", width.ptr(), emitted_address),
                 None => format!("[{emitted_address}]"),
             })
         }
@@ -2550,11 +2501,7 @@ fn emit_operand(
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
         Operand::Ident(name) => match stack_scalar_slot(stack, name) {
-            Some((offset, width)) => Ok(format!(
-                "{} ptr [rbp - {}]",
-                memory_width_ptr(&width),
-                offset
-            )),
+            Some((offset, width)) => Ok(format!("{} ptr [rbp - {}]", width.ptr(), offset)),
             None if stack_string_slot(stack, name).is_some() => Err(format!(
                 "String stack variable {name:?} in label {label_name:?} cannot be used as an operand"
             )),
@@ -2628,11 +2575,10 @@ fn operand_width(
     match operand {
         Operand::Register(name) => Ok(register_width(name)),
         Operand::Dereference { address, width } => {
-            Ok(resolve_memory_width(address, *width, strings)?
-                .map(|width| memory_width_bits(&width)))
+            Ok(resolve_memory_width(address, *width, strings)?.map(memory_width_bits))
         }
         Operand::Ident(name) => {
-            Ok(stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(&width)))
+            Ok(stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(width)))
         }
         Operand::StringProperty { .. } => Ok(Some(Width::Bits64)),
         _ => Ok(None),
@@ -2677,12 +2623,11 @@ fn float_memory_width(
 ) -> Result<Option<MemoryWidth>, String> {
     match operand {
         Operand::Dereference { address, width } => {
-            Ok(resolve_memory_width(address, *width, strings)?
-                .filter(|width| is_float_width(*width)))
+            Ok(resolve_memory_width(address, *width, strings)?.filter(|width| width.is_float()))
         }
         Operand::Ident(name) => Ok(stack_scalar_slot(stack, name)
             .map(|(_, width)| width)
-            .filter(|width| is_float_width(*width))),
+            .filter(|width| width.is_float())),
         _ => Ok(None),
     }
 }
@@ -2725,7 +2670,7 @@ fn resolve_memory_width(
     Ok(inferred.map(|(_, width)| width))
 }
 
-fn memory_width_bits(width: &MemoryWidth) -> Width {
+fn memory_width_bits(width: MemoryWidth) -> Width {
     match width {
         MemoryWidth::F32 => Width::Bits32,
         MemoryWidth::F64 => Width::Bits64,
@@ -2733,39 +2678,6 @@ fn memory_width_bits(width: &MemoryWidth) -> Width {
         MemoryWidth::I16 | MemoryWidth::U16 => Width::Bits16,
         MemoryWidth::I32 | MemoryWidth::U32 => Width::Bits32,
         MemoryWidth::I64 | MemoryWidth::U64 => Width::Bits64,
-    }
-}
-
-fn memory_width_size(width: &MemoryWidth) -> usize {
-    match width {
-        MemoryWidth::F32 => 4,
-        MemoryWidth::F64 => 8,
-        MemoryWidth::I8 | MemoryWidth::U8 => 1,
-        MemoryWidth::I16 | MemoryWidth::U16 => 2,
-        MemoryWidth::I32 | MemoryWidth::U32 => 4,
-        MemoryWidth::I64 | MemoryWidth::U64 => 8,
-    }
-}
-
-fn memory_width_directive(width: &MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => ".float",
-        MemoryWidth::F64 => ".double",
-        MemoryWidth::I8 | MemoryWidth::U8 => ".byte",
-        MemoryWidth::I16 | MemoryWidth::U16 => ".word",
-        MemoryWidth::I32 | MemoryWidth::U32 => ".long",
-        MemoryWidth::I64 | MemoryWidth::U64 => ".quad",
-    }
-}
-
-fn memory_width_ptr(width: &MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => "dword",
-        MemoryWidth::F64 => "qword",
-        MemoryWidth::I8 | MemoryWidth::U8 => "byte",
-        MemoryWidth::I16 | MemoryWidth::U16 => "word",
-        MemoryWidth::I32 | MemoryWidth::U32 => "dword",
-        MemoryWidth::I64 | MemoryWidth::U64 => "qword",
     }
 }
 

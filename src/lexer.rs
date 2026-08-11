@@ -56,33 +56,11 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
     let char = chars.next();
     let token = match char {
         Some('.') => match chars.peek() {
-            Some(&c) if is_ident_start(c) => {
-                let mut s = String::new();
-                s.push(chars.next().unwrap());
-                while let Some(&next_char) = chars.peek() {
-                    if is_ident_continue(next_char) {
-                        s.push(chars.next().unwrap());
-                    } else {
-                        break;
-                    }
-                }
-                Some(Token::LocalIdent(s))
-            }
+            Some(&c) if is_ident_start(c) => Some(Token::LocalIdent(lex_ident(chars))),
             _ => return Err(String::from("Expected local identifier after '.'")),
         },
         Some('&') => match chars.peek() {
-            Some(&c) if is_ident_start(c) => {
-                let mut s = String::new();
-                s.push(chars.next().unwrap());
-                while let Some(&next_char) = chars.peek() {
-                    if is_ident_continue(next_char) {
-                        s.push(chars.next().unwrap());
-                    } else {
-                        break;
-                    }
-                }
-                Some(Token::Pointer(s))
-            }
+            Some(&c) if is_ident_start(c) => Some(Token::Pointer(lex_ident(chars))),
             _ => Some(Token::Ampersand),
         },
         Some('+') => Some(Token::Plus),
@@ -150,151 +128,27 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         }
         Some(c) if c.is_ascii_digit() => Some(lex_number(c, chars)?),
         Some(c) if is_ident_start(c) => {
-            let mut s = String::from(c);
-
-            while let Some(&next_char) = chars.peek() {
-                if is_ident_continue(next_char) {
-                    s.push(chars.next().unwrap());
-                } else {
-                    break;
-                }
-            }
+            let s = lex_ident_after(c, chars);
 
             match s.as_str() {
                 "if" => Some(Token::If),
-                "i" if matches!(chars.peek(), Some('<')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::ILessEquals)
-                    } else {
-                        Some(Token::ILess)
-                    }
-                }
-                "i" if matches!(chars.peek(), Some('>')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::IGreaterEquals)
-                    } else {
-                        Some(Token::IGreater)
-                    }
-                }
-                "i" if matches!(chars.peek(), Some('*')) => {
-                    chars.next();
-                    Some(Token::IStar)
-                }
-                "i" if matches!(chars.peek(), Some('/')) => {
-                    chars.next();
-                    Some(Token::ISlash)
-                }
+                "i" => prefixed_integer_operator(
+                    chars,
+                    Token::ILess,
+                    Token::ILessEquals,
+                    Token::IGreater,
+                    Token::IGreaterEquals,
+                    Token::IStar,
+                    Token::ISlash,
+                )
+                .or_else(|| Some(Token::Ident(s))),
                 "call" => Some(Token::Call),
                 "const" => Some(Token::Const),
                 "exit" => Some(Token::Exit),
-                "f32" if matches!(chars.peek(), Some('+')) => {
-                    chars.next();
-                    Some(Token::F32Plus)
-                }
-                "f32" if matches!(chars.peek(), Some('=')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F32EqualsEquals)
-                    } else {
-                        Some(Token::Ident(s))
-                    }
-                }
-                "f32" if matches!(chars.peek(), Some('!')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F32NotEquals)
-                    } else {
-                        Some(Token::Ident(s))
-                    }
-                }
-                "f32" if matches!(chars.peek(), Some('<')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F32LessEquals)
-                    } else {
-                        Some(Token::F32Less)
-                    }
-                }
-                "f32" if matches!(chars.peek(), Some('>')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F32GreaterEquals)
-                    } else {
-                        Some(Token::F32Greater)
-                    }
-                }
-                "f32" if matches!(chars.peek(), Some('-')) => {
-                    chars.next();
-                    Some(Token::F32Minus)
-                }
-                "f32" if matches!(chars.peek(), Some('*')) => {
-                    chars.next();
-                    Some(Token::F32Star)
-                }
-                "f32" if matches!(chars.peek(), Some('/')) => {
-                    chars.next();
-                    Some(Token::F32Slash)
-                }
-                "f64" if matches!(chars.peek(), Some('+')) => {
-                    chars.next();
-                    Some(Token::F64Plus)
-                }
-                "f64" if matches!(chars.peek(), Some('=')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F64EqualsEquals)
-                    } else {
-                        Some(Token::Ident(s))
-                    }
-                }
-                "f64" if matches!(chars.peek(), Some('!')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F64NotEquals)
-                    } else {
-                        Some(Token::Ident(s))
-                    }
-                }
-                "f64" if matches!(chars.peek(), Some('<')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F64LessEquals)
-                    } else {
-                        Some(Token::F64Less)
-                    }
-                }
-                "f64" if matches!(chars.peek(), Some('>')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::F64GreaterEquals)
-                    } else {
-                        Some(Token::F64Greater)
-                    }
-                }
-                "f64" if matches!(chars.peek(), Some('-')) => {
-                    chars.next();
-                    Some(Token::F64Minus)
-                }
-                "f64" if matches!(chars.peek(), Some('*')) => {
-                    chars.next();
-                    Some(Token::F64Star)
-                }
-                "f64" if matches!(chars.peek(), Some('/')) => {
-                    chars.next();
-                    Some(Token::F64Slash)
-                }
+                "f32" => prefixed_float_operator(chars, MemoryWidthTokens::F32)
+                    .or_else(|| Some(Token::Ident(s))),
+                "f64" => prefixed_float_operator(chars, MemoryWidthTokens::F64)
+                    .or_else(|| Some(Token::Ident(s))),
                 "jmp" => Some(Token::Jmp),
                 "mem" => Some(Token::Mem),
                 "pop" => Some(Token::Pop),
@@ -306,32 +160,16 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "stack" => Some(Token::Stack),
                 "stdin" => Some(Token::Stdin),
                 "syscall" => Some(Token::Syscall),
-                "u" if matches!(chars.peek(), Some('<')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::ULessEquals)
-                    } else {
-                        Some(Token::ULess)
-                    }
-                }
-                "u" if matches!(chars.peek(), Some('>')) => {
-                    chars.next();
-                    if chars.peek() == Some(&'=') {
-                        chars.next();
-                        Some(Token::UGreaterEquals)
-                    } else {
-                        Some(Token::UGreater)
-                    }
-                }
-                "u" if matches!(chars.peek(), Some('*')) => {
-                    chars.next();
-                    Some(Token::UStar)
-                }
-                "u" if matches!(chars.peek(), Some('/')) => {
-                    chars.next();
-                    Some(Token::USlash)
-                }
+                "u" => prefixed_integer_operator(
+                    chars,
+                    Token::ULess,
+                    Token::ULessEquals,
+                    Token::UGreater,
+                    Token::UGreaterEquals,
+                    Token::UStar,
+                    Token::USlash,
+                )
+                .or_else(|| Some(Token::Ident(s))),
                 register if is_register(register) => Some(Token::Register(s)),
                 _ => Some(Token::Ident(s)),
             }
@@ -349,6 +187,131 @@ fn is_ident_start(c: char) -> bool {
 
 fn is_ident_continue(c: char) -> bool {
     c == '_' || c.is_ascii_alphanumeric()
+}
+
+fn lex_ident(chars: &mut Peekable<Chars<'_>>) -> String {
+    let first = chars.next().unwrap();
+    lex_ident_after(first, chars)
+}
+
+fn lex_ident_after(first: char, chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut value = String::from(first);
+
+    while let Some(&next_char) = chars.peek() {
+        if is_ident_continue(next_char) {
+            value.push(chars.next().unwrap());
+        } else {
+            break;
+        }
+    }
+
+    value
+}
+
+fn prefixed_integer_operator(
+    chars: &mut Peekable<Chars<'_>>,
+    less: Token,
+    less_equals: Token,
+    greater: Token,
+    greater_equals: Token,
+    star: Token,
+    slash: Token,
+) -> Option<Token> {
+    match chars.peek() {
+        Some('<') => Some(prefixed_comparison(chars, less, less_equals)),
+        Some('>') => Some(prefixed_comparison(chars, greater, greater_equals)),
+        Some('*') => {
+            chars.next();
+            Some(star)
+        }
+        Some('/') => {
+            chars.next();
+            Some(slash)
+        }
+        _ => None,
+    }
+}
+
+fn prefixed_comparison(chars: &mut Peekable<Chars<'_>>, plain: Token, equals: Token) -> Token {
+    chars.next();
+    if chars.peek() == Some(&'=') {
+        chars.next();
+        equals
+    } else {
+        plain
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemoryWidthTokens {
+    F32,
+    F64,
+}
+
+fn prefixed_float_operator(
+    chars: &mut Peekable<Chars<'_>>,
+    width: MemoryWidthTokens,
+) -> Option<Token> {
+    let token = match (width, chars.peek()) {
+        (MemoryWidthTokens::F32, Some('+')) => Token::F32Plus,
+        (MemoryWidthTokens::F32, Some('-')) => Token::F32Minus,
+        (MemoryWidthTokens::F32, Some('*')) => Token::F32Star,
+        (MemoryWidthTokens::F32, Some('/')) => Token::F32Slash,
+        (MemoryWidthTokens::F32, Some('<')) => {
+            return Some(prefixed_comparison(
+                chars,
+                Token::F32Less,
+                Token::F32LessEquals,
+            ));
+        }
+        (MemoryWidthTokens::F32, Some('>')) => {
+            return Some(prefixed_comparison(
+                chars,
+                Token::F32Greater,
+                Token::F32GreaterEquals,
+            ));
+        }
+        (MemoryWidthTokens::F64, Some('+')) => Token::F64Plus,
+        (MemoryWidthTokens::F64, Some('-')) => Token::F64Minus,
+        (MemoryWidthTokens::F64, Some('*')) => Token::F64Star,
+        (MemoryWidthTokens::F64, Some('/')) => Token::F64Slash,
+        (MemoryWidthTokens::F64, Some('<')) => {
+            return Some(prefixed_comparison(
+                chars,
+                Token::F64Less,
+                Token::F64LessEquals,
+            ));
+        }
+        (MemoryWidthTokens::F64, Some('>')) => {
+            return Some(prefixed_comparison(
+                chars,
+                Token::F64Greater,
+                Token::F64GreaterEquals,
+            ));
+        }
+        (MemoryWidthTokens::F32, Some('=')) => {
+            return prefixed_equals(chars, Token::F32EqualsEquals);
+        }
+        (MemoryWidthTokens::F32, Some('!')) => return prefixed_equals(chars, Token::F32NotEquals),
+        (MemoryWidthTokens::F64, Some('=')) => {
+            return prefixed_equals(chars, Token::F64EqualsEquals);
+        }
+        (MemoryWidthTokens::F64, Some('!')) => return prefixed_equals(chars, Token::F64NotEquals),
+        _ => return None,
+    };
+
+    chars.next();
+    Some(token)
+}
+
+fn prefixed_equals(chars: &mut Peekable<Chars<'_>>, token: Token) -> Option<Token> {
+    chars.next();
+    if chars.peek() == Some(&'=') {
+        chars.next();
+        Some(token)
+    } else {
+        None
+    }
 }
 
 fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> Result<Token, String> {

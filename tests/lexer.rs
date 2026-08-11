@@ -5,11 +5,15 @@ fn lex_one(source: &str) -> Result<Option<Token>, String> {
     get_next_token(&mut source.chars().peekable())
 }
 
+fn s(value: &str) -> String {
+    value.to_string()
+}
+
 #[test]
 fn lexes_local_identifier() {
     assert_eq!(
         lex_one(".loop").unwrap(),
-        Some(Token::LocalIdent(String::from("loop")))
+        Some(Token::LocalIdent(s("loop")))
     );
 }
 
@@ -29,67 +33,77 @@ fn rejects_non_ascii_identifier_start() {
 
 #[test]
 fn lexes_float_number_literal() {
-    assert_eq!(
-        lex_one("1.5").unwrap(),
-        Some(Token::FloatLiteral(String::from("1.5")))
-    );
+    assert_eq!(lex_one("1.5").unwrap(), Some(Token::FloatLiteral(s("1.5"))));
 }
 
 #[test]
 fn lexes_comparison_operators() {
-    assert_eq!(lex_one("==").unwrap(), Some(Token::EqualsEquals));
-    assert_eq!(lex_one("!=").unwrap(), Some(Token::NotEquals));
-    assert_eq!(lex_one("<").unwrap(), Some(Token::Less));
-    assert_eq!(lex_one("<=").unwrap(), Some(Token::LessEquals));
-    assert_eq!(lex_one(">").unwrap(), Some(Token::Greater));
-    assert_eq!(lex_one(">=").unwrap(), Some(Token::GreaterEquals));
-    assert_eq!(lex_one("i<").unwrap(), Some(Token::ILess));
-    assert_eq!(lex_one("i<=").unwrap(), Some(Token::ILessEquals));
-    assert_eq!(lex_one("i>").unwrap(), Some(Token::IGreater));
-    assert_eq!(lex_one("i>=").unwrap(), Some(Token::IGreaterEquals));
-    assert_eq!(lex_one("u<").unwrap(), Some(Token::ULess));
-    assert_eq!(lex_one("u<=").unwrap(), Some(Token::ULessEquals));
-    assert_eq!(lex_one("u>").unwrap(), Some(Token::UGreater));
-    assert_eq!(lex_one("u>=").unwrap(), Some(Token::UGreaterEquals));
+    for (source, token) in [
+        ("==", Token::EqualsEquals),
+        ("!=", Token::NotEquals),
+        ("<", Token::Less),
+        ("<=", Token::LessEquals),
+        (">", Token::Greater),
+        (">=", Token::GreaterEquals),
+        ("i<", Token::ILess),
+        ("i<=", Token::ILessEquals),
+        ("i>", Token::IGreater),
+        ("i>=", Token::IGreaterEquals),
+        ("u<", Token::ULess),
+        ("u<=", Token::ULessEquals),
+        ("u>", Token::UGreater),
+        ("u>=", Token::UGreaterEquals),
+    ] {
+        assert_eq!(lex_one(source).unwrap(), Some(token));
+    }
 }
 
 #[test]
 fn lexes_float_arithmetic_operators() {
-    assert_eq!(lex_one("f32+").unwrap(), Some(Token::F32Plus));
-    assert_eq!(lex_one("f32-").unwrap(), Some(Token::F32Minus));
-    assert_eq!(lex_one("f32*").unwrap(), Some(Token::F32Star));
-    assert_eq!(lex_one("f32/").unwrap(), Some(Token::F32Slash));
-    assert_eq!(lex_one("f64+").unwrap(), Some(Token::F64Plus));
-    assert_eq!(lex_one("f64-").unwrap(), Some(Token::F64Minus));
-    assert_eq!(lex_one("f64*").unwrap(), Some(Token::F64Star));
-    assert_eq!(lex_one("f64/").unwrap(), Some(Token::F64Slash));
+    for (source, token) in [
+        ("f32+", Token::F32Plus),
+        ("f32-", Token::F32Minus),
+        ("f32*", Token::F32Star),
+        ("f32/", Token::F32Slash),
+        ("f64+", Token::F64Plus),
+        ("f64-", Token::F64Minus),
+        ("f64*", Token::F64Star),
+        ("f64/", Token::F64Slash),
+    ] {
+        assert_eq!(lex_one(source).unwrap(), Some(token));
+    }
 }
 
 #[test]
 fn lexes_float_comparison_operators() {
-    assert_eq!(lex_one("f32<").unwrap(), Some(Token::F32Less));
-    assert_eq!(lex_one("f32<=").unwrap(), Some(Token::F32LessEquals));
-    assert_eq!(lex_one("f32>").unwrap(), Some(Token::F32Greater));
-    assert_eq!(lex_one("f32>=").unwrap(), Some(Token::F32GreaterEquals));
-    assert_eq!(lex_one("f32==").unwrap(), Some(Token::F32EqualsEquals));
-    assert_eq!(lex_one("f32!=").unwrap(), Some(Token::F32NotEquals));
-    assert_eq!(lex_one("f64<").unwrap(), Some(Token::F64Less));
-    assert_eq!(lex_one("f64>=").unwrap(), Some(Token::F64GreaterEquals));
+    for (source, token) in [
+        ("f32<", Token::F32Less),
+        ("f32<=", Token::F32LessEquals),
+        ("f32>", Token::F32Greater),
+        ("f32>=", Token::F32GreaterEquals),
+        ("f32==", Token::F32EqualsEquals),
+        ("f32!=", Token::F32NotEquals),
+        ("f64<", Token::F64Less),
+        ("f64>=", Token::F64GreaterEquals),
+    ] {
+        assert_eq!(lex_one(source).unwrap(), Some(token));
+    }
 }
 
 #[test]
 fn lexes_storage_and_cleanup_keywords() {
-    assert_eq!(lex_one("const").unwrap(), Some(Token::Const));
-    assert_eq!(lex_one("read").unwrap(), Some(Token::Read));
-    assert_eq!(lex_one("slice").unwrap(), Some(Token::Slice));
-    assert_eq!(lex_one("stack").unwrap(), Some(Token::Stack));
-    assert_eq!(lex_one("stdin").unwrap(), Some(Token::Stdin));
+    for (source, token) in [
+        ("const", Token::Const),
+        ("read", Token::Read),
+        ("slice", Token::Slice),
+        ("stack", Token::Stack),
+        ("stdin", Token::Stdin),
+    ] {
+        assert_eq!(lex_one(source).unwrap(), Some(token));
+    }
 }
 
 #[test]
 fn lexes_xmm_register() {
-    assert_eq!(
-        lex_one("xmm15").unwrap(),
-        Some(Token::Register(String::from("xmm15")))
-    );
+    assert_eq!(lex_one("xmm15").unwrap(), Some(Token::Register(s("xmm15"))));
 }

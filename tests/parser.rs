@@ -10,12 +10,48 @@ fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
     Parser::new(tokens).parse_program()
 }
 
+fn s(value: &str) -> String {
+    value.to_string()
+}
+
+fn tid(value: &str) -> Token {
+    Token::Ident(s(value))
+}
+
+fn tlocal(value: &str) -> Token {
+    Token::LocalIdent(s(value))
+}
+
+fn tnum(value: &str) -> Token {
+    Token::NumberLiteral(s(value))
+}
+
+fn tfloat(value: &str) -> Token {
+    Token::FloatLiteral(s(value))
+}
+
+fn text(value: &str) -> Token {
+    Token::Text(s(value))
+}
+
+fn tptr(value: &str) -> Token {
+    Token::Pointer(s(value))
+}
+
+fn treg(value: &str) -> Token {
+    Token::Register(s(value))
+}
+
+fn ptr(value: &str) -> Operand {
+    Operand::Pointer(s(value))
+}
+
+fn reg(value: &str) -> Operand {
+    Operand::Register(s(value))
+}
+
 fn empty_main_prefix() -> Vec<Token> {
-    vec![
-        Token::Ident(String::from("main")),
-        Token::Colon,
-        Token::LBrace,
-    ]
+    vec![tid("main"), Token::Colon, Token::LBrace]
 }
 
 fn finish_label(mut tokens: Vec<Token>) -> Vec<Token> {
@@ -26,19 +62,14 @@ fn finish_label(mut tokens: Vec<Token>) -> Vec<Token> {
 #[test]
 fn parses_integer_binding() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Const,
-        Token::Ident(String::from("count")),
-        Token::Equals,
-        Token::NumberLiteral(String::from("3")),
-    ]);
+    tokens.extend([Token::Const, tid("count"), Token::Equals, tnum("3")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: None,
@@ -52,12 +83,12 @@ fn rejects_string_binding_as_operand() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("message")),
+        tid("message"),
         Token::Equals,
-        Token::Text(String::from("hi")),
-        Token::Register(String::from("rax")),
+        text("hi"),
+        treg("rax"),
         Token::Equals,
-        Token::Ident(String::from("message")),
+        tid("message"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -74,10 +105,10 @@ fn parses_negative_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Equals,
         Token::Minus,
-        Token::NumberLiteral(String::from("3")),
+        tnum("3"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -85,7 +116,7 @@ fn parses_negative_integer_binding() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: -3,
                 width: None,
@@ -99,11 +130,11 @@ fn parses_typed_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u8")),
+        tid("u8"),
         Token::Equals,
-        Token::NumberLiteral(String::from("3")),
+        tnum("3"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -111,7 +142,7 @@ fn parses_typed_integer_binding() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Const {
-            name: String::from("count"),
+            name: s("count"),
             value: BindingValue::Integer {
                 value: 3,
                 width: Some(MemoryWidth::U8),
@@ -125,11 +156,11 @@ fn parses_typed_float_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("ratio")),
+        tid("ratio"),
         Token::Colon,
-        Token::Ident(String::from("f64")),
+        tid("f64"),
         Token::Equals,
-        Token::FloatLiteral(String::from("1.5")),
+        tfloat("1.5"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -137,9 +168,9 @@ fn parses_typed_float_binding() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Const {
-            name: String::from("ratio"),
+            name: s("ratio"),
             value: BindingValue::Float {
-                value: String::from("1.5"),
+                value: s("1.5"),
                 width: MemoryWidth::F64,
             },
         }
@@ -149,12 +180,7 @@ fn parses_typed_float_binding() {
 #[test]
 fn rejects_untyped_float_binding() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Const,
-        Token::Ident(String::from("ratio")),
-        Token::Equals,
-        Token::FloatLiteral(String::from("1.5")),
-    ]);
+    tokens.extend([Token::Const, tid("ratio"), Token::Equals, tfloat("1.5")]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
 
@@ -169,11 +195,11 @@ fn parses_stack_declaration() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Stack,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u64")),
+        tid("u64"),
         Token::Equals,
-        Token::NumberLiteral(String::from("8")),
+        tnum("8"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -181,7 +207,7 @@ fn parses_stack_declaration() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Stack {
-            name: String::from("count"),
+            name: s("count"),
             width: MemoryWidth::U64,
             value: Operand::Immediate(8),
         }]
@@ -193,11 +219,11 @@ fn parses_stack_string_literal() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Stack,
-        Token::Ident(String::from("message")),
+        tid("message"),
         Token::Colon,
-        Token::Ident(String::from("str")),
+        tid("str"),
         Token::Equals,
-        Token::Text(String::from("hello")),
+        text("hello"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -205,8 +231,8 @@ fn parses_stack_string_literal() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::StackString {
-            name: String::from("message"),
-            value: StringInitializer::Literal(String::from("hello")),
+            name: s("message"),
+            value: StringInitializer::Literal(s("hello")),
         }]
     );
 }
@@ -216,14 +242,14 @@ fn parses_stack_string_slice() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Stack,
-        Token::Ident(String::from("input")),
+        tid("input"),
         Token::Colon,
-        Token::Ident(String::from("str")),
+        tid("str"),
         Token::Equals,
         Token::Slice,
-        Token::Pointer(String::from("buf")),
+        tptr("buf"),
         Token::Comma,
-        Token::Register(String::from("rax")),
+        treg("rax"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -231,10 +257,10 @@ fn parses_stack_string_slice() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::StackString {
-            name: String::from("input"),
+            name: s("input"),
             value: StringInitializer::Slice {
-                ptr: Operand::Pointer(String::from("buf")),
-                len: Operand::Register(String::from("rax")),
+                ptr: ptr("buf"),
+                len: reg("rax"),
             },
         }]
     );
@@ -244,14 +270,14 @@ fn parses_stack_string_slice() {
 fn parses_stack_string_properties_as_operands() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::Equals,
-        Token::Ident(String::from("message")),
-        Token::LocalIdent(String::from("ptr")),
-        Token::Register(String::from("rbx")),
+        tid("message"),
+        tlocal("ptr"),
+        treg("rbx"),
         Token::Equals,
-        Token::Ident(String::from("message")),
-        Token::LocalIdent(String::from("len")),
+        tid("message"),
+        tlocal("len"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -260,16 +286,16 @@ fn parses_stack_string_properties_as_operands() {
         program.labels[0].instructions,
         vec![
             Instruction::Assign {
-                dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                dst: AssignmentTarget::Operand(reg("rax")),
                 value: AssignmentValue::Operand(Operand::StringProperty {
-                    name: String::from("message"),
+                    name: s("message"),
                     property: StringProperty::Ptr,
                 }),
             },
             Instruction::Assign {
-                dst: AssignmentTarget::Operand(Operand::Register(String::from("rbx"))),
+                dst: AssignmentTarget::Operand(reg("rbx")),
                 value: AssignmentValue::Operand(Operand::StringProperty {
-                    name: String::from("message"),
+                    name: s("message"),
                     property: StringProperty::Len,
                 }),
             },
@@ -280,11 +306,7 @@ fn parses_stack_string_properties_as_operands() {
 #[test]
 fn parses_stack_string_property_print_as_operand() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Print,
-        Token::Ident(String::from("message")),
-        Token::LocalIdent(String::from("len")),
-    ]);
+    tokens.extend([Token::Print, tid("message"), tlocal("len")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -292,7 +314,7 @@ fn parses_stack_string_property_print_as_operand() {
         program.labels[0].instructions,
         vec![Instruction::Print {
             parts: vec![PrintPart::Operand(Operand::StringProperty {
-                name: String::from("message"),
+                name: s("message"),
                 property: StringProperty::Len,
             })],
         }]
@@ -306,9 +328,9 @@ fn parses_read_from_stdin() {
         Token::Read,
         Token::Stdin,
         Token::Comma,
-        Token::Pointer(String::from("buf")),
+        tptr("buf"),
         Token::Comma,
-        Token::NumberLiteral(String::from("1024")),
+        tnum("1024"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -317,7 +339,7 @@ fn parses_read_from_stdin() {
         program.labels[0].instructions,
         vec![Instruction::Read {
             src: ReadSource::Stdin,
-            dst: Operand::Pointer(String::from("buf")),
+            dst: ptr("buf"),
             len: Operand::Immediate(1024),
         }]
     );
@@ -327,11 +349,11 @@ fn parses_read_from_stdin() {
 fn parses_assignment_math() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::Equals,
-        Token::Register(String::from("rbx")),
+        treg("rbx"),
         Token::Plus,
-        Token::NumberLiteral(String::from("3")),
+        tnum("3"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -339,10 +361,10 @@ fn parses_assignment_math() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::Binary {
                 op: MathOp::Add,
-                lhs: Operand::Register(String::from("rbx")),
+                lhs: reg("rbx"),
                 rhs: Operand::Immediate(3),
             },
         }
@@ -353,13 +375,13 @@ fn parses_assignment_math() {
 fn parses_widened_multiply_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("rdx")),
+        treg("rdx"),
         Token::Colon,
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::Equals,
-        Token::Register(String::from("rbx")),
+        treg("rbx"),
         Token::UStar,
-        Token::Register(String::from("rcx")),
+        treg("rcx"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -368,13 +390,13 @@ fn parses_widened_multiply_assignment() {
         program.labels[0].instructions[0],
         Instruction::Assign {
             dst: AssignmentTarget::RegisterPair {
-                high: String::from("rdx"),
-                low: String::from("rax"),
+                high: s("rdx"),
+                low: s("rax"),
             },
             value: AssignmentValue::WideMultiply {
                 signed: false,
-                lhs: Operand::Register(String::from("rbx")),
-                rhs: Operand::Register(String::from("rcx")),
+                lhs: reg("rbx"),
+                rhs: reg("rcx"),
             },
         }
     );
@@ -384,13 +406,13 @@ fn parses_widened_multiply_assignment() {
 fn parses_widened_divide_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("rdx")),
+        treg("rdx"),
         Token::Colon,
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::Equals,
-        Token::Register(String::from("rbx")),
+        treg("rbx"),
         Token::ISlash,
-        Token::Register(String::from("rcx")),
+        treg("rcx"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -399,13 +421,13 @@ fn parses_widened_divide_assignment() {
         program.labels[0].instructions[0],
         Instruction::Assign {
             dst: AssignmentTarget::RegisterPair {
-                high: String::from("rdx"),
-                low: String::from("rax"),
+                high: s("rdx"),
+                low: s("rax"),
             },
             value: AssignmentValue::WideDivide {
                 signed: true,
-                lhs: Operand::Register(String::from("rbx")),
-                rhs: Operand::Register(String::from("rcx")),
+                lhs: reg("rbx"),
+                rhs: reg("rcx"),
             },
         }
     );
@@ -414,11 +436,7 @@ fn parses_widened_divide_assignment() {
 #[test]
 fn parses_call_and_ret() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Call,
-        Token::Ident(String::from("helper")),
-        Token::Ret,
-    ]);
+    tokens.extend([Token::Call, tid("helper"), Token::Ret]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -426,7 +444,7 @@ fn parses_call_and_ret() {
         program.labels[0].instructions,
         vec![
             Instruction::Call {
-                target: String::from("helper"),
+                target: s("helper"),
             },
             Instruction::Ret,
         ]
@@ -436,24 +454,15 @@ fn parses_call_and_ret() {
 #[test]
 fn parses_push_and_pop() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Push,
-        Token::Register(String::from("rax")),
-        Token::Pop,
-        Token::Register(String::from("rbx")),
-    ]);
+    tokens.extend([Token::Push, treg("rax"), Token::Pop, treg("rbx")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions,
         vec![
-            Instruction::Push {
-                src: Operand::Register(String::from("rax")),
-            },
-            Instruction::Pop {
-                dst: Operand::Register(String::from("rbx")),
-            },
+            Instruction::Push { src: reg("rax") },
+            Instruction::Pop { dst: reg("rbx") },
         ]
     );
 }
@@ -461,14 +470,14 @@ fn parses_push_and_pop() {
 #[test]
 fn parses_print_register() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Print, Token::Register(String::from("rax"))]);
+    tokens.extend([Token::Print, treg("rax")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Print {
-            parts: vec![PrintPart::Operand(Operand::Register(String::from("rax")))],
+            parts: vec![PrintPart::Operand(reg("rax"))],
         }]
     );
 }
@@ -476,12 +485,7 @@ fn parses_print_register() {
 #[test]
 fn parses_nested_label_marker() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::LocalIdent(String::from("loop")),
-        Token::Colon,
-        Token::Jmp,
-        Token::LocalIdent(String::from("loop")),
-    ]);
+    tokens.extend([tlocal("loop"), Token::Colon, Token::Jmp, tlocal("loop")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -489,10 +493,10 @@ fn parses_nested_label_marker() {
         program.labels[0].instructions,
         vec![
             Instruction::Label {
-                name: String::from(".L.main.loop"),
+                name: s(".L.main.loop"),
             },
             Instruction::Jmp {
-                target: String::from(".L.main.loop"),
+                target: s(".L.main.loop"),
                 condition: None,
             },
         ]
@@ -504,11 +508,11 @@ fn parses_conditional_jump() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Jmp,
-        Token::Ident(String::from("done")),
+        tid("done"),
         Token::If,
-        Token::Register(String::from("rcx")),
+        treg("rcx"),
         Token::ULess,
-        Token::Register(String::from("rbx")),
+        treg("rbx"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -516,11 +520,11 @@ fn parses_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: String::from("done"),
+            target: s("done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rcx")),
+                lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
-                rhs: Operand::Register(String::from("rbx")),
+                rhs: reg("rbx"),
             }),
         }]
     );
@@ -531,11 +535,11 @@ fn parses_signed_conditional_jump() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Jmp,
-        Token::Ident(String::from("negative")),
+        tid("negative"),
         Token::If,
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::ILess,
-        Token::NumberLiteral(String::from("0")),
+        tnum("0"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -543,9 +547,9 @@ fn parses_signed_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: String::from("negative"),
+            target: s("negative"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rax")),
+                lhs: reg("rax"),
                 op: CompareOp::SignedLess,
                 rhs: Operand::Immediate(0),
             }),
@@ -558,11 +562,11 @@ fn parses_conditional_jump_without_resolved_signedness() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Jmp,
-        Token::Ident(String::from("done")),
+        tid("done"),
         Token::If,
-        Token::Register(String::from("rax")),
+        treg("rax"),
         Token::Less,
-        Token::Register(String::from("rbx")),
+        treg("rbx"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -570,11 +574,11 @@ fn parses_conditional_jump_without_resolved_signedness() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: String::from("done"),
+            target: s("done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("rax")),
+                lhs: reg("rax"),
                 op: CompareOp::Less,
-                rhs: Operand::Register(String::from("rbx")),
+                rhs: reg("rbx"),
             }),
         }]
     );
@@ -583,7 +587,7 @@ fn parses_conditional_jump_without_resolved_signedness() {
 #[test]
 fn rejects_bare_nested_label() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Ident(String::from("loop")), Token::Colon]);
+    tokens.extend([tid("loop"), Token::Colon]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
 
@@ -596,11 +600,11 @@ fn rejects_bare_nested_label() {
 #[test]
 fn parses_top_level_bare_label() {
     let program = parse(vec![
-        Token::Ident(String::from("main")),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
-        Token::Ident(String::from("skip")),
+        tid("skip"),
         Token::Colon,
     ])
     .unwrap();
@@ -608,7 +612,7 @@ fn parses_top_level_bare_label() {
     assert_eq!(
         program.labels[1],
         subsea::ast::Label {
-            name: String::from("skip"),
+            name: s("skip"),
             instructions: Vec::new(),
         }
     );
@@ -616,7 +620,7 @@ fn parses_top_level_bare_label() {
 
 #[test]
 fn rejects_top_level_local_label() {
-    let error = parse(vec![Token::LocalIdent(String::from("skip")), Token::Colon]).unwrap_err();
+    let error = parse(vec![tlocal("skip"), Token::Colon]).unwrap_err();
 
     assert_eq!(
         error,
@@ -627,7 +631,7 @@ fn rejects_top_level_local_label() {
 #[test]
 fn rejects_missing_main_label() {
     let error = parse(vec![
-        Token::Ident(String::from("helper")),
+        tid("helper"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -642,11 +646,11 @@ fn rejects_typed_integer_binding_out_of_range() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u8")),
+        tid("u8"),
         Token::Equals,
-        Token::NumberLiteral(String::from("256")),
+        tnum("256"),
     ]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
@@ -658,12 +662,12 @@ fn rejects_typed_integer_binding_out_of_range() {
 fn parses_memory_scalar_declaration() {
     let program = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u16")),
+        tid("u16"),
         Token::Equals,
-        Token::NumberLiteral(String::from("3")),
-        Token::Ident(String::from("main")),
+        tnum("3"),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -673,7 +677,7 @@ fn parses_memory_scalar_declaration() {
     assert_eq!(
         program.memory[0],
         MemoryDeclaration::Scalar {
-            name: String::from("count"),
+            name: s("count"),
             width: MemoryWidth::U16,
             value: 3,
         }
@@ -684,12 +688,12 @@ fn parses_memory_scalar_declaration() {
 fn parses_float_memory_scalar_declaration() {
     let program = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("ratio")),
+        tid("ratio"),
         Token::Colon,
-        Token::Ident(String::from("f32")),
+        tid("f32"),
         Token::Equals,
-        Token::FloatLiteral(String::from("1.5")),
-        Token::Ident(String::from("main")),
+        tfloat("1.5"),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -699,9 +703,9 @@ fn parses_float_memory_scalar_declaration() {
     assert_eq!(
         program.memory[0],
         MemoryDeclaration::FloatScalar {
-            name: String::from("ratio"),
+            name: s("ratio"),
             width: MemoryWidth::F32,
-            value: String::from("1.5"),
+            value: s("1.5"),
         }
     );
 }
@@ -709,19 +713,15 @@ fn parses_float_memory_scalar_declaration() {
 #[test]
 fn parses_float_literal_as_operand() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Register(String::from("rax")),
-        Token::Equals,
-        Token::FloatLiteral(String::from("1.5")),
-    ]);
+    tokens.extend([treg("rax"), Token::Equals, tfloat("1.5")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
-            value: AssignmentValue::Operand(Operand::FloatLiteral(String::from("1.5"))),
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::FloatLiteral(s("1.5"))),
         }
     );
 }
@@ -731,11 +731,11 @@ fn parses_stack_float_declaration() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Stack,
-        Token::Ident(String::from("ratio")),
+        tid("ratio"),
         Token::Colon,
-        Token::Ident(String::from("f64")),
+        tid("f64"),
         Token::Equals,
-        Token::FloatLiteral(String::from("1.5")),
+        tfloat("1.5"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -743,9 +743,9 @@ fn parses_stack_float_declaration() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Stack {
-            name: String::from("ratio"),
+            name: s("ratio"),
             width: MemoryWidth::F64,
-            value: Operand::FloatLiteral(String::from("1.5")),
+            value: Operand::FloatLiteral(s("1.5")),
         }]
     );
 }
@@ -755,11 +755,11 @@ fn parses_float_conditional_jump() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Jmp,
-        Token::Ident(String::from("done")),
+        tid("done"),
         Token::If,
-        Token::Register(String::from("xmm0")),
+        treg("xmm0"),
         Token::F64Less,
-        Token::FloatLiteral(String::from("1.5")),
+        tfloat("1.5"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -767,11 +767,11 @@ fn parses_float_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: String::from("done"),
+            target: s("done"),
             condition: Some(Condition {
-                lhs: Operand::Register(String::from("xmm0")),
+                lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
-                rhs: Operand::FloatLiteral(String::from("1.5")),
+                rhs: Operand::FloatLiteral(s("1.5")),
             }),
         }]
     );
@@ -781,13 +781,13 @@ fn parses_float_conditional_jump() {
 fn parses_xmm_float_memory_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("xmm0")),
+        treg("xmm0"),
         Token::Equals,
         Token::LBracket,
-        Token::Ident(String::from("ratio")),
+        tid("ratio"),
         Token::RBracket,
         Token::Colon,
-        Token::Ident(String::from("f64")),
+        tid("f64"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -795,10 +795,10 @@ fn parses_xmm_float_memory_assignment() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::Operand(Operand::Dereference {
                 address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Ident(String::from("ratio")),
+                    first: subsea::ast::AddressTerm::Ident(s("ratio")),
                     rest: Vec::new(),
                 },
                 width: Some(MemoryWidth::F64),
@@ -811,11 +811,11 @@ fn parses_xmm_float_memory_assignment() {
 fn parses_float_arithmetic_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("xmm0")),
+        treg("xmm0"),
         Token::Equals,
-        Token::Register(String::from("xmm1")),
+        treg("xmm1"),
         Token::F64Plus,
-        Token::Register(String::from("xmm2")),
+        treg("xmm2"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -823,12 +823,12 @@ fn parses_float_arithmetic_assignment() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::FloatBinary {
                 width: MemoryWidth::F64,
                 op: FloatMathOp::Add,
-                lhs: Operand::Register(String::from("xmm1")),
-                rhs: Operand::Register(String::from("xmm2")),
+                lhs: reg("xmm1"),
+                rhs: reg("xmm2"),
             },
         }
     );
@@ -838,13 +838,13 @@ fn parses_float_arithmetic_assignment() {
 fn rejects_xmm_register_as_memory_address() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
-        Token::Register(String::from("xmm0")),
+        treg("xmm0"),
         Token::Equals,
         Token::LBracket,
-        Token::Register(String::from("xmm1")),
+        treg("xmm1"),
         Token::RBracket,
         Token::Colon,
-        Token::Ident(String::from("f64")),
+        tid("f64"),
     ]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
@@ -859,13 +859,13 @@ fn rejects_xmm_register_as_memory_address() {
 fn parses_memory_buffer_declaration() {
     let program = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("buf")),
+        tid("buf"),
         Token::Colon,
-        Token::Ident(String::from("u8")),
+        tid("u8"),
         Token::LParen,
-        Token::NumberLiteral(String::from("128")),
+        tnum("128"),
         Token::RParen,
-        Token::Ident(String::from("main")),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -875,7 +875,7 @@ fn parses_memory_buffer_declaration() {
     assert_eq!(
         program.memory[0],
         MemoryDeclaration::Buffer {
-            name: String::from("buf"),
+            name: s("buf"),
             width: MemoryWidth::U8,
             count: 128,
         }
@@ -886,18 +886,18 @@ fn parses_memory_buffer_declaration() {
 fn rejects_duplicate_memory_names() {
     let error = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u16")),
+        tid("u16"),
         Token::Equals,
-        Token::NumberLiteral(String::from("3")),
+        tnum("3"),
         Token::Mem,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u16")),
+        tid("u16"),
         Token::Equals,
-        Token::NumberLiteral(String::from("4")),
-        Token::Ident(String::from("main")),
+        tnum("4"),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -911,13 +911,13 @@ fn rejects_duplicate_memory_names() {
 fn rejects_zero_length_memory_buffer() {
     let error = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("buf")),
+        tid("buf"),
         Token::Colon,
-        Token::Ident(String::from("u8")),
+        tid("u8"),
         Token::LParen,
-        Token::NumberLiteral(String::from("0")),
+        tnum("0"),
         Token::RParen,
-        Token::Ident(String::from("main")),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
@@ -931,16 +931,16 @@ fn rejects_zero_length_memory_buffer() {
 fn rejects_label_that_conflicts_with_memory_name() {
     let mut program = parse(vec![
         Token::Mem,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u8")),
+        tid("u8"),
         Token::Equals,
-        Token::NumberLiteral(String::from("1")),
-        Token::Ident(String::from("main")),
+        tnum("1"),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::RBrace,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
     ])
     .unwrap();
@@ -955,15 +955,15 @@ fn rejects_label_that_conflicts_with_memory_name() {
 #[test]
 fn rejects_binding_that_conflicts_with_top_level_label() {
     let program = parse(vec![
-        Token::Ident(String::from("main")),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::Const,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Equals,
-        Token::NumberLiteral(String::from("1")),
+        tnum("1"),
         Token::RBrace,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
     ])
     .unwrap();
@@ -979,17 +979,17 @@ fn rejects_binding_that_conflicts_with_top_level_label() {
 #[test]
 fn rejects_stack_variable_that_conflicts_with_top_level_label() {
     let program = parse(vec![
-        Token::Ident(String::from("main")),
+        tid("main"),
         Token::Colon,
         Token::LBrace,
         Token::Stack,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
-        Token::Ident(String::from("u64")),
+        tid("u64"),
         Token::Equals,
-        Token::NumberLiteral(String::from("1")),
+        tnum("1"),
         Token::RBrace,
-        Token::Ident(String::from("count")),
+        tid("count"),
         Token::Colon,
     ])
     .unwrap();
@@ -1007,11 +1007,11 @@ fn parses_max_u64_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Const,
-        Token::Ident(String::from("max")),
+        tid("max"),
         Token::Colon,
-        Token::Ident(String::from("u64")),
+        tid("u64"),
         Token::Equals,
-        Token::NumberLiteral(String::from("18446744073709551615")),
+        tnum("18446744073709551615"),
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -1019,7 +1019,7 @@ fn parses_max_u64_binding() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Const {
-            name: String::from("max"),
+            name: s("max"),
             value: BindingValue::Integer {
                 value: 18446744073709551615,
                 width: Some(MemoryWidth::U64),
