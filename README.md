@@ -277,6 +277,39 @@ Integer comparisons require explicit signedness. Use `i<`, `i<=`, `i>`, and `i>=
 
 Plain `<`, `<=`, `>`, and `>=` are allowed for floating-point comparisons only when a `f32` or `f64` width can be inferred from an operand. Otherwise, use width-prefixed float operators such as `f64<`.
 
+## Condition Results And Conditional Assignment
+
+Conditions can be used in more places than jumps. Assigning a condition stores `1` when the condition is true and `0` when it is false:
+
+```ss
+rax = rdi i< rsi
+al = rbx == 0
+```
+
+Conditions can also guard an assignment. The destination is changed only when the condition is true:
+
+```ss
+rax = rbx if rcx == 0
+count = count + 1 if count u< 10
+```
+
+Use bitwise-and conditions to test whether masked bits are clear or set. The number after `&` is a mask: an immediate integer literal used to choose which bits to inspect.
+
+```ss
+rax = 5
+
+jmp .has_bit if rax & 4 != 0
+al = rax & 4 != 0
+rbx = 99 if rax & 4 != 0
+
+// true when the low 4 bits are all zero, which means rax is 16-byte aligned
+jmp .aligned if rax & 15 == 0
+```
+
+The comparison applies to the result of `lhs & mask`. For example, `rax & 15 == 0` means `(rax & 15) == 0`, not `15 == 0`.
+
+Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers these conditions to x86-64 `test` internally.
+
 ## Compile-time Bindings
 
 Integer constants can be inlined as operands. Any constant used by `print` is emitted as bytes in `.rodata` and referenced by generated print code.
