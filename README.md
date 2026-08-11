@@ -247,9 +247,11 @@ You cannot `jmp` from one function's labels to another function's labels.
 
 ## Comparison Operators
 
-Comparisons require explicit signedness; plain `<`, `<=`, `>`, and `>=` are rejected. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons.
+Integer comparisons require explicit signedness. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons.
 
 `==` and `!=` do not depend on signedness.
+
+Plain `<`, `<=`, `>`, and `>=` are allowed for floating-point comparisons only when a `f32` or `f64` width can be inferred from an operand. Otherwise, use width-prefixed float operators such as `f64<`.
 
 ## Compile-time Bindings
 
@@ -285,7 +287,7 @@ const pi:f64 = 3.14159
 print pi  // valid
 ```
 
-Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers, but they are not immediate runtime operands yet, so assignments like `rax = 1.5` are rejected.
+Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers. They can also be used as runtime operands when a floating-point width is supplied by context, such as `xmm0 = xmm0 f64+ 1.5`; assignments like `rax = 1.5` are rejected.
 
 ## Memory And Pointers
 
@@ -305,21 +307,23 @@ main: {
 - `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
 - `mem ratio:f64 = 1.5` allocates one writable `f64` memory cell initialized to `1.5`
 
-Floating-point memory can use XMM registers with explicit `f32` or `f64` memory widths:
+Memory operands rooted at declared `mem` storage infer the declaration width:
 
 ```ss
 mem single:f32 = 1.5
 mem double:f64 = 2.25
 
 main: {
-  xmm0 = [single]:f32
-  xmm1 = [double]:f64
-  [single]:f32 = xmm0
-  [double]:f64 = xmm1
+  xmm0 = [single]
+  xmm1 = [double]
+  [single] = xmm0
+  [double] = xmm1
 
   exit 0
 }
 ```
+
+The inferred width is the access width; address arithmetic remains byte-based. `mem nums:u64(8)` makes `[nums + 8]` a `u64` access to the second element.
 
 Scalar floating-point arithmetic uses explicit width-prefixed operators:
 
@@ -329,12 +333,12 @@ mem right:f64 = 2.25
 mem result:f64 = 0.0
 
 main: {
-  xmm0 = [left]:f64
-  xmm1 = [right]:f64
+  xmm0 = [left]
+  xmm1 = [right]
   xmm0 = xmm0 f64+ xmm1
-  xmm0 = xmm0 f64* [right]:f64
+  xmm0 = xmm0 f64* [right]
   xmm0 = xmm0 f64+ 1.5
-  [result]:f64 = xmm0
+  [result] = xmm0
 
   exit 0
 }
@@ -342,9 +346,9 @@ main: {
 
 - Supported scalar floating-point operators are `f32+`, `f32-`, `f32*`, `f32/`, `f64+`, `f64-`, `f64*`, and `f64/`
 - Floating-point arithmetic destinations must be XMM registers.
-- Operands must be XMM registers, explicitly annotated floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the operator width.
+- Operands must be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the operator width. Memory widths may be explicit or inferred from a declared `mem` base.
 
-Floating-point literals and const operands lower to compiler-emitted readonly storage because x86-64 scalar floating-point instructions do not encode decimal float immediates directly:
+Floating-point literals and const operands lower to compiler-emitted readonly storage because x86-64 scalar floating-point instructions do not encode decimal float immediates directly. Plain `+`, `-`, and `*` can be used for floating-point arithmetic when an operand supplies an unambiguous `f32` or `f64` width. Use width-prefixed operators when both operands are ambiguous, such as XMM register-to-register or XMM register-to-float-literal arithmetic:
 
 ```ss
 mem value:f64 = 2.25
@@ -352,8 +356,8 @@ mem value:f64 = 2.25
 main: {
   const ratio:f64 = 1.5
 
-  xmm0 = [value]:f64
-  xmm0 = xmm0 f64+ ratio
+  xmm0 = [value]
+  xmm0 = xmm0 + ratio
   xmm0 = xmm0 f64* 2.0
 
   exit 0
@@ -374,18 +378,27 @@ main: {
 }
 ```
 
-Floating-point comparisons use width-prefixed operators and ordered semantics. If either operand is NaN, the jump is not taken:
+Floating-point comparisons use ordered semantics. If either operand is NaN, the jump is not taken. Plain comparison operators work when a float width can be inferred from an operand:
 
 ```ss
-main: {
-  xmm0 = [left]:f64
+mem left:f64 = 1.5
 
-  jmp .less if xmm0 f64< 2.0
+main: {
+  xmm0 = [left]
+
+  jmp .less if xmm0 < [left]
   exit 0
 
 .less:
   exit 1
 }
+```
+
+Use width-prefixed comparison operators when both operands are ambiguous, such as XMM register-to-register comparisons or XMM register-to-float-literal comparisons:
+
+```ss
+jmp .less if xmm0 f64< xmm1
+jmp .less if xmm0 f64< 2.0
 ```
 
 Supported floating-point comparison operators are `f32==`, `f32!=`, `f32<`, `f32<=`, `f32>`, `f32>=`, and the corresponding `f64` forms.
@@ -646,13 +659,34 @@ rax = rax + eax
 eax = eax * ax
 ```
 
-Memory/register operations infer width from the register:
+Memory/register operations can infer width from the register when the memory address has no declared storage base:
 
 ```ss
 rax = [addr]  // 64-bit load
 [addr] = rax  // 64-bit store
 eax = [addr]  // 32-bit load
 [addr] = eax  // 32-bit store
+```
+
+Memory operands rooted at declared `mem` storage infer the declared width instead:
+
+```ss
+mem buf:u8(8)
+mem count:u64 = 0
+
+[buf] = 72       // u8 store
+[buf + 1] = 105  // u8 store; offset is still byte-based
+al = [buf]       // valid u8 load
+rax = [buf]      // invalid: u8 source with u64 destination
+[count] = 3      // u64 store
+```
+
+Subsea does not track value types inside registers. A register used as an address does not provide a memory access width:
+
+```ss
+rax = &buf
+[rax] = 72      // invalid: no memory width
+[rax]:u8 = 72   // valid
 ```
 
 Ambiguous or unsupported memory moves are rejected:
