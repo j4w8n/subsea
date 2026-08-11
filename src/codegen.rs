@@ -141,7 +141,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     }
                 }
                 Instruction::Pop { dst } => {
-                    validate_pop_operand(dst, &stack)?;
+                    validate_pop_operand(dst, &strings, &stack)?;
                     let dst = emit_operand(dst, &strings, &label.name, &stack)?;
                     asm.push_str(&format!("  pop {dst}\n"));
                 }
@@ -182,7 +182,7 @@ fn emit_conditional_jump(
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
-    if let Some(width) = float_compare_width(condition.op) {
+    if let Some(width) = resolve_float_compare_width(condition, strings, label_name, stack)? {
         return emit_float_conditional_jump(
             asm, target, condition, width, strings, label_name, stack, index,
         );
@@ -197,6 +197,7 @@ fn emit_conditional_jump(
         stack,
     )?;
 
+    validate_resolved_integer_compare_op(op)?;
     validate_compare_operands(lhs, rhs, strings, label_name, stack)?;
 
     let lhs = emit_operand(lhs, strings, label_name, stack)?;
@@ -230,6 +231,10 @@ fn reverse_compare_op(op: CompareOp) -> CompareOp {
     match op {
         CompareOp::Equal => CompareOp::Equal,
         CompareOp::NotEqual => CompareOp::NotEqual,
+        CompareOp::Less => CompareOp::Greater,
+        CompareOp::LessEqual => CompareOp::GreaterEqual,
+        CompareOp::Greater => CompareOp::Less,
+        CompareOp::GreaterEqual => CompareOp::LessEqual,
         CompareOp::SignedLess => CompareOp::SignedGreater,
         CompareOp::SignedLessEqual => CompareOp::SignedGreaterEqual,
         CompareOp::SignedGreater => CompareOp::SignedLess,
@@ -251,6 +256,9 @@ fn compare_jump_opcode(op: CompareOp) -> &'static str {
     match op {
         CompareOp::Equal => "je",
         CompareOp::NotEqual => "jne",
+        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
+            unreachable!()
+        }
         CompareOp::SignedLess => "jl",
         CompareOp::SignedLessEqual => "jle",
         CompareOp::SignedGreater => "jg",
@@ -268,6 +276,24 @@ fn compare_jump_opcode(op: CompareOp) -> &'static str {
     }
 }
 
+fn validate_resolved_integer_compare_op(op: CompareOp) -> Result<(), String> {
+    match op {
+        CompareOp::Less => Err(String::from(
+            "Comparison '<' must specify signedness; use i< or u<",
+        )),
+        CompareOp::LessEqual => Err(String::from(
+            "Comparison '<=' must specify signedness; use i<= or u<=",
+        )),
+        CompareOp::Greater => Err(String::from(
+            "Comparison '>' must specify signedness; use i> or u>",
+        )),
+        CompareOp::GreaterEqual => Err(String::from(
+            "Comparison '>=' must specify signedness; use i>= or u>=",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn float_compare_width(op: CompareOp) -> Option<MemoryWidth> {
     match op {
         CompareOp::FloatEqual(width)
@@ -277,6 +303,119 @@ fn float_compare_width(op: CompareOp) -> Option<MemoryWidth> {
         | CompareOp::FloatGreater(width)
         | CompareOp::FloatGreaterEqual(width) => Some(width),
         _ => None,
+    }
+}
+
+fn resolve_float_compare_width(
+    condition: &Condition,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Option<MemoryWidth>, String> {
+    if let Some(width) = float_compare_width(condition.op) {
+        return Ok(Some(width));
+    }
+
+    if !matches!(
+        condition.op,
+        CompareOp::Equal
+            | CompareOp::NotEqual
+            | CompareOp::Less
+            | CompareOp::LessEqual
+            | CompareOp::Greater
+            | CompareOp::GreaterEqual
+    ) {
+        return Ok(None);
+    }
+
+    let lhs = operand_float_width(&condition.lhs, strings, label_name, stack)?;
+    let rhs = operand_float_width(&condition.rhs, strings, label_name, stack)?;
+
+    match (lhs, rhs) {
+        (Some(left), Some(right)) if left == right => Ok(Some(left)),
+        (Some(left), None) if can_use_float_context(&condition.rhs) => Ok(Some(left)),
+        (None, Some(right)) if can_use_float_context(&condition.lhs) => Ok(Some(right)),
+        (Some(_), Some(_)) => Err(String::from(
+            "Floating-point comparison operands must have matching widths",
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn operand_float_width(
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Option<MemoryWidth>, String> {
+    match operand {
+        Operand::Dereference { address, width } => {
+            Ok(resolve_memory_width(address, *width, strings)?
+                .filter(|width| is_float_width(*width)))
+        }
+        Operand::Ident(name) => {
+            if let Some((_, width)) = stack_scalar_slot(stack, name) {
+                Ok(is_float_width(width).then_some(width))
+            } else {
+                Ok(strings
+                    .float_bindings
+                    .get(&(label_name.to_string(), name.clone()))
+                    .map(|binding| binding.width))
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn can_use_float_context(operand: &Operand) -> bool {
+    matches!(
+        operand,
+        Operand::Register(_)
+            | Operand::FloatLiteral(_)
+            | Operand::Dereference { .. }
+            | Operand::Ident(_)
+    )
+}
+
+fn resolve_float_binary_width(
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Option<MemoryWidth>, String> {
+    let lhs_width = operand_float_width(lhs, strings, label_name, stack)?;
+    let rhs_width = operand_float_width(rhs, strings, label_name, stack)?;
+
+    match (lhs_width, rhs_width) {
+        (Some(left), Some(right)) if left == right => Ok(Some(left)),
+        (Some(left), None) if can_use_float_context(rhs) => Ok(Some(left)),
+        (None, Some(right)) if can_use_float_context(lhs) => Ok(Some(right)),
+        (Some(_), Some(_)) => Err(String::from(
+            "Floating-point arithmetic operands must have matching widths",
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn float_math_op_from_integer_op(op: MathOp) -> FloatMathOp {
+    match op {
+        MathOp::Add => FloatMathOp::Add,
+        MathOp::Multiply => FloatMathOp::Multiply,
+        MathOp::Subtract => FloatMathOp::Subtract,
+    }
+}
+
+fn is_ambiguous_float_binary_operand(operand: &Operand) -> bool {
+    matches!(operand, Operand::FloatLiteral(_))
+        || matches!(operand, Operand::Register(register) if is_xmm_register(register))
+}
+
+fn math_op_symbol(op: MathOp) -> &'static str {
+    match op {
+        MathOp::Add => "+",
+        MathOp::Multiply => "*",
+        MathOp::Subtract => "-",
     }
 }
 
@@ -338,12 +477,12 @@ fn float_compare_opcode(width: MemoryWidth) -> &'static str {
 
 fn float_compare_jump_opcode(op: CompareOp) -> &'static str {
     match op {
-        CompareOp::FloatEqual(_) => "je",
-        CompareOp::FloatNotEqual(_) => "jne",
-        CompareOp::FloatLess(_) => "jb",
-        CompareOp::FloatLessEqual(_) => "jbe",
-        CompareOp::FloatGreater(_) => "ja",
-        CompareOp::FloatGreaterEqual(_) => "jae",
+        CompareOp::Equal | CompareOp::FloatEqual(_) => "je",
+        CompareOp::NotEqual | CompareOp::FloatNotEqual(_) => "jne",
+        CompareOp::Less | CompareOp::FloatLess(_) => "jb",
+        CompareOp::LessEqual | CompareOp::FloatLessEqual(_) => "jbe",
+        CompareOp::Greater | CompareOp::FloatGreater(_) => "ja",
+        CompareOp::GreaterEqual | CompareOp::FloatGreaterEqual(_) => "jae",
         _ => unreachable!(),
     }
 }
@@ -357,8 +496,8 @@ fn validate_compare_operands(
 ) -> Result<(), String> {
     if operand_uses_xmm_register(lhs)
         || operand_uses_xmm_register(rhs)
-        || is_float_memory_operand(lhs, stack)
-        || is_float_memory_operand(rhs, stack)
+        || is_float_memory_operand(lhs, strings, stack)?
+        || is_float_memory_operand(rhs, strings, stack)?
     {
         return Err(String::from(
             "Floating-point operands cannot be compared yet",
@@ -375,9 +514,10 @@ fn validate_compare_operands(
         ));
     }
 
-    if let (Some(lhs_width), Some(rhs_width)) =
-        (operand_width(lhs, stack), operand_width(rhs, stack))
-        && lhs_width != rhs_width
+    if let (Some(lhs_width), Some(rhs_width)) = (
+        operand_width(lhs, strings, label_name, stack)?,
+        operand_width(rhs, strings, label_name, stack)?,
+    ) && lhs_width != rhs_width
     {
         return Err(format!(
             "Cannot compare {}-bit operand with {}-bit operand",
@@ -388,7 +528,7 @@ fn validate_compare_operands(
 
     if let (Some(value), Some(width)) = (
         immediate_value(rhs, strings, label_name, stack),
-        destination_width(lhs, stack),
+        destination_width(lhs, strings, stack)?,
     ) {
         validate_immediate_range(value, width)?;
     }
@@ -417,6 +557,7 @@ struct StringTable {
     float_literals: HashMap<(String, MemoryWidth, String), FloatBinding>,
     floats: Vec<FloatBinding>,
     literals: HashMap<(String, usize), StringBinding>,
+    memory_widths: HashMap<String, MemoryWidth>,
     integers: HashMap<(String, String), IntegerBinding>,
     stack_strings: HashMap<(String, String), StringBinding>,
 }
@@ -506,6 +647,15 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     let mut literals = HashMap::new();
     let mut stack_strings = HashMap::new();
     let mut literal_indexes = HashMap::new();
+    let memory_widths = program
+        .memory
+        .iter()
+        .map(|declaration| match declaration {
+            MemoryDeclaration::Scalar { name, width, .. }
+            | MemoryDeclaration::FloatScalar { name, width, .. }
+            | MemoryDeclaration::Buffer { name, width, .. } => (name.clone(), *width),
+        })
+        .collect();
 
     for label in &program.labels {
         for instruction in &label.instructions {
@@ -599,6 +749,27 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         rhs,
                     )?;
                 }
+                Instruction::Assign {
+                    value: AssignmentValue::Binary { lhs, rhs, .. },
+                    ..
+                } => {
+                    for width in [MemoryWidth::F32, MemoryWidth::F64] {
+                        collect_float_literal_operand(
+                            &mut floats,
+                            &mut float_literals,
+                            &label.name,
+                            width,
+                            lhs,
+                        )?;
+                        collect_float_literal_operand(
+                            &mut floats,
+                            &mut float_literals,
+                            &label.name,
+                            width,
+                            rhs,
+                        )?;
+                    }
+                }
                 Instruction::Stack { width, value, .. } if is_float_width(*width) => {
                     collect_float_literal_operand(
                         &mut floats,
@@ -627,6 +798,31 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                             width,
                             &condition.rhs,
                         )?;
+                    } else if matches!(
+                        condition.op,
+                        CompareOp::Equal
+                            | CompareOp::NotEqual
+                            | CompareOp::Less
+                            | CompareOp::LessEqual
+                            | CompareOp::Greater
+                            | CompareOp::GreaterEqual
+                    ) {
+                        for width in [MemoryWidth::F32, MemoryWidth::F64] {
+                            collect_float_literal_operand(
+                                &mut floats,
+                                &mut float_literals,
+                                &label.name,
+                                width,
+                                &condition.lhs,
+                            )?;
+                            collect_float_literal_operand(
+                                &mut floats,
+                                &mut float_literals,
+                                &label.name,
+                                width,
+                                &condition.rhs,
+                            )?;
+                        }
                     }
                 }
                 _ => {}
@@ -641,6 +837,7 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         float_literals,
         floats,
         literals,
+        memory_widths,
         integers,
         stack_strings,
     })
@@ -1216,7 +1413,7 @@ fn emit_print_operand_instruction(
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
-    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, stack) {
+    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, strings, stack)? {
         return Err(String::from(
             "print operand does not support floating-point values yet",
         ));
@@ -1369,7 +1566,7 @@ fn emit_stack_string_slice_len(
         return Ok(());
     }
 
-    match operand_width(len, stack) {
+    match operand_width(len, strings, label_name, stack)? {
         Some(Width::Bits64) => {
             let emitted_len = emit_operand(len, strings, label_name, stack)?;
             if is_memory_operand(len, stack) {
@@ -1464,7 +1661,7 @@ fn emit_read_len_arg(
         return Ok(());
     }
 
-    match operand_width(len, stack) {
+    match operand_width(len, strings, label_name, stack)? {
         Some(Width::Bits64) => {
             let len = emit_operand(len, strings, label_name, stack)?;
             asm.push_str(&format!("  mov rdx, {len}\n"));
@@ -1487,7 +1684,7 @@ fn load_print_operand(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    match operand_width(operand, stack) {
+    match operand_width(operand, strings, label_name, stack)? {
         Some(Width::Bits8 | Width::Bits16) => {
             let operand = emit_operand(operand, strings, label_name, stack)?;
             asm.push_str(&format!("  movzx rax, {operand}\n"));
@@ -1538,6 +1735,31 @@ fn emit_assignment(
         }
         AssignmentValue::Binary { op, lhs, rhs } => {
             let dst = assignment_operand_target(dst)?;
+
+            if let Some(width) = resolve_float_binary_width(lhs, rhs, strings, label_name, stack)? {
+                return emit_float_binary_operand_assignment(
+                    asm,
+                    dst,
+                    width,
+                    float_math_op_from_integer_op(*op),
+                    lhs,
+                    rhs,
+                    strings,
+                    label_name,
+                    stack,
+                );
+            }
+
+            if is_ambiguous_float_binary_operand(lhs)
+                || is_ambiguous_float_binary_operand(rhs)
+                || is_ambiguous_float_binary_operand(dst)
+            {
+                return Err(format!(
+                    "Floating-point arithmetic width is ambiguous; use f32{} or f64{}",
+                    math_op_symbol(*op),
+                    math_op_symbol(*op)
+                ));
+            }
 
             if !matches!(dst, Operand::Register(_)) && *op == MathOp::Multiply {
                 return Err(String::from(
@@ -1680,6 +1902,22 @@ fn emit_float_binary_assignment(
     validate_float_width(width)?;
 
     let dst = assignment_operand_target(dst)?;
+    emit_float_binary_operand_assignment(asm, dst, width, op, lhs, rhs, strings, label_name, stack)
+}
+
+fn emit_float_binary_operand_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    width: MemoryWidth,
+    op: FloatMathOp,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_width(width)?;
+
     let Operand::Register(dst_register) = dst else {
         return Err(String::from(
             "Floating-point arithmetic destination must be an XMM register",
@@ -1815,21 +2053,20 @@ fn validate_float_math_operand(
             }
         }
         Operand::Dereference {
-            width: Some(memory_width),
-            ..
-        } if *memory_width == width => Ok(()),
-        Operand::Dereference {
-            width: Some(MemoryWidth::F32 | MemoryWidth::F64),
-            ..
-        } => Err(format!(
-            "{name} width must match the floating-point operator width"
-        )),
-        Operand::Dereference { width: None, .. } => Err(format!(
-            "{name} memory operand requires an explicit f32 or f64 width"
-        )),
-        Operand::Dereference { .. } => Err(format!(
-            "{name} must be an XMM register or floating-point memory operand"
-        )),
+            address,
+            width: memory_width,
+        } => match resolve_memory_width(address, *memory_width, strings)? {
+            Some(resolved_width) if resolved_width == width => Ok(()),
+            Some(MemoryWidth::F32 | MemoryWidth::F64) => Err(format!(
+                "{name} width must match the floating-point operator width"
+            )),
+            Some(_) => Err(format!(
+                "{name} must be an XMM register or floating-point memory operand"
+            )),
+            None => Err(format!(
+                "{name} memory operand requires an explicit f32 or f64 width"
+            )),
+        },
         Operand::Immediate(_) => Err(format!(
             "{name} cannot be an immediate value; use a floating-point memory operand for now"
         )),
@@ -1908,7 +2145,7 @@ fn validate_wide_math_operand(
         return Err(format!("{name} cannot be an immediate value"));
     }
 
-    if let Some(width) = operand_width(operand, stack)
+    if let Some(width) = operand_width(operand, strings, label_name, stack)?
         && width != Width::Bits64
     {
         return Err(format!(
@@ -1948,7 +2185,7 @@ fn emit_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    if let Some(opcode) = float_move_opcode(src, dst, stack)? {
+    if let Some(opcode) = float_move_opcode(src, dst, strings, stack)? {
         let src = emit_operand(src, strings, label_name, stack)?;
         let dst = emit_operand(dst, strings, label_name, stack)?;
         asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
@@ -1958,7 +2195,9 @@ fn emit_copy_instruction(
         Err(String::from(
             "XMM moves require one XMM register and one explicitly f32 or f64 memory operand",
         ))
-    } else if is_float_memory_operand(src, stack) || is_float_memory_operand(dst, stack) {
+    } else if is_float_memory_operand(src, strings, stack)?
+        || is_float_memory_operand(dst, strings, stack)?
+    {
         Err(String::from(
             "Floating-point memory operands require an XMM register source or destination",
         ))
@@ -1985,8 +2224,8 @@ fn validate_binary_operands(
     if opcode != "mov"
         && (operand_uses_xmm_register(src)
             || operand_uses_xmm_register(dst)
-            || is_float_memory_operand(src, stack)
-            || is_float_memory_operand(dst, stack))
+            || is_float_memory_operand(src, strings, stack)?
+            || is_float_memory_operand(dst, strings, stack)?)
     {
         return Err(format!(
             "{opcode} does not support floating-point operands yet"
@@ -2033,22 +2272,18 @@ fn validate_binary_operands(
 
     if opcode == "mov"
         && is_immediate_operand(src, strings, label_name, stack)
-        && matches!(
-            dst,
-            Operand::Dereference {
-                address: _,
-                width: None
-            }
-        )
+        && matches!(dst, Operand::Dereference { width: None, .. })
+        && destination_width(dst, strings, stack)?.is_none()
     {
         return Err(String::from(
             "Cannot assign an immediate value directly into memory without an explicit width",
         ));
     }
 
-    if let (Some(src_width), Some(dst_width)) =
-        (operand_width(src, stack), operand_width(dst, stack))
-        && src_width != dst_width
+    if let (Some(src_width), Some(dst_width)) = (
+        operand_width(src, strings, label_name, stack)?,
+        operand_width(dst, strings, label_name, stack)?,
+    ) && src_width != dst_width
     {
         return Err(format!(
             "Cannot use {}-bit source with {}-bit destination",
@@ -2059,7 +2294,7 @@ fn validate_binary_operands(
 
     if let (Some(value), Some(width)) = (
         immediate_value(src, strings, label_name, stack),
-        destination_width(dst, stack),
+        destination_width(dst, strings, stack)?,
     ) {
         validate_immediate_range(value, width)?;
     }
@@ -2107,16 +2342,20 @@ fn immediate_value(
     }
 }
 
-fn destination_width(operand: &Operand, stack: &StackFrame) -> Option<ImmediateDestination> {
+fn destination_width(
+    operand: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<Option<ImmediateDestination>, String> {
     match operand {
-        Operand::Register(name) => register_width(name).map(ImmediateDestination::Register),
-        Operand::Dereference {
-            width: Some(width), ..
-        } => Some(ImmediateDestination::Memory(*width)),
-        Operand::Ident(name) => {
-            stack_scalar_slot(stack, name).map(|(_, width)| ImmediateDestination::Memory(width))
+        Operand::Register(name) => Ok(register_width(name).map(ImmediateDestination::Register)),
+        Operand::Dereference { address, width } => {
+            Ok(resolve_memory_width(address, *width, strings)?.map(ImmediateDestination::Memory))
         }
-        _ => None,
+        Operand::Ident(name) => Ok(
+            stack_scalar_slot(stack, name).map(|(_, width)| ImmediateDestination::Memory(width))
+        ),
+        _ => Ok(None),
     }
 }
 
@@ -2222,10 +2461,14 @@ fn validate_push_operand(
         return Ok(());
     }
 
-    validate_stack_width("push source", src, stack)
+    validate_stack_width("push source", src, strings, label_name, stack)
 }
 
-fn validate_pop_operand(dst: &Operand, stack: &StackFrame) -> Result<(), String> {
+fn validate_pop_operand(
+    dst: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<(), String> {
     if matches!(
         dst,
         Operand::Immediate(_) | Operand::Pointer(_) | Operand::StringProperty { .. }
@@ -2235,10 +2478,16 @@ fn validate_pop_operand(dst: &Operand, stack: &StackFrame) -> Result<(), String>
         ));
     }
 
-    validate_stack_width("pop destination", dst, stack)
+    validate_stack_width("pop destination", dst, strings, "", stack)
 }
 
-fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Result<(), String> {
+fn validate_stack_width(
+    name: &str,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
     match operand {
         Operand::Register(register) if is_xmm_register(register) => Err(format!(
             "{name} must be a 64-bit integer register, found XMM register {register}"
@@ -2251,18 +2500,22 @@ fn validate_stack_width(name: &str, operand: &Operand, stack: &StackFrame) -> Re
             )),
             None => Ok(()),
         },
-        Operand::Dereference { width, .. } => match width.as_ref().map(memory_width_bits) {
-            Some(Width::Bits64) => Ok(()),
-            Some(width) => Err(format!(
-                "{name} must be 64-bit, found {}-bit memory operand",
-                width.bits()
-            )),
-            None => Err(format!(
-                "{name} memory operand requires an explicit 64-bit width"
-            )),
-        },
+        Operand::Dereference { address, width } => {
+            match resolve_memory_width(address, *width, strings)?
+                .map(|width| memory_width_bits(&width))
+            {
+                Some(Width::Bits64) => Ok(()),
+                Some(width) => Err(format!(
+                    "{name} must be 64-bit, found {}-bit memory operand",
+                    width.bits()
+                )),
+                None => Err(format!(
+                    "{name} memory operand requires an explicit 64-bit width"
+                )),
+            }
+        }
         Operand::Ident(name) if stack_scalar_slot(stack, name).is_some() => {
-            match operand_width(operand, stack) {
+            match operand_width(operand, strings, label_name, stack)? {
                 Some(Width::Bits64) => Ok(()),
                 Some(width) => Err(format!(
                     "{name} must be 64-bit, found {}-bit stack variable",
@@ -2284,11 +2537,11 @@ fn emit_operand(
 ) -> Result<String, String> {
     match operand {
         Operand::Dereference { address, width } => {
-            let address = emit_address(address);
+            let emitted_address = emit_address(address);
 
-            Ok(match width {
-                Some(width) => format!("{} ptr [{}]", memory_width_ptr(width), address),
-                None => format!("[{address}]"),
+            Ok(match resolve_memory_width(address, *width, strings)? {
+                Some(width) => format!("{} ptr [{}]", memory_width_ptr(&width), emitted_address),
+                None => format!("[{emitted_address}]"),
             })
         }
         Operand::FloatLiteral(value) => Err(format!(
@@ -2366,31 +2619,40 @@ fn emit_address_term(term: &AddressTerm) -> String {
     }
 }
 
-fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
+fn operand_width(
+    operand: &Operand,
+    strings: &StringTable,
+    _label_name: &str,
+    stack: &StackFrame,
+) -> Result<Option<Width>, String> {
     match operand {
-        Operand::Register(name) => register_width(name),
-        Operand::Dereference { width, .. } => width.as_ref().map(memory_width_bits),
-        Operand::Ident(name) => {
-            stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(&width))
+        Operand::Register(name) => Ok(register_width(name)),
+        Operand::Dereference { address, width } => {
+            Ok(resolve_memory_width(address, *width, strings)?
+                .map(|width| memory_width_bits(&width)))
         }
-        Operand::StringProperty { .. } => Some(Width::Bits64),
-        _ => None,
+        Operand::Ident(name) => {
+            Ok(stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(&width)))
+        }
+        Operand::StringProperty { .. } => Ok(Some(Width::Bits64)),
+        _ => Ok(None),
     }
 }
 
 fn float_move_opcode(
     src: &Operand,
     dst: &Operand,
+    strings: &StringTable,
     stack: &StackFrame,
 ) -> Result<Option<&'static str>, String> {
     match (src, dst) {
         (Operand::Register(register), memory) if is_xmm_register(register) => {
-            float_memory_width(memory, stack)
+            float_memory_width(memory, strings, stack)?
                 .map(float_move_opcode_for_width)
                 .transpose()
         }
         (memory, Operand::Register(register)) if is_xmm_register(register) => {
-            float_memory_width(memory, stack)
+            float_memory_width(memory, strings, stack)?
                 .map(float_move_opcode_for_width)
                 .transpose()
         }
@@ -2408,26 +2670,59 @@ fn float_move_opcode_for_width(width: MemoryWidth) -> Result<&'static str, Strin
     }
 }
 
-fn float_memory_width(operand: &Operand, stack: &StackFrame) -> Option<MemoryWidth> {
+fn float_memory_width(
+    operand: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<Option<MemoryWidth>, String> {
     match operand {
-        Operand::Dereference {
-            width: Some(MemoryWidth::F32 | MemoryWidth::F64),
-            ..
-        } => match operand {
-            Operand::Dereference {
-                width: Some(width), ..
-            } => Some(*width),
-            _ => unreachable!(),
-        },
-        Operand::Ident(name) => stack_scalar_slot(stack, name)
+        Operand::Dereference { address, width } => {
+            Ok(resolve_memory_width(address, *width, strings)?
+                .filter(|width| is_float_width(*width)))
+        }
+        Operand::Ident(name) => Ok(stack_scalar_slot(stack, name)
             .map(|(_, width)| width)
-            .filter(|width| is_float_width(*width)),
-        _ => None,
+            .filter(|width| is_float_width(*width))),
+        _ => Ok(None),
     }
 }
 
-fn is_float_memory_operand(operand: &Operand, stack: &StackFrame) -> bool {
-    float_memory_width(operand, stack).is_some()
+fn is_float_memory_operand(
+    operand: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<bool, String> {
+    Ok(float_memory_width(operand, strings, stack)?.is_some())
+}
+
+fn resolve_memory_width(
+    address: &Address,
+    explicit_width: Option<MemoryWidth>,
+    strings: &StringTable,
+) -> Result<Option<MemoryWidth>, String> {
+    if explicit_width.is_some() {
+        return Ok(explicit_width);
+    }
+
+    let mut inferred = None;
+    for term in std::iter::once(&address.first).chain(address.rest.iter().map(|(_, term)| term)) {
+        if let AddressTerm::Ident(name) = term
+            && let Some(width) = strings.memory_widths.get(name)
+        {
+            match inferred {
+                None => inferred = Some((name.as_str(), *width)),
+                Some((existing_name, existing_width))
+                    if existing_name == name.as_str() || existing_width == *width => {}
+                Some((existing_name, _)) => {
+                    return Err(format!(
+                        "Memory operand has multiple typed bases {existing_name:?} and {name:?}; add an explicit width"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(inferred.map(|(_, width)| width))
 }
 
 fn memory_width_bits(width: &MemoryWidth) -> Width {

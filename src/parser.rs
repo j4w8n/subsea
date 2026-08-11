@@ -409,18 +409,10 @@ impl Parser {
             Some(Token::ULessEquals) => Ok(CompareOp::UnsignedLessEqual),
             Some(Token::UGreater) => Ok(CompareOp::UnsignedGreater),
             Some(Token::UGreaterEquals) => Ok(CompareOp::UnsignedGreaterEqual),
-            Some(Token::Less) => Err(String::from(
-                "Comparison '<' must specify signedness; use i< or u<",
-            )),
-            Some(Token::LessEquals) => Err(String::from(
-                "Comparison '<=' must specify signedness; use i<= or u<=",
-            )),
-            Some(Token::Greater) => Err(String::from(
-                "Comparison '>' must specify signedness; use i> or u>",
-            )),
-            Some(Token::GreaterEquals) => Err(String::from(
-                "Comparison '>=' must specify signedness; use i>= or u>=",
-            )),
+            Some(Token::Less) => Ok(CompareOp::Less),
+            Some(Token::LessEquals) => Ok(CompareOp::LessEqual),
+            Some(Token::Greater) => Ok(CompareOp::Greater),
+            Some(Token::GreaterEquals) => Ok(CompareOp::GreaterEqual),
             Some(token) => Err(format!("Expected comparison operator, found {token:?}")),
             None => Err(String::from(
                 "Expected comparison operator, found end of input",

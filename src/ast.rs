@@ -102,6 +102,10 @@ pub struct Condition {
 pub enum CompareOp {
     Equal,
     NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     SignedLess,
     SignedLessEqual,
     SignedGreater,

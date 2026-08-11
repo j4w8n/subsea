@@ -554,7 +554,7 @@ fn parses_signed_conditional_jump() {
 }
 
 #[test]
-fn rejects_conditional_jump_without_signedness() {
+fn parses_conditional_jump_without_resolved_signedness() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Jmp,
@@ -565,11 +565,18 @@ fn rejects_conditional_jump_without_signedness() {
         Token::Register(String::from("rbx")),
     ]);
 
-    let error = parse(finish_label(tokens)).unwrap_err();
+    let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
-        error,
-        "Comparison '<' must specify signedness; use i< or u<"
+        program.labels[0].instructions,
+        vec![Instruction::Jmp {
+            target: String::from("done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rax")),
+                op: CompareOp::Less,
+                rhs: Operand::Register(String::from("rbx")),
+            }),
+        }]
     );
 }
 

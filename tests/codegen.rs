@@ -1299,6 +1299,146 @@ fn emits_xmm_float_loads_and_stores() {
 }
 
 #[test]
+fn infers_memory_width_from_declared_base() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 8,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("buf")),
+                            rest: Vec::new(),
+                        },
+                        width: None,
+                    }),
+                    value: AssignmentValue::Operand(Operand::Immediate(72)),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("buf")),
+                            rest: vec![(
+                                subsea::ast::AddressOperator::Add,
+                                AddressTerm::Immediate(1),
+                            )],
+                        },
+                        width: None,
+                    }),
+                    value: AssignmentValue::Operand(Operand::Immediate(105)),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("al"))),
+                    value: AssignmentValue::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(String::from("buf")),
+                            rest: Vec::new(),
+                        },
+                        width: None,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov byte ptr [buf], 72\n"));
+    assert!(asm.contains("  mov byte ptr [buf + 1], 105\n"));
+    assert!(asm.contains("  mov al, byte ptr [buf]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_inferred_memory_width_mismatch() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 8,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![Instruction::Assign {
+                dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+                value: AssignmentValue::Operand(Operand::Dereference {
+                    address: Address {
+                        first: AddressTerm::Ident(String::from("buf")),
+                        rest: Vec::new(),
+                    },
+                    width: None,
+                }),
+            }],
+        }],
+    };
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "Cannot use 8-bit source with 64-bit destination");
+}
+
+#[test]
+fn rejects_untyped_pointer_memory_immediate_store() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(String::from("rax")),
+                rest: Vec::new(),
+            },
+            width: None,
+        }),
+        value: AssignmentValue::Operand(Operand::Immediate(1)),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Cannot assign an immediate value directly into memory without an explicit width"
+    );
+}
+
+#[test]
+fn rejects_negative_immediate_for_inferred_unsigned_memory() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: String::from("buf"),
+            width: MemoryWidth::U8,
+            count: 8,
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![Instruction::Assign {
+                dst: AssignmentTarget::Operand(Operand::Dereference {
+                    address: Address {
+                        first: AddressTerm::Ident(String::from("buf")),
+                        rest: Vec::new(),
+                    },
+                    width: None,
+                }),
+                value: AssignmentValue::Operand(Operand::Immediate(-1)),
+            }],
+        }],
+    };
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Immediate value -1 does not fit in 8-bit destination"
+    );
+}
+
+#[test]
 fn rejects_integer_register_float_memory_load() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
@@ -1488,6 +1628,88 @@ fn emits_float_const_and_literal_arithmetic_operands() {
 }
 
 #[test]
+fn infers_plain_float_arithmetic_width_from_const() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: String::from("ratio"),
+            value: BindingValue::Float {
+                value: String::from("1.5"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::Binary {
+                op: MathOp::Add,
+                lhs: Operand::Register(String::from("xmm0")),
+                rhs: Operand::Ident(String::from("ratio")),
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  addsd xmm0, qword ptr [rip + .Lfloatval_main_ratio]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn infers_plain_float_arithmetic_width_from_memory() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::FloatScalar {
+            name: String::from("ratio"),
+            width: MemoryWidth::F32,
+            value: String::from("1.5"),
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+                    value: AssignmentValue::Binary {
+                        op: MathOp::Multiply,
+                        lhs: Operand::Register(String::from("xmm0")),
+                        rhs: Operand::Dereference {
+                            address: Address {
+                                first: AddressTerm::Ident(String::from("ratio")),
+                                rest: Vec::new(),
+                            },
+                            width: None,
+                        },
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mulss xmm0, dword ptr [ratio]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn keeps_plain_xmm_literal_arithmetic_ambiguous() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+        value: AssignmentValue::Binary {
+            op: MathOp::Multiply,
+            lhs: Operand::Register(String::from("xmm0")),
+            rhs: Operand::FloatLiteral(String::from("2.0")),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Floating-point arithmetic width is ambiguous; use f32* or f64*"
+    );
+}
+
+#[test]
 fn emits_stack_float_load_store_and_initializer() {
     let program = main_program(vec![
         Instruction::Stack {
@@ -1538,6 +1760,101 @@ fn emits_ordered_float_conditional_jump() {
     assert!(asm.contains("  jp .L.__subsea.main.fcmp_1_ordered\n"));
     assert!(asm.contains("  jb .L.main.done\n"));
     assert_assembles(&asm);
+}
+
+#[test]
+fn infers_plain_float_comparison_width_from_const() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: String::from("limit"),
+            value: BindingValue::Float {
+                value: String::from("1.5"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Jmp {
+            target: String::from(".L.main.done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("xmm0")),
+                op: CompareOp::Less,
+                rhs: Operand::Ident(String::from("limit")),
+            }),
+        },
+        Instruction::Label {
+            name: String::from(".L.main.done"),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  ucomisd xmm0, qword ptr [rip + .Lfloatval_main_limit]\n"));
+    assert!(asm.contains("  jb .L.main.done\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn infers_plain_float_comparison_width_from_memory() {
+    let program = Program {
+        entry: String::from("main"),
+        memory: vec![MemoryDeclaration::FloatScalar {
+            name: String::from("limit"),
+            width: MemoryWidth::F32,
+            value: String::from("1.5"),
+        }],
+        labels: vec![Label {
+            name: String::from("main"),
+            instructions: vec![
+                Instruction::Jmp {
+                    target: String::from(".L.main.done"),
+                    condition: Some(Condition {
+                        lhs: Operand::Register(String::from("xmm0")),
+                        op: CompareOp::LessEqual,
+                        rhs: Operand::Dereference {
+                            address: Address {
+                                first: AddressTerm::Ident(String::from("limit")),
+                                rest: Vec::new(),
+                            },
+                            width: None,
+                        },
+                    }),
+                },
+                Instruction::Label {
+                    name: String::from(".L.main.done"),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  ucomiss xmm0, dword ptr [limit]\n"));
+    assert!(asm.contains("  jbe .L.main.done\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_plain_integer_ordered_comparison_without_signedness() {
+    let program = main_program(vec![
+        Instruction::Jmp {
+            target: String::from(".L.main.done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("rax")),
+                op: CompareOp::Less,
+                rhs: Operand::Register(String::from("rbx")),
+            }),
+        },
+        Instruction::Label {
+            name: String::from(".L.main.done"),
+        },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Comparison '<' must specify signedness; use i< or u<"
+    );
 }
 
 #[test]
