@@ -1,6 +1,6 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    BitwiseUnaryOp, CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp,
+    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
     MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
     StringProperty,
 };
@@ -44,6 +44,29 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
             match instruction {
                 Instruction::Assign { dst, value } => {
                     emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
+                }
+                Instruction::AssignIf {
+                    dst,
+                    value,
+                    condition,
+                } => {
+                    conditional_jump_index += 1;
+                    let skip_label = format!(
+                        ".L.__subsea.{}.assign_if_{}_skip",
+                        label.name, conditional_jump_index
+                    );
+                    emit_condition_jump(
+                        &mut asm,
+                        &skip_label,
+                        condition,
+                        false,
+                        &strings,
+                        &label.name,
+                        &stack,
+                        conditional_jump_index,
+                    )?;
+                    emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
+                    asm.push_str(&format!("{skip_label}:\n"));
                 }
                 Instruction::Call { target } => {
                     asm.push_str(&format!("  call {target}\n"));
@@ -177,7 +200,57 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
 fn emit_conditional_jump(
     asm: &mut String,
     target: &str,
+    condition: &ConditionExpr,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
+    emit_condition_jump(
+        asm, target, condition, true, strings, label_name, stack, index,
+    )
+}
+
+fn emit_condition_jump(
+    asm: &mut String,
+    target: &str,
+    condition: &ConditionExpr,
+    jump_if_true: bool,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
+    match condition {
+        ConditionExpr::Compare(condition) => emit_compare_condition_jump(
+            asm,
+            target,
+            condition,
+            jump_if_true,
+            strings,
+            label_name,
+            stack,
+            index,
+        ),
+        ConditionExpr::BitwiseAndZero { lhs, rhs, op } => emit_test_condition_jump(
+            asm,
+            target,
+            lhs,
+            rhs,
+            *op,
+            jump_if_true,
+            strings,
+            label_name,
+            stack,
+        ),
+    }
+}
+
+fn emit_compare_condition_jump(
+    asm: &mut String,
+    target: &str,
     condition: &Condition,
+    jump_if_true: bool,
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
@@ -185,7 +258,15 @@ fn emit_conditional_jump(
 ) -> Result<(), String> {
     if let Some(width) = resolve_float_compare_width(condition, strings, label_name, stack)? {
         return emit_float_conditional_jump(
-            asm, target, condition, width, strings, label_name, stack, index,
+            asm,
+            target,
+            condition,
+            width,
+            jump_if_true,
+            strings,
+            label_name,
+            stack,
+            index,
         );
     }
 
@@ -203,8 +284,40 @@ fn emit_conditional_jump(
 
     let lhs = emit_operand(lhs, strings, label_name, stack)?;
     let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    let op = if jump_if_true {
+        op
+    } else {
+        invert_compare_op(op)
+    };
     asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
     asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
+
+    Ok(())
+}
+
+fn emit_test_condition_jump(
+    asm: &mut String,
+    target: &str,
+    lhs: &Operand,
+    rhs: &Operand,
+    op: CompareOp,
+    jump_if_true: bool,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_test_condition_operands(lhs, rhs, op, strings, label_name, stack)?;
+
+    let lhs = emit_operand(lhs, strings, label_name, stack)?;
+    let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    let jump = match (op, jump_if_true) {
+        (CompareOp::Equal, true) | (CompareOp::NotEqual, false) => "je",
+        (CompareOp::NotEqual, true) | (CompareOp::Equal, false) => "jne",
+        _ => unreachable!(),
+    };
+
+    asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+    asm.push_str(&format!("  {jump} {target}\n"));
 
     Ok(())
 }
@@ -250,6 +363,31 @@ fn reverse_compare_op(op: CompareOp) -> CompareOp {
         | CompareOp::FloatLessEqual(_)
         | CompareOp::FloatGreater(_)
         | CompareOp::FloatGreaterEqual(_) => op,
+    }
+}
+
+fn invert_compare_op(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Equal => CompareOp::NotEqual,
+        CompareOp::NotEqual => CompareOp::Equal,
+        CompareOp::Less => CompareOp::GreaterEqual,
+        CompareOp::LessEqual => CompareOp::Greater,
+        CompareOp::Greater => CompareOp::LessEqual,
+        CompareOp::GreaterEqual => CompareOp::Less,
+        CompareOp::SignedLess => CompareOp::SignedGreaterEqual,
+        CompareOp::SignedLessEqual => CompareOp::SignedGreater,
+        CompareOp::SignedGreater => CompareOp::SignedLessEqual,
+        CompareOp::SignedGreaterEqual => CompareOp::SignedLess,
+        CompareOp::UnsignedLess => CompareOp::UnsignedGreaterEqual,
+        CompareOp::UnsignedLessEqual => CompareOp::UnsignedGreater,
+        CompareOp::UnsignedGreater => CompareOp::UnsignedLessEqual,
+        CompareOp::UnsignedGreaterEqual => CompareOp::UnsignedLess,
+        CompareOp::FloatEqual(width) => CompareOp::FloatNotEqual(width),
+        CompareOp::FloatNotEqual(width) => CompareOp::FloatEqual(width),
+        CompareOp::FloatLess(width) => CompareOp::FloatGreaterEqual(width),
+        CompareOp::FloatLessEqual(width) => CompareOp::FloatGreater(width),
+        CompareOp::FloatGreater(width) => CompareOp::FloatLessEqual(width),
+        CompareOp::FloatGreaterEqual(width) => CompareOp::FloatLess(width),
     }
 }
 
@@ -480,6 +618,7 @@ fn emit_float_conditional_jump(
     target: &str,
     condition: &Condition,
     width: MemoryWidth,
+    jump_if_true: bool,
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
@@ -513,12 +652,20 @@ fn emit_float_conditional_jump(
     let ordered_label = format!(".L.__subsea.{label_name}.fcmp_{index}_ordered");
 
     asm.push_str(&format!("  {} {lhs}, {rhs}\n", float_compare_opcode(width)));
-    asm.push_str(&format!("  jp {ordered_label}\n"));
-    asm.push_str(&format!(
-        "  {} {target}\n",
-        float_compare_jump_opcode(condition.op)
-    ));
-    asm.push_str(&format!("{ordered_label}:\n"));
+    if jump_if_true {
+        asm.push_str(&format!("  jp {ordered_label}\n"));
+    } else {
+        asm.push_str(&format!("  jp {target}\n"));
+    }
+    let op = if jump_if_true {
+        condition.op
+    } else {
+        invert_compare_op(condition.op)
+    };
+    asm.push_str(&format!("  {} {target}\n", float_compare_jump_opcode(op)));
+    if jump_if_true {
+        asm.push_str(&format!("{ordered_label}:\n"));
+    }
 
     Ok(())
 }
@@ -598,6 +745,23 @@ fn validate_compare_operands(
     }
 
     Ok(())
+}
+
+fn validate_test_condition_operands(
+    lhs: &Operand,
+    rhs: &Operand,
+    op: CompareOp,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if !matches!(op, CompareOp::Equal | CompareOp::NotEqual) {
+        return Err(String::from(
+            "Bitwise-and conditions only support == 0 or != 0",
+        ));
+    }
+
+    validate_binary_operands("test", rhs, lhs, strings, label_name, stack)
 }
 
 #[derive(Clone)]
@@ -783,6 +947,22 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                     all.push(binding.clone());
                     stack_strings.insert((label.name.clone(), name.clone()), binding);
                 }
+                Instruction::AssignIf {
+                    value, condition, ..
+                } => {
+                    collect_assignment_value_float_literals(
+                        &mut floats,
+                        &mut float_literals,
+                        &label.name,
+                        value,
+                    )?;
+                    collect_condition_float_literals(
+                        &mut floats,
+                        &mut float_literals,
+                        &label.name,
+                        condition,
+                    )?;
+                }
                 Instruction::Assign {
                     value:
                         AssignmentValue::FloatBinary {
@@ -826,6 +1006,19 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         )?;
                     }
                 }
+                Instruction::Assign {
+                    value: AssignmentValue::Condition(condition),
+                    ..
+                }
+                | Instruction::Jmp {
+                    condition: Some(condition),
+                    ..
+                } => collect_condition_float_literals(
+                    &mut floats,
+                    &mut float_literals,
+                    &label.name,
+                    condition,
+                )?,
                 Instruction::Stack { width, value, .. } if width.is_float() => {
                     collect_float_literal_operand(
                         &mut floats,
@@ -834,52 +1027,6 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         *width,
                         value,
                     )?;
-                }
-                Instruction::Jmp {
-                    condition: Some(condition),
-                    ..
-                } => {
-                    if let Some(width) = float_compare_width(condition.op) {
-                        collect_float_literal_operand(
-                            &mut floats,
-                            &mut float_literals,
-                            &label.name,
-                            width,
-                            &condition.lhs,
-                        )?;
-                        collect_float_literal_operand(
-                            &mut floats,
-                            &mut float_literals,
-                            &label.name,
-                            width,
-                            &condition.rhs,
-                        )?;
-                    } else if matches!(
-                        condition.op,
-                        CompareOp::Equal
-                            | CompareOp::NotEqual
-                            | CompareOp::Less
-                            | CompareOp::LessEqual
-                            | CompareOp::Greater
-                            | CompareOp::GreaterEqual
-                    ) {
-                        for width in [MemoryWidth::F32, MemoryWidth::F64] {
-                            collect_float_literal_operand(
-                                &mut floats,
-                                &mut float_literals,
-                                &label.name,
-                                width,
-                                &condition.lhs,
-                            )?;
-                            collect_float_literal_operand(
-                                &mut floats,
-                                &mut float_literals,
-                                &label.name,
-                                width,
-                                &condition.rhs,
-                            )?;
-                        }
-                    }
                 }
                 _ => {}
             }
@@ -897,6 +1044,80 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         integers,
         stack_strings,
     })
+}
+
+fn collect_assignment_value_float_literals(
+    floats: &mut Vec<FloatBinding>,
+    float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,
+    label_name: &str,
+    value: &AssignmentValue,
+) -> Result<(), String> {
+    match value {
+        AssignmentValue::FloatBinary {
+            width, lhs, rhs, ..
+        } => {
+            collect_float_literal_operand(floats, float_literals, label_name, *width, lhs)?;
+            collect_float_literal_operand(floats, float_literals, label_name, *width, rhs)?;
+        }
+        AssignmentValue::Binary { lhs, rhs, .. } => {
+            for width in [MemoryWidth::F32, MemoryWidth::F64] {
+                collect_float_literal_operand(floats, float_literals, label_name, width, lhs)?;
+                collect_float_literal_operand(floats, float_literals, label_name, width, rhs)?;
+            }
+        }
+        AssignmentValue::Condition(condition) => {
+            collect_condition_float_literals(floats, float_literals, label_name, condition)?;
+        }
+        AssignmentValue::Operand(_)
+        | AssignmentValue::BitwiseUnary { .. }
+        | AssignmentValue::WideMultiply { .. }
+        | AssignmentValue::WideDivide { .. } => {}
+    }
+
+    Ok(())
+}
+
+fn collect_condition_float_literals(
+    floats: &mut Vec<FloatBinding>,
+    float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,
+    label_name: &str,
+    condition: &ConditionExpr,
+) -> Result<(), String> {
+    let ConditionExpr::Compare(condition) = condition else {
+        return Ok(());
+    };
+
+    if let Some(width) = float_compare_width(condition.op) {
+        collect_float_literal_operand(floats, float_literals, label_name, width, &condition.lhs)?;
+        collect_float_literal_operand(floats, float_literals, label_name, width, &condition.rhs)?;
+    } else if matches!(
+        condition.op,
+        CompareOp::Equal
+            | CompareOp::NotEqual
+            | CompareOp::Less
+            | CompareOp::LessEqual
+            | CompareOp::Greater
+            | CompareOp::GreaterEqual
+    ) {
+        for width in [MemoryWidth::F32, MemoryWidth::F64] {
+            collect_float_literal_operand(
+                floats,
+                float_literals,
+                label_name,
+                width,
+                &condition.lhs,
+            )?;
+            collect_float_literal_operand(
+                floats,
+                float_literals,
+                label_name,
+                width,
+                &condition.rhs,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_float_literal_operand(
@@ -1806,6 +2027,10 @@ fn emit_assignment(
             emit_copy_instruction(asm, operand, dst, strings, label_name, stack)?;
             emit_bitwise_unary_instruction(asm, *op, dst, strings, label_name, stack)
         }
+        AssignmentValue::Condition(condition) => {
+            let dst = assignment_operand_target(dst)?;
+            emit_boolean_condition_assignment(asm, dst, condition, strings, label_name, stack)
+        }
         AssignmentValue::Binary { op, lhs, rhs } => {
             let dst = assignment_operand_target(dst)?;
 
@@ -1897,6 +2122,130 @@ fn emit_assignment(
         AssignmentValue::WideDivide { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, true, lhs, rhs, strings, label_name, stack,
         ),
+    }
+}
+
+fn emit_boolean_condition_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    condition: &ConditionExpr,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let set_opcode = emit_condition_for_setcc(asm, condition, strings, label_name, stack)?;
+    emit_setcc_result(asm, set_opcode, dst, strings, label_name, stack)
+}
+
+fn emit_condition_for_setcc(
+    asm: &mut String,
+    condition: &ConditionExpr,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<&'static str, String> {
+    match condition {
+        ConditionExpr::Compare(condition) => {
+            if resolve_float_compare_width(condition, strings, label_name, stack)?.is_some() {
+                return Err(String::from(
+                    "Boolean assignment does not support floating-point comparisons yet",
+                ));
+            }
+
+            let (lhs, rhs, op) = normalize_compare(
+                &condition.lhs,
+                &condition.rhs,
+                condition.op,
+                strings,
+                label_name,
+                stack,
+            )?;
+            validate_resolved_integer_compare_op(op)?;
+            validate_compare_operands(lhs, rhs, strings, label_name, stack)?;
+
+            let lhs = emit_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_operand(rhs, strings, label_name, stack)?;
+            asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+
+            Ok(compare_set_opcode(op))
+        }
+        ConditionExpr::BitwiseAndZero { lhs, rhs, op } => {
+            validate_test_condition_operands(lhs, rhs, *op, strings, label_name, stack)?;
+
+            let lhs = emit_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_operand(rhs, strings, label_name, stack)?;
+            asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+
+            Ok(match op {
+                CompareOp::Equal => "sete",
+                CompareOp::NotEqual => "setne",
+                _ => unreachable!(),
+            })
+        }
+    }
+}
+
+fn emit_setcc_result(
+    asm: &mut String,
+    set_opcode: &str,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_boolean_assignment_destination(dst, strings, stack)?;
+
+    if let Operand::Register(register) = dst
+        && register_width(register) == Some(Width::Bits8)
+    {
+        asm.push_str(&format!("  {set_opcode} {register}\n"));
+        return Ok(());
+    }
+
+    let temp = boolean_temp_register(dst)?;
+    asm.push_str(&format!("  {set_opcode} {}b\n", temp));
+
+    match destination_width(dst, strings, stack)? {
+        Some(ImmediateDestination::Register(width)) => {
+            let dst = emit_operand(dst, strings, label_name, stack)?;
+            asm.push_str(&format!("  movzx {dst}, {}b\n", temp));
+            validate_boolean_movzx_width(width)?;
+        }
+        Some(ImmediateDestination::Memory(width)) => {
+            let dst = emit_operand(dst, strings, label_name, stack)?;
+            let temp_src = temp_register_for_memory_width(temp, width)?;
+            if memory_width_bits(width) != Width::Bits8 {
+                asm.push_str(&format!("  movzx {temp}, {}b\n", temp));
+            }
+            asm.push_str(&format!("  mov {dst}, {temp_src}\n"));
+        }
+        None => unreachable!(),
+    }
+
+    Ok(())
+}
+
+fn compare_set_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equal => "sete",
+        CompareOp::NotEqual => "setne",
+        CompareOp::SignedLess => "setl",
+        CompareOp::SignedLessEqual => "setle",
+        CompareOp::SignedGreater => "setg",
+        CompareOp::SignedGreaterEqual => "setge",
+        CompareOp::UnsignedLess => "setb",
+        CompareOp::UnsignedLessEqual => "setbe",
+        CompareOp::UnsignedGreater => "seta",
+        CompareOp::UnsignedGreaterEqual => "setae",
+        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
+            unreachable!()
+        }
+        CompareOp::FloatEqual(_)
+        | CompareOp::FloatNotEqual(_)
+        | CompareOp::FloatLess(_)
+        | CompareOp::FloatLessEqual(_)
+        | CompareOp::FloatGreater(_)
+        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
     }
 }
 
@@ -2413,6 +2762,71 @@ fn validate_shift_operands(
         )),
         _ => Err(format!("{opcode} count must be an immediate value or cl")),
     }
+}
+
+fn validate_boolean_assignment_destination(
+    dst: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(
+        dst,
+        Operand::Immediate(_)
+            | Operand::Pointer(_)
+            | Operand::StringProperty { .. }
+            | Operand::FloatLiteral(_)
+    ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
+    {
+        return Err(String::from(
+            "Boolean assignment destination must be a register or integer memory operand",
+        ));
+    }
+
+    if operand_uses_xmm_register(dst) || is_float_memory_operand(dst, strings, stack)? {
+        return Err(String::from(
+            "Boolean assignment destination must be an integer register or memory operand",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_boolean_movzx_width(width: Width) -> Result<(), String> {
+    match width {
+        Width::Bits8 => Err(String::from(
+            "Internal error: 8-bit boolean register destination should use setcc directly",
+        )),
+        Width::Bits16 | Width::Bits32 | Width::Bits64 => Ok(()),
+    }
+}
+
+fn boolean_temp_register(dst: &Operand) -> Result<&'static str, String> {
+    if !operand_address_uses_register_family(dst, "r10") {
+        Ok("r10")
+    } else if !operand_address_uses_register_family(dst, "r11") {
+        Ok("r11")
+    } else {
+        Err(String::from(
+            "Boolean assignment destination address cannot use both r10 and r11",
+        ))
+    }
+}
+
+fn temp_register_for_memory_width(temp: &str, width: MemoryWidth) -> Result<String, String> {
+    let suffix = match memory_width_bits(width) {
+        Width::Bits8 => "b",
+        Width::Bits16 => "w",
+        Width::Bits32 => "d",
+        Width::Bits64 => "",
+    };
+
+    if width.is_float() {
+        return Err(String::from(
+            "Boolean assignment destination must be integer memory",
+        ));
+    }
+
+    Ok(format!("{temp}{suffix}"))
 }
 
 fn validate_bitwise_unary_operand(

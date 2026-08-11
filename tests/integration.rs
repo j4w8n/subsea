@@ -80,6 +80,18 @@ fn stack_string_initialization_preserves_r10() {
 }
 
 #[test]
+fn compiles_and_runs_condition_features() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/conditions.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n9\n0\n");
+}
+
+#[test]
 fn help_exits_successfully() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

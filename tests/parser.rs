@@ -1,7 +1,7 @@
 use subsea::ast::{
-    AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, FloatMathOp,
-    Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, ReadSource,
-    StringInitializer, StringProperty,
+    AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
+    FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
+    ReadSource, StringInitializer, StringProperty,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -12,6 +12,10 @@ fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
 
 fn s(value: &str) -> String {
     value.to_string()
+}
+
+fn cmp(condition: Condition) -> ConditionExpr {
+    ConditionExpr::Compare(condition)
 }
 
 fn tid(value: &str) -> Token {
@@ -443,6 +447,90 @@ fn parses_arithmetic_shift_right_assignment() {
 }
 
 #[test]
+fn parses_boolean_comparison_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("rdi"),
+        Token::ILess,
+        treg("rsi"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Condition(cmp(Condition {
+                lhs: reg("rdi"),
+                op: CompareOp::SignedLess,
+                rhs: reg("rsi"),
+            })),
+        }
+    );
+}
+
+#[test]
+fn parses_conditional_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("rbx"),
+        Token::If,
+        treg("rcx"),
+        Token::EqualsEquals,
+        tnum("0"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::AssignIf {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(reg("rbx")),
+            condition: cmp(Condition {
+                lhs: reg("rcx"),
+                op: CompareOp::Equal,
+                rhs: Operand::Immediate(0),
+            }),
+        }
+    );
+}
+
+#[test]
+fn parses_bitwise_and_zero_condition() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        tlocal("set"),
+        Token::If,
+        treg("rax"),
+        Token::Ampersand,
+        tnum("8"),
+        Token::NotEquals,
+        tnum("0"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Jmp {
+            target: s(".L.main.set"),
+            condition: Some(ConditionExpr::BitwiseAndZero {
+                lhs: reg("rax"),
+                rhs: Operand::Immediate(8),
+                op: CompareOp::NotEqual,
+            }),
+        }
+    );
+}
+
+#[test]
 fn parses_widened_multiply_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
@@ -592,11 +680,11 @@ fn parses_conditional_jump() {
         program.labels[0].instructions,
         vec![Instruction::Jmp {
             target: s("done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
                 rhs: reg("rbx"),
-            }),
+            })),
         }]
     );
 }
@@ -619,11 +707,11 @@ fn parses_signed_conditional_jump() {
         program.labels[0].instructions,
         vec![Instruction::Jmp {
             target: s("negative"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::SignedLess,
                 rhs: Operand::Immediate(0),
-            }),
+            })),
         }]
     );
 }
@@ -646,11 +734,11 @@ fn parses_conditional_jump_without_resolved_signedness() {
         program.labels[0].instructions,
         vec![Instruction::Jmp {
             target: s("done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Less,
                 rhs: reg("rbx"),
-            }),
+            })),
         }]
     );
 }
@@ -839,11 +927,11 @@ fn parses_float_conditional_jump() {
         program.labels[0].instructions,
         vec![Instruction::Jmp {
             target: s("done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
                 rhs: Operand::FloatLiteral(s("1.5")),
-            }),
+            })),
         }]
     );
 }

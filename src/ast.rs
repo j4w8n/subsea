@@ -36,6 +36,11 @@ pub enum Instruction {
         dst: AssignmentTarget,
         value: AssignmentValue,
     },
+    AssignIf {
+        dst: AssignmentTarget,
+        value: AssignmentValue,
+        condition: ConditionExpr,
+    },
     Call {
         target: String,
     },
@@ -44,7 +49,7 @@ pub enum Instruction {
     },
     Jmp {
         target: String,
-        condition: Option<Condition>,
+        condition: Option<ConditionExpr>,
     },
     Label {
         name: String,
@@ -85,7 +90,7 @@ impl Instruction {
         let mut operands = Vec::new();
 
         match self {
-            Instruction::Assign { dst, value } => {
+            Instruction::Assign { dst, value } | Instruction::AssignIf { dst, value, .. } => {
                 if let AssignmentTarget::Operand(operand) = dst {
                     operands.push(operand);
                 }
@@ -94,15 +99,27 @@ impl Instruction {
                     AssignmentValue::Operand(operand) => operands.push(operand),
                     AssignmentValue::BitwiseUnary { operand, .. } => operands.push(operand),
                     AssignmentValue::Binary { lhs, rhs, .. }
+                    | AssignmentValue::Condition(ConditionExpr::Compare(Condition {
+                        lhs,
+                        rhs,
+                        ..
+                    }))
+                    | AssignmentValue::Condition(ConditionExpr::BitwiseAndZero {
+                        lhs, rhs, ..
+                    })
                     | AssignmentValue::FloatBinary { lhs, rhs, .. }
                     | AssignmentValue::WideMultiply { lhs, rhs, .. }
                     | AssignmentValue::WideDivide { lhs, rhs, .. } => operands.extend([lhs, rhs]),
+                }
+
+                if let Instruction::AssignIf { condition, .. } = self {
+                    operands.extend(condition.operands());
                 }
             }
             Instruction::Jmp {
                 condition: Some(condition),
                 ..
-            } => operands.extend([&condition.lhs, &condition.rhs]),
+            } => operands.extend(condition.operands()),
             Instruction::Print { parts } => {
                 operands.extend(parts.iter().filter_map(|part| match part {
                     PrintPart::Operand(operand) => Some(operand),
@@ -140,6 +157,25 @@ pub struct Condition {
     pub lhs: Operand,
     pub op: CompareOp,
     pub rhs: Operand,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ConditionExpr {
+    Compare(Condition),
+    BitwiseAndZero {
+        lhs: Operand,
+        rhs: Operand,
+        op: CompareOp,
+    },
+}
+
+impl ConditionExpr {
+    pub fn operands(&self) -> Vec<&Operand> {
+        match self {
+            Self::Compare(condition) => vec![&condition.lhs, &condition.rhs],
+            Self::BitwiseAndZero { lhs, rhs, .. } => vec![lhs, rhs],
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -184,6 +220,7 @@ pub enum AssignmentValue {
         op: BitwiseUnaryOp,
         operand: Operand,
     },
+    Condition(ConditionExpr),
     FloatBinary {
         width: MemoryWidth,
         op: FloatMathOp,

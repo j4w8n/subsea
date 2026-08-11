@@ -2,13 +2,17 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    Program, ReadSource, StringInitializer, StringProperty,
+    ConditionExpr, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
+    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
 fn s(value: &str) -> String {
     value.to_string()
+}
+
+fn cmp(condition: Condition) -> ConditionExpr {
+    ConditionExpr::Compare(condition)
 }
 
 fn ident(value: &str) -> Operand {
@@ -711,6 +715,83 @@ fn rejects_shift_count_other_than_immediate_or_cl() {
 }
 
 #[test]
+fn emits_boolean_comparison_assignment() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Condition(cmp(Condition {
+            lhs: reg("rdi"),
+            op: CompareOp::SignedLess,
+            rhs: reg("rsi"),
+        })),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cmp rdi, rsi\n"));
+    assert!(asm.contains("  setl r10b\n"));
+    assert!(asm.contains("  movzx rax, r10b\n"));
+}
+
+#[test]
+fn emits_boolean_bitwise_and_zero_assignment() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("al")),
+        value: AssignmentValue::Condition(ConditionExpr::BitwiseAndZero {
+            lhs: reg("rax"),
+            rhs: Operand::Immediate(8),
+            op: CompareOp::NotEqual,
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  test rax, 8\n"));
+    assert!(asm.contains("  setne al\n"));
+}
+
+#[test]
+fn emits_conditional_assignment_with_jump_around() {
+    let program = main_program(vec![Instruction::AssignIf {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Operand(reg("rbx")),
+        condition: cmp(Condition {
+            lhs: reg("rcx"),
+            op: CompareOp::Equal,
+            rhs: Operand::Immediate(0),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cmp rcx, 0\n"));
+    assert!(asm.contains("  jne .L.__subsea.main.assign_if_1_skip\n"));
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains(".L.__subsea.main.assign_if_1_skip:\n"));
+}
+
+#[test]
+fn emits_bitwise_and_zero_jump_as_test() {
+    let program = main_program(vec![
+        Instruction::Jmp {
+            target: s(".L.main.set"),
+            condition: Some(ConditionExpr::BitwiseAndZero {
+                lhs: reg("rax"),
+                rhs: Operand::Immediate(8),
+                op: CompareOp::NotEqual,
+            }),
+        },
+        Instruction::Label {
+            name: s(".L.main.set"),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  test rax, 8\n"));
+    assert!(asm.contains("  jne .L.main.set\n"));
+}
+
+#[test]
 fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
@@ -1064,11 +1145,11 @@ fn rejects_local_label_with_conflicting_manual_stack_depths() {
     let program = main_program(vec![
         Instruction::Jmp {
             target: s(".L.main.join"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Equal,
                 rhs: Operand::Immediate(0),
-            }),
+            })),
         },
         Instruction::Push { src: reg("rax") },
         Instruction::Label {
@@ -1107,11 +1188,11 @@ fn emits_signed_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
             target: s(".L.main.done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::SignedLess,
                 rhs: Operand::Immediate(0),
-            }),
+            })),
         },
         Instruction::Label {
             name: s(".L.main.done"),
@@ -1131,11 +1212,11 @@ fn emits_unsigned_conditional_jump() {
         },
         Instruction::Jmp {
             target: s(".L.main.loop"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
                 rhs: reg("rbx"),
-            }),
+            })),
         },
     ]);
 
@@ -1801,11 +1882,11 @@ fn emits_ordered_float_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
             target: s(".L.main.done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
                 rhs: float("1.5"),
-            }),
+            })),
         },
         Instruction::Label {
             name: s(".L.main.done"),
@@ -1833,11 +1914,11 @@ fn infers_plain_float_comparison_width_from_const() {
         },
         Instruction::Jmp {
             target: s(".L.main.done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::Less,
                 rhs: ident("limit"),
-            }),
+            })),
         },
         Instruction::Label {
             name: s(".L.main.done"),
@@ -1865,11 +1946,11 @@ fn infers_plain_float_comparison_width_from_memory() {
             instructions: vec![
                 Instruction::Jmp {
                     target: s(".L.main.done"),
-                    condition: Some(Condition {
+                    condition: Some(cmp(Condition {
                         lhs: reg("xmm0"),
                         op: CompareOp::LessEqual,
                         rhs: deref_ident("limit", None),
-                    }),
+                    })),
                 },
                 Instruction::Label {
                     name: s(".L.main.done"),
@@ -1891,11 +1972,11 @@ fn rejects_plain_integer_ordered_comparison_without_signedness() {
     let program = main_program(vec![
         Instruction::Jmp {
             target: s(".L.main.done"),
-            condition: Some(Condition {
+            condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Less,
                 rhs: reg("rbx"),
-            }),
+            })),
         },
         Instruction::Label {
             name: s(".L.main.done"),

@@ -1,7 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
+    CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -327,18 +328,55 @@ impl Parser {
         }
     }
 
-    fn parse_optional_jump_condition(&mut self) -> Result<Option<Condition>, String> {
+    fn parse_optional_jump_condition(&mut self) -> Result<Option<ConditionExpr>, String> {
         if !matches!(self.peek(), Some(Token::If)) {
             return Ok(None);
         }
 
         self.advance();
+        self.parse_condition_expr().map(Some)
+    }
 
+    fn parse_optional_assignment_condition(&mut self) -> Result<Option<ConditionExpr>, String> {
+        if !matches!(self.peek(), Some(Token::If)) {
+            return Ok(None);
+        }
+
+        self.advance();
+        self.parse_condition_expr().map(Some)
+    }
+
+    fn parse_condition_expr(&mut self) -> Result<ConditionExpr, String> {
         let lhs = self.parse_operand()?;
+        self.parse_condition_expr_after_lhs(lhs)
+    }
+
+    fn parse_condition_expr_after_lhs(&mut self, lhs: Operand) -> Result<ConditionExpr, String> {
+        if matches!(self.peek(), Some(Token::Ampersand)) {
+            self.advance();
+            let rhs = self.parse_operand()?;
+            let op = self.parse_compare_op()?;
+            let zero = self.parse_operand()?;
+
+            if !matches!(op, CompareOp::Equal | CompareOp::NotEqual) {
+                return Err(String::from(
+                    "Bitwise-and conditions only support == 0 or != 0",
+                ));
+            }
+
+            if zero != Operand::Immediate(0) {
+                return Err(String::from(
+                    "Bitwise-and conditions must compare against 0",
+                ));
+            }
+
+            return Ok(ConditionExpr::BitwiseAndZero { lhs, rhs, op });
+        }
+
         let op = self.parse_compare_op()?;
         let rhs = self.parse_operand()?;
 
-        Ok(Some(Condition { lhs, op, rhs }))
+        Ok(ConditionExpr::Compare(Condition { lhs, op, rhs }))
     }
 
     fn parse_compare_op(&mut self) -> Result<CompareOp, String> {
@@ -369,35 +407,72 @@ impl Parser {
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
-        if matches!(self.peek(), Some(Token::Tilde)) {
+        let value = if matches!(self.peek(), Some(Token::Tilde)) {
             self.advance();
             let operand = self.parse_operand()?;
-            return Ok(Instruction::Assign {
-                dst,
-                value: AssignmentValue::BitwiseUnary {
-                    op: crate::ast::BitwiseUnaryOp::Not,
-                    operand,
-                },
-            });
-        }
+            AssignmentValue::BitwiseUnary {
+                op: crate::ast::BitwiseUnaryOp::Not,
+                operand,
+            }
+        } else {
+            let lhs = self.parse_operand()?;
+            match self.peek().and_then(assignment_op) {
+                Some(AssignmentOp::UnsupportedDivision) => {
+                    self.advance();
+                    return Err(String::from(
+                        "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
+                    ));
+                }
+                Some(AssignmentOp::Binary(MathOp::BitAnd)) => {
+                    self.advance();
+                    let rhs = self.parse_operand()?;
 
-        let lhs = self.parse_operand()?;
-        let value = match self.peek().and_then(assignment_op) {
-            Some(AssignmentOp::UnsupportedDivision) => {
-                self.advance();
-                return Err(String::from(
-                    "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
-                ));
+                    if self.peek().and_then(compare_op).is_some() {
+                        let op = self.parse_compare_op()?;
+                        let zero = self.parse_operand()?;
+
+                        if !matches!(op, CompareOp::Equal | CompareOp::NotEqual) {
+                            return Err(String::from(
+                                "Bitwise-and conditions only support == 0 or != 0",
+                            ));
+                        }
+
+                        if zero != Operand::Immediate(0) {
+                            return Err(String::from(
+                                "Bitwise-and conditions must compare against 0",
+                            ));
+                        }
+
+                        AssignmentValue::Condition(ConditionExpr::BitwiseAndZero { lhs, rhs, op })
+                    } else {
+                        AssignmentValue::Binary {
+                            op: MathOp::BitAnd,
+                            lhs,
+                            rhs,
+                        }
+                    }
+                }
+                Some(op) => {
+                    self.advance();
+                    let rhs = self.parse_operand()?;
+                    assignment_value(op, lhs, rhs)
+                }
+                _ if self.peek().and_then(compare_op).is_some() => {
+                    AssignmentValue::Condition(self.parse_condition_expr_after_lhs(lhs)?)
+                }
+                _ => AssignmentValue::Operand(lhs),
             }
-            Some(op) => {
-                self.advance();
-                let rhs = self.parse_operand()?;
-                assignment_value(op, lhs, rhs)
-            }
-            _ => AssignmentValue::Operand(lhs),
         };
 
-        Ok(Instruction::Assign { dst, value })
+        if let Some(condition) = self.parse_optional_assignment_condition()? {
+            Ok(Instruction::AssignIf {
+                dst,
+                value,
+                condition,
+            })
+        } else {
+            Ok(Instruction::Assign { dst, value })
+        }
     }
 
     fn parse_print_literal(&mut self, value: String) -> Result<Instruction, String> {
