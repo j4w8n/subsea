@@ -700,7 +700,7 @@ fn parses_float_memory_scalar_declaration() {
 }
 
 #[test]
-fn rejects_float_literal_as_operand() {
+fn parses_float_literal_as_operand() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
         Token::Register(String::from("rax")),
@@ -708,11 +708,65 @@ fn rejects_float_literal_as_operand() {
         Token::FloatLiteral(String::from("1.5")),
     ]);
 
-    let error = parse(finish_label(tokens)).unwrap_err();
+    let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
-        error,
-        "Float literal 1.5 is only supported in typed const and mem initializers for now"
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+            value: AssignmentValue::Operand(Operand::FloatLiteral(String::from("1.5"))),
+        }
+    );
+}
+
+#[test]
+fn parses_stack_float_declaration() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        Token::Ident(String::from("ratio")),
+        Token::Colon,
+        Token::Ident(String::from("f64")),
+        Token::Equals,
+        Token::FloatLiteral(String::from("1.5")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Stack {
+            name: String::from("ratio"),
+            width: MemoryWidth::F64,
+            value: Operand::FloatLiteral(String::from("1.5")),
+        }]
+    );
+}
+
+#[test]
+fn parses_float_conditional_jump() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        Token::Ident(String::from("done")),
+        Token::If,
+        Token::Register(String::from("xmm0")),
+        Token::F64Less,
+        Token::FloatLiteral(String::from("1.5")),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Jmp {
+            target: String::from("done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("xmm0")),
+                op: CompareOp::FloatLess(MemoryWidth::F64),
+                rhs: Operand::FloatLiteral(String::from("1.5")),
+            }),
+        }]
     );
 }
 

@@ -1449,6 +1449,110 @@ fn emits_xmm_float_memory_arithmetic() {
 }
 
 #[test]
+fn emits_float_const_and_literal_arithmetic_operands() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: String::from("ratio"),
+            value: BindingValue::Float {
+                value: String::from("1.5"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F64,
+                op: FloatMathOp::Add,
+                lhs: Operand::Register(String::from("xmm0")),
+                rhs: Operand::Ident(String::from("ratio")),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F64,
+                op: FloatMathOp::Multiply,
+                lhs: Operand::Register(String::from("xmm0")),
+                rhs: Operand::FloatLiteral(String::from("2.0")),
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloatval_main_ratio:\n  .double 1.5\n"));
+    assert!(asm.contains(".Lfloatlit_main_2:\n  .double 2.0\n"));
+    assert!(asm.contains("  addsd xmm0, qword ptr [rip + .Lfloatval_main_ratio]\n"));
+    assert!(asm.contains("  mulsd xmm0, qword ptr [rip + .Lfloatlit_main_2]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_stack_float_load_store_and_initializer() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: String::from("ratio"),
+            width: MemoryWidth::F64,
+            value: Operand::FloatLiteral(String::from("1.5")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Register(String::from("xmm0"))),
+            value: AssignmentValue::Operand(Operand::Ident(String::from("ratio"))),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Ident(String::from("ratio"))),
+            value: AssignmentValue::Operand(Operand::Register(String::from("xmm0"))),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloatlit_main_1:\n  .double 1.5\n"));
+    assert!(asm.contains("  mov rax, qword ptr [rip + .Lfloatlit_main_1]\n"));
+    assert!(asm.contains("  mov qword ptr [rbp - 8], rax\n"));
+    assert!(asm.contains("  movsd xmm0, qword ptr [rbp - 8]\n"));
+    assert!(asm.contains("  movsd qword ptr [rbp - 8], xmm0\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_ordered_float_conditional_jump() {
+    let program = main_program(vec![
+        Instruction::Jmp {
+            target: String::from(".L.main.done"),
+            condition: Some(Condition {
+                lhs: Operand::Register(String::from("xmm0")),
+                op: CompareOp::FloatLess(MemoryWidth::F64),
+                rhs: Operand::FloatLiteral(String::from("1.5")),
+            }),
+        },
+        Instruction::Label {
+            name: String::from(".L.main.done"),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloatlit_main_1:\n  .double 1.5\n"));
+    assert!(asm.contains("  ucomisd xmm0, qword ptr [rip + .Lfloatlit_main_1]\n"));
+    assert!(asm.contains("  jp .L.__subsea.main.fcmp_1_ordered\n"));
+    assert!(asm.contains("  jb .L.main.done\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_float_literal_without_float_width_context() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),
+        value: AssignmentValue::Operand(Operand::FloatLiteral(String::from("1.5"))),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "mov cannot use floating-point literal operands");
+}
+
+#[test]
 fn rejects_float_arithmetic_to_integer_register() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(Operand::Register(String::from("rax"))),

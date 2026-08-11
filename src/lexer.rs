@@ -195,6 +195,42 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     chars.next();
                     Some(Token::F32Plus)
                 }
+                "f32" if matches!(chars.peek(), Some('=')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F32EqualsEquals)
+                    } else {
+                        Some(Token::Ident(s))
+                    }
+                }
+                "f32" if matches!(chars.peek(), Some('!')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F32NotEquals)
+                    } else {
+                        Some(Token::Ident(s))
+                    }
+                }
+                "f32" if matches!(chars.peek(), Some('<')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F32LessEquals)
+                    } else {
+                        Some(Token::F32Less)
+                    }
+                }
+                "f32" if matches!(chars.peek(), Some('>')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F32GreaterEquals)
+                    } else {
+                        Some(Token::F32Greater)
+                    }
+                }
                 "f32" if matches!(chars.peek(), Some('-')) => {
                     chars.next();
                     Some(Token::F32Minus)
@@ -210,6 +246,42 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "f64" if matches!(chars.peek(), Some('+')) => {
                     chars.next();
                     Some(Token::F64Plus)
+                }
+                "f64" if matches!(chars.peek(), Some('=')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F64EqualsEquals)
+                    } else {
+                        Some(Token::Ident(s))
+                    }
+                }
+                "f64" if matches!(chars.peek(), Some('!')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F64NotEquals)
+                    } else {
+                        Some(Token::Ident(s))
+                    }
+                }
+                "f64" if matches!(chars.peek(), Some('<')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F64LessEquals)
+                    } else {
+                        Some(Token::F64Less)
+                    }
+                }
+                "f64" if matches!(chars.peek(), Some('>')) => {
+                    chars.next();
+                    if chars.peek() == Some(&'=') {
+                        chars.next();
+                        Some(Token::F64GreaterEquals)
+                    } else {
+                        Some(Token::F64Greater)
+                    }
                 }
                 "f64" if matches!(chars.peek(), Some('-')) => {
                     chars.next();

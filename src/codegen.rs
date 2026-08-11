@@ -13,7 +13,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     asm.push_str(".intel_syntax noprefix\n");
     emit_data(&mut asm, &program.memory);
     emit_bss(&mut asm, &program.memory);
-    emit_rodata(&mut asm, &strings.all);
+    emit_rodata(&mut asm, &strings.all, &strings.floats);
     asm.push_str(".section .text\n");
     asm.push_str(".global _start\n\n");
     asm.push_str("_start:\n");
@@ -37,6 +37,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
         }
 
         let mut runtime_print_index = 0;
+        let mut conditional_jump_index = 0;
 
         for instruction in &label.instructions {
             match instruction {
@@ -53,6 +54,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                 }
                 Instruction::Jmp { target, condition } => {
                     if let Some(condition) = condition {
+                        conditional_jump_index += 1;
                         emit_conditional_jump(
                             &mut asm,
                             target,
@@ -60,6 +62,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                             &strings,
                             &label.name,
                             &stack,
+                            conditional_jump_index,
                         )?;
                     } else {
                         asm.push_str(&format!("  jmp {target}\n"));
@@ -177,7 +180,14 @@ fn emit_conditional_jump(
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
+    index: usize,
 ) -> Result<(), String> {
+    if let Some(width) = float_compare_width(condition.op) {
+        return emit_float_conditional_jump(
+            asm, target, condition, width, strings, label_name, stack, index,
+        );
+    }
+
     let (lhs, rhs, op) = normalize_compare(
         &condition.lhs,
         &condition.rhs,
@@ -228,6 +238,12 @@ fn reverse_compare_op(op: CompareOp) -> CompareOp {
         CompareOp::UnsignedLessEqual => CompareOp::UnsignedGreaterEqual,
         CompareOp::UnsignedGreater => CompareOp::UnsignedLess,
         CompareOp::UnsignedGreaterEqual => CompareOp::UnsignedLessEqual,
+        CompareOp::FloatEqual(_)
+        | CompareOp::FloatNotEqual(_)
+        | CompareOp::FloatLess(_)
+        | CompareOp::FloatLessEqual(_)
+        | CompareOp::FloatGreater(_)
+        | CompareOp::FloatGreaterEqual(_) => op,
     }
 }
 
@@ -243,6 +259,92 @@ fn compare_jump_opcode(op: CompareOp) -> &'static str {
         CompareOp::UnsignedLessEqual => "jbe",
         CompareOp::UnsignedGreater => "ja",
         CompareOp::UnsignedGreaterEqual => "jae",
+        CompareOp::FloatEqual(_)
+        | CompareOp::FloatNotEqual(_)
+        | CompareOp::FloatLess(_)
+        | CompareOp::FloatLessEqual(_)
+        | CompareOp::FloatGreater(_)
+        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
+    }
+}
+
+fn float_compare_width(op: CompareOp) -> Option<MemoryWidth> {
+    match op {
+        CompareOp::FloatEqual(width)
+        | CompareOp::FloatNotEqual(width)
+        | CompareOp::FloatLess(width)
+        | CompareOp::FloatLessEqual(width)
+        | CompareOp::FloatGreater(width)
+        | CompareOp::FloatGreaterEqual(width) => Some(width),
+        _ => None,
+    }
+}
+
+fn emit_float_conditional_jump(
+    asm: &mut String,
+    target: &str,
+    condition: &Condition,
+    width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
+    validate_float_math_operand(
+        "Floating-point comparison left operand",
+        &condition.lhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_float_math_operand(
+        "Floating-point comparison right operand",
+        &condition.rhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    if is_memory_operand(&condition.lhs, stack) && is_memory_operand(&condition.rhs, stack) {
+        return Err(String::from(
+            "Floating-point comparison cannot use memory for both operands",
+        ));
+    }
+
+    let lhs = emit_float_operand(&condition.lhs, width, strings, label_name, stack)?;
+    let rhs = emit_float_operand(&condition.rhs, width, strings, label_name, stack)?;
+    let ordered_label = format!(".L.__subsea.{label_name}.fcmp_{index}_ordered");
+
+    asm.push_str(&format!("  {} {lhs}, {rhs}\n", float_compare_opcode(width)));
+    asm.push_str(&format!("  jp {ordered_label}\n"));
+    asm.push_str(&format!(
+        "  {} {target}\n",
+        float_compare_jump_opcode(condition.op)
+    ));
+    asm.push_str(&format!("{ordered_label}:\n"));
+
+    Ok(())
+}
+
+fn float_compare_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "ucomiss",
+        MemoryWidth::F64 => "ucomisd",
+        _ => unreachable!(),
+    }
+}
+
+fn float_compare_jump_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::FloatEqual(_) => "je",
+        CompareOp::FloatNotEqual(_) => "jne",
+        CompareOp::FloatLess(_) => "jb",
+        CompareOp::FloatLessEqual(_) => "jbe",
+        CompareOp::FloatGreater(_) => "ja",
+        CompareOp::FloatGreaterEqual(_) => "jae",
+        _ => unreachable!(),
     }
 }
 
@@ -255,8 +357,8 @@ fn validate_compare_operands(
 ) -> Result<(), String> {
     if operand_uses_xmm_register(lhs)
         || operand_uses_xmm_register(rhs)
-        || is_float_memory_operand(lhs)
-        || is_float_memory_operand(rhs)
+        || is_float_memory_operand(lhs, stack)
+        || is_float_memory_operand(rhs, stack)
     {
         return Err(String::from(
             "Floating-point operands cannot be compared yet",
@@ -311,6 +413,9 @@ struct StringBinding {
 struct StringTable {
     all: Vec<StringBinding>,
     bindings: HashMap<(String, String), StringBinding>,
+    float_bindings: HashMap<(String, String), FloatBinding>,
+    float_literals: HashMap<(String, MemoryWidth, String), FloatBinding>,
+    floats: Vec<FloatBinding>,
     literals: HashMap<(String, usize), StringBinding>,
     integers: HashMap<(String, String), IntegerBinding>,
     stack_strings: HashMap<(String, String), StringBinding>,
@@ -384,9 +489,19 @@ struct IntegerBinding {
     value: i128,
 }
 
+#[derive(Clone)]
+struct FloatBinding {
+    asm_label: String,
+    value: String,
+    width: MemoryWidth,
+}
+
 fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     let mut all = Vec::new();
     let mut bindings = HashMap::new();
+    let mut float_bindings = HashMap::new();
+    let mut float_literals = HashMap::new();
+    let mut floats = Vec::new();
     let mut integers = HashMap::new();
     let mut literals = HashMap::new();
     let mut stack_strings = HashMap::new();
@@ -415,6 +530,13 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         }
                         BindingValue::Float { value, width } => {
                             validate_float_width(*width)?;
+                            let float = FloatBinding {
+                                asm_label: format!(".Lfloatval_{}_{}", label.name, name),
+                                value: value.clone(),
+                                width: *width,
+                            };
+                            floats.push(float.clone());
+                            float_bindings.insert(key.clone(), float);
                             (format!(".Lfloat_{}_{}", label.name, name), value.clone())
                         }
                     };
@@ -455,6 +577,58 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                     all.push(binding.clone());
                     stack_strings.insert((label.name.clone(), name.clone()), binding);
                 }
+                Instruction::Assign {
+                    value:
+                        AssignmentValue::FloatBinary {
+                            width, lhs, rhs, ..
+                        },
+                    ..
+                } => {
+                    collect_float_literal_operand(
+                        &mut floats,
+                        &mut float_literals,
+                        &label.name,
+                        *width,
+                        lhs,
+                    )?;
+                    collect_float_literal_operand(
+                        &mut floats,
+                        &mut float_literals,
+                        &label.name,
+                        *width,
+                        rhs,
+                    )?;
+                }
+                Instruction::Stack { width, value, .. } if is_float_width(*width) => {
+                    collect_float_literal_operand(
+                        &mut floats,
+                        &mut float_literals,
+                        &label.name,
+                        *width,
+                        value,
+                    )?;
+                }
+                Instruction::Jmp {
+                    condition: Some(condition),
+                    ..
+                } => {
+                    if let Some(width) = float_compare_width(condition.op) {
+                        collect_float_literal_operand(
+                            &mut floats,
+                            &mut float_literals,
+                            &label.name,
+                            width,
+                            &condition.lhs,
+                        )?;
+                        collect_float_literal_operand(
+                            &mut floats,
+                            &mut float_literals,
+                            &label.name,
+                            width,
+                            &condition.rhs,
+                        )?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -463,10 +637,43 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
     Ok(StringTable {
         all,
         bindings,
+        float_bindings,
+        float_literals,
+        floats,
         literals,
         integers,
         stack_strings,
     })
+}
+
+fn collect_float_literal_operand(
+    floats: &mut Vec<FloatBinding>,
+    float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,
+    label_name: &str,
+    width: MemoryWidth,
+    operand: &Operand,
+) -> Result<(), String> {
+    let Operand::FloatLiteral(value) = operand else {
+        return Ok(());
+    };
+
+    validate_float_literal(value, width)?;
+
+    let key = (label_name.to_string(), width, value.clone());
+    if float_literals.contains_key(&key) {
+        return Ok(());
+    }
+
+    let binding = FloatBinding {
+        asm_label: format!(".Lfloatlit_{}_{}", label_name, floats.len() + 1),
+        value: value.clone(),
+        width,
+    };
+
+    floats.push(binding.clone());
+    float_literals.insert(key, binding);
+
+    Ok(())
 }
 
 fn validate_float_width(width: MemoryWidth) -> Result<(), String> {
@@ -474,6 +681,24 @@ fn validate_float_width(width: MemoryWidth) -> Result<(), String> {
         Ok(())
     } else {
         Err(String::from("Float bindings require f32 or f64 width"))
+    }
+}
+
+fn is_float_width(width: MemoryWidth) -> bool {
+    matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
+}
+
+fn validate_float_literal(value: &str, width: MemoryWidth) -> Result<(), String> {
+    let valid = match width {
+        MemoryWidth::F32 => value.parse::<f32>().is_ok_and(f32::is_finite),
+        MemoryWidth::F64 => value.parse::<f64>().is_ok_and(f64::is_finite),
+        _ => return Err(String::from("Float literal requires f32 or f64 width")),
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("Invalid float literal {value:?}"))
     }
 }
 
@@ -534,6 +759,9 @@ fn emit_stack_initializers(
 ) -> Result<(), String> {
     for instruction in instructions {
         match instruction {
+            Instruction::Stack { name, width, value } if is_float_width(*width) => {
+                emit_stack_float_initializer(asm, name, *width, value, strings, label_name, stack)?;
+            }
             Instruction::Stack { name, value, .. } => {
                 if !is_immediate_operand(value, strings, label_name, stack) {
                     return Err(format!(
@@ -548,6 +776,46 @@ fn emit_stack_initializers(
             _ => {}
         }
     }
+
+    Ok(())
+}
+
+fn emit_stack_float_initializer(
+    asm: &mut String,
+    name: &str,
+    width: MemoryWidth,
+    value: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_math_operand(
+        "Floating-point stack initializer",
+        value,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    let (offset, _) =
+        stack_scalar_slot(stack, name).ok_or_else(|| format!("Unknown stack variable {name:?}"))?;
+    let src = emit_float_operand(value, width, strings, label_name, stack)?;
+    let ptr = memory_width_ptr(&width);
+
+    asm.push_str("  push rax\n");
+    match width {
+        MemoryWidth::F32 => {
+            asm.push_str(&format!("  mov eax, {src}\n"));
+            asm.push_str(&format!("  mov {ptr} ptr [rbp - {offset}], eax\n"));
+        }
+        MemoryWidth::F64 => {
+            asm.push_str(&format!("  mov rax, {src}\n"));
+            asm.push_str(&format!("  mov {ptr} ptr [rbp - {offset}], rax\n"));
+        }
+        _ => unreachable!(),
+    }
+    asm.push_str("  pop rax\n");
 
     Ok(())
 }
@@ -889,8 +1157,8 @@ fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
     asm.push('\n');
 }
 
-fn emit_rodata(asm: &mut String, strings: &[StringBinding]) {
-    if strings.is_empty() {
+fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBinding]) {
+    if strings.is_empty() && floats.is_empty() {
         return;
     }
 
@@ -917,6 +1185,18 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding]) {
         }
     }
 
+    let mut float_bindings: Vec<_> = floats.iter().collect();
+    float_bindings.sort_by(|left, right| left.asm_label.cmp(&right.asm_label));
+
+    for float in float_bindings {
+        asm.push_str(&format!("{}:\n", float.asm_label));
+        asm.push_str(&format!(
+            "  {} {}\n",
+            memory_width_directive(&float.width),
+            float.value
+        ));
+    }
+
     asm.push('\n');
 }
 
@@ -936,7 +1216,7 @@ fn emit_print_operand_instruction(
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
-    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand) {
+    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, stack) {
         return Err(String::from(
             "print operand does not support floating-point values yet",
         ));
@@ -1412,14 +1692,28 @@ fn emit_float_binary_assignment(
         ));
     }
 
-    validate_float_math_operand("Floating-point arithmetic left operand", lhs, width)?;
-    validate_float_math_operand("Floating-point arithmetic right operand", rhs, width)?;
+    validate_float_math_operand(
+        "Floating-point arithmetic left operand",
+        lhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_float_math_operand(
+        "Floating-point arithmetic right operand",
+        rhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
 
     if lhs != dst {
         emit_float_copy_instruction(asm, lhs, dst, width, strings, label_name, stack)?;
     }
 
-    let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    let rhs = emit_float_operand(rhs, width, strings, label_name, stack)?;
     asm.push_str(&format!(
         "  {} {dst_register}, {rhs}\n",
         float_math_opcode(op, width)
@@ -1437,7 +1731,7 @@ fn emit_float_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    let src = emit_operand(src, strings, label_name, stack)?;
+    let src = emit_float_operand(src, width, strings, label_name, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
     asm.push_str(&format!(
         "  {} {dst}, {src}\n",
@@ -1447,13 +1741,79 @@ fn emit_float_copy_instruction(
     Ok(())
 }
 
+fn emit_float_operand(
+    operand: &Operand,
+    width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<String, String> {
+    match operand {
+        Operand::FloatLiteral(value) => {
+            let binding = strings
+                .float_literals
+                .get(&(label_name.to_string(), width, value.clone()))
+                .ok_or_else(|| String::from("Internal error: missing float literal"))?;
+
+            Ok(format!(
+                "{} ptr [rip + {}]",
+                memory_width_ptr(&binding.width),
+                binding.asm_label
+            ))
+        }
+        Operand::Ident(name) if stack_scalar_slot(stack, name).is_none() => {
+            let binding = strings
+                .float_bindings
+                .get(&(label_name.to_string(), name.clone()))
+                .ok_or_else(|| format!("Unknown float binding {name:?} in label {label_name:?}"))?;
+
+            Ok(format!(
+                "{} ptr [rip + {}]",
+                memory_width_ptr(&binding.width),
+                binding.asm_label
+            ))
+        }
+        _ => emit_operand(operand, strings, label_name, stack),
+    }
+}
+
 fn validate_float_math_operand(
     name: &str,
     operand: &Operand,
     width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     match operand {
         Operand::Register(register) if is_xmm_register(register) => Ok(()),
+        Operand::FloatLiteral(value) => validate_float_literal(value, width),
+        Operand::Ident(binding) if stack_scalar_slot(stack, binding).is_some() => {
+            match stack_scalar_slot(stack, binding) {
+                Some((_, stack_width)) if stack_width == width && is_float_width(stack_width) => {
+                    Ok(())
+                }
+                Some((_, MemoryWidth::F32 | MemoryWidth::F64)) => Err(format!(
+                    "{name} width must match the floating-point operator width"
+                )),
+                Some(_) => Err(format!(
+                    "{name} must be an XMM register or floating-point memory operand"
+                )),
+                None => unreachable!(),
+            }
+        }
+        Operand::Ident(binding) => {
+            match strings
+                .float_bindings
+                .get(&(label_name.to_string(), binding.clone()))
+            {
+                Some(float) if float.width == width => Ok(()),
+                Some(_) => Err(format!(
+                    "{name} width must match the floating-point operator width"
+                )),
+                None => Err(format!("{name} cannot be a const or stack binding for now")),
+            }
+        }
         Operand::Dereference {
             width: Some(memory_width),
             ..
@@ -1473,9 +1833,7 @@ fn validate_float_math_operand(
         Operand::Immediate(_) => Err(format!(
             "{name} cannot be an immediate value; use a floating-point memory operand for now"
         )),
-        Operand::Ident(_) | Operand::StringProperty { .. } => {
-            Err(format!("{name} cannot be a const or stack binding for now"))
-        }
+        Operand::StringProperty { .. } => Err(format!("{name} cannot be a string property")),
         Operand::Pointer(_) => Err(format!("{name} cannot be an address-of operand")),
         Operand::Register(register) => Err(format!(
             "{name} must be an XMM register, found integer register {register}"
@@ -1590,7 +1948,7 @@ fn emit_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    if let Some(opcode) = float_move_opcode(src, dst)? {
+    if let Some(opcode) = float_move_opcode(src, dst, stack)? {
         let src = emit_operand(src, strings, label_name, stack)?;
         let dst = emit_operand(dst, strings, label_name, stack)?;
         asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
@@ -1600,7 +1958,7 @@ fn emit_copy_instruction(
         Err(String::from(
             "XMM moves require one XMM register and one explicitly f32 or f64 memory operand",
         ))
-    } else if is_float_memory_operand(src) || is_float_memory_operand(dst) {
+    } else if is_float_memory_operand(src, stack) || is_float_memory_operand(dst, stack) {
         Err(String::from(
             "Floating-point memory operands require an XMM register source or destination",
         ))
@@ -1627,8 +1985,8 @@ fn validate_binary_operands(
     if opcode != "mov"
         && (operand_uses_xmm_register(src)
             || operand_uses_xmm_register(dst)
-            || is_float_memory_operand(src)
-            || is_float_memory_operand(dst))
+            || is_float_memory_operand(src, stack)
+            || is_float_memory_operand(dst, stack))
     {
         return Err(format!(
             "{opcode} does not support floating-point operands yet"
@@ -1647,6 +2005,12 @@ fn validate_binary_operands(
 
     if matches!(src, Operand::Pointer(_)) {
         return Err(format!("{opcode} source cannot be an address-of operand"));
+    }
+
+    if matches!(src, Operand::FloatLiteral(_)) || matches!(dst, Operand::FloatLiteral(_)) {
+        return Err(format!(
+            "{opcode} cannot use floating-point literal operands"
+        ));
     }
 
     if operand_uses_high_byte_register(src) && operand_uses_extended_register(dst) {
@@ -1927,6 +2291,9 @@ fn emit_operand(
                 None => format!("[{address}]"),
             })
         }
+        Operand::FloatLiteral(value) => Err(format!(
+            "Float literal {value} requires an explicit floating-point operator width"
+        )),
         Operand::Immediate(value) => Ok(value.to_string()),
         Operand::Register(name) => Ok(name.clone()),
         Operand::Ident(name) => match stack_scalar_slot(stack, name) {
@@ -1943,6 +2310,14 @@ fn emit_operand(
                 .get(&(label_name.to_string(), name.clone()))
             {
                 Some(binding) => Ok(binding.value.to_string()),
+                None if strings
+                    .float_bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "Float binding {name:?} in label {label_name:?} requires a floating-point operator width"
+                    ))
+                }
                 None if strings
                     .bindings
                     .contains_key(&(label_name.to_string(), name.clone())) =>
@@ -2003,15 +2378,19 @@ fn operand_width(operand: &Operand, stack: &StackFrame) -> Option<Width> {
     }
 }
 
-fn float_move_opcode(src: &Operand, dst: &Operand) -> Result<Option<&'static str>, String> {
+fn float_move_opcode(
+    src: &Operand,
+    dst: &Operand,
+    stack: &StackFrame,
+) -> Result<Option<&'static str>, String> {
     match (src, dst) {
         (Operand::Register(register), memory) if is_xmm_register(register) => {
-            float_memory_width(memory)
+            float_memory_width(memory, stack)
                 .map(float_move_opcode_for_width)
                 .transpose()
         }
         (memory, Operand::Register(register)) if is_xmm_register(register) => {
-            float_memory_width(memory)
+            float_memory_width(memory, stack)
                 .map(float_move_opcode_for_width)
                 .transpose()
         }
@@ -2029,7 +2408,7 @@ fn float_move_opcode_for_width(width: MemoryWidth) -> Result<&'static str, Strin
     }
 }
 
-fn float_memory_width(operand: &Operand) -> Option<MemoryWidth> {
+fn float_memory_width(operand: &Operand, stack: &StackFrame) -> Option<MemoryWidth> {
     match operand {
         Operand::Dereference {
             width: Some(MemoryWidth::F32 | MemoryWidth::F64),
@@ -2040,12 +2419,15 @@ fn float_memory_width(operand: &Operand) -> Option<MemoryWidth> {
             } => Some(*width),
             _ => unreachable!(),
         },
+        Operand::Ident(name) => stack_scalar_slot(stack, name)
+            .map(|(_, width)| width)
+            .filter(|width| is_float_width(*width)),
         _ => None,
     }
 }
 
-fn is_float_memory_operand(operand: &Operand) -> bool {
-    float_memory_width(operand).is_some()
+fn is_float_memory_operand(operand: &Operand, stack: &StackFrame) -> bool {
+    float_memory_width(operand, stack).is_some()
 }
 
 fn memory_width_bits(width: &MemoryWidth) -> Width {

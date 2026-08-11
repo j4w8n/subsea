@@ -66,6 +66,18 @@ fn lexes_float_arithmetic_operators() {
 }
 
 #[test]
+fn lexes_float_comparison_operators() {
+    assert_eq!(lex_one("f32<").unwrap(), Some(Token::F32Less));
+    assert_eq!(lex_one("f32<=").unwrap(), Some(Token::F32LessEquals));
+    assert_eq!(lex_one("f32>").unwrap(), Some(Token::F32Greater));
+    assert_eq!(lex_one("f32>=").unwrap(), Some(Token::F32GreaterEquals));
+    assert_eq!(lex_one("f32==").unwrap(), Some(Token::F32EqualsEquals));
+    assert_eq!(lex_one("f32!=").unwrap(), Some(Token::F32NotEquals));
+    assert_eq!(lex_one("f64<").unwrap(), Some(Token::F64Less));
+    assert_eq!(lex_one("f64>=").unwrap(), Some(Token::F64GreaterEquals));
+}
+
+#[test]
 fn lexes_storage_and_cleanup_keywords() {
     assert_eq!(lex_one("const").unwrap(), Some(Token::Const));
     assert_eq!(lex_one("read").unwrap(), Some(Token::Read));

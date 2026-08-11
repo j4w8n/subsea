@@ -110,6 +110,12 @@ pub enum CompareOp {
     UnsignedLessEqual,
     UnsignedGreater,
     UnsignedGreaterEqual,
+    FloatEqual(MemoryWidth),
+    FloatNotEqual(MemoryWidth),
+    FloatLess(MemoryWidth),
+    FloatLessEqual(MemoryWidth),
+    FloatGreater(MemoryWidth),
+    FloatGreaterEqual(MemoryWidth),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -185,6 +191,7 @@ pub enum Operand {
         address: Address,
         width: Option<MemoryWidth>,
     },
+    FloatLiteral(String),
     Immediate(i128),
     Register(String),
     Ident(String),
@@ -201,7 +208,7 @@ pub enum StringProperty {
     Ptr,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, std::hash::Hash, Clone, Copy)]
 pub enum MemoryWidth {
     I8,
     I16,

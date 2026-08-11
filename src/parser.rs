@@ -305,12 +305,6 @@ impl Parser {
 
         let width = parse_memory_width(&width_name)?;
 
-        if is_float_width(width) {
-            return Err(String::from(
-                "Floating-point stack variables require XMM support, which is not implemented yet",
-            ));
-        }
-
         self.expect(Token::Equals, "Expected '=' after stack variable width")?;
         let value = self.parse_operand()?;
 
@@ -395,6 +389,18 @@ impl Parser {
         match self.advance() {
             Some(Token::EqualsEquals) => Ok(CompareOp::Equal),
             Some(Token::NotEquals) => Ok(CompareOp::NotEqual),
+            Some(Token::F32EqualsEquals) => Ok(CompareOp::FloatEqual(MemoryWidth::F32)),
+            Some(Token::F32NotEquals) => Ok(CompareOp::FloatNotEqual(MemoryWidth::F32)),
+            Some(Token::F32Less) => Ok(CompareOp::FloatLess(MemoryWidth::F32)),
+            Some(Token::F32LessEquals) => Ok(CompareOp::FloatLessEqual(MemoryWidth::F32)),
+            Some(Token::F32Greater) => Ok(CompareOp::FloatGreater(MemoryWidth::F32)),
+            Some(Token::F32GreaterEquals) => Ok(CompareOp::FloatGreaterEqual(MemoryWidth::F32)),
+            Some(Token::F64EqualsEquals) => Ok(CompareOp::FloatEqual(MemoryWidth::F64)),
+            Some(Token::F64NotEquals) => Ok(CompareOp::FloatNotEqual(MemoryWidth::F64)),
+            Some(Token::F64Less) => Ok(CompareOp::FloatLess(MemoryWidth::F64)),
+            Some(Token::F64LessEquals) => Ok(CompareOp::FloatLessEqual(MemoryWidth::F64)),
+            Some(Token::F64Greater) => Ok(CompareOp::FloatGreater(MemoryWidth::F64)),
+            Some(Token::F64GreaterEquals) => Ok(CompareOp::FloatGreaterEqual(MemoryWidth::F64)),
             Some(Token::ILess) => Ok(CompareOp::SignedLess),
             Some(Token::ILessEquals) => Ok(CompareOp::SignedLessEqual),
             Some(Token::IGreater) => Ok(CompareOp::SignedGreater),
@@ -770,9 +776,7 @@ impl Parser {
                 Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
                     .map(Operand::Immediate)
                     .map_err(|_| format!("Invalid integer literal -{value}")),
-                Some(Token::FloatLiteral(value)) => Err(format!(
-                    "Float literal -{value} is only supported in typed const and mem initializers for now"
-                )),
+                Some(Token::FloatLiteral(value)) => Ok(Operand::FloatLiteral(format!("-{value}"))),
                 Some(token) => Err(format!("Expected number after '-', found {token:?}")),
                 None => Err(String::from(
                     "Expected number after '-', found end of input",
@@ -782,9 +786,7 @@ impl Parser {
                 .parse::<i128>()
                 .map(Operand::Immediate)
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
-            Some(Token::FloatLiteral(value)) => Err(format!(
-                "Float literal {value} is only supported in typed const and mem initializers for now"
-            )),
+            Some(Token::FloatLiteral(value)) => Ok(Operand::FloatLiteral(value)),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
             Some(Token::Ident(name)) => self.parse_ident_operand(name),
             Some(Token::Pointer(name)) => {
@@ -1212,7 +1214,10 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     }
 
                     bindings.insert(name.as_str());
-                    if matches!(value, BindingValue::Integer { .. }) {
+                    if matches!(
+                        value,
+                        BindingValue::Integer { .. } | BindingValue::Float { .. }
+                    ) {
                         operand_bindings.insert(name.as_str());
                     }
                 }
