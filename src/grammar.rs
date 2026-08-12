@@ -2,6 +2,7 @@
 pub enum Token {
     Colon,
     Caret,
+    DoubleColon,
     Equals,
     EqualsEquals,
     F32EqualsEquals,

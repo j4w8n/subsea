@@ -92,6 +92,18 @@ fn compiles_and_runs_condition_features() {
 }
 
 #[test]
+fn compiles_and_runs_width_conversion_features() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/width_conversion.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+}
+
+#[test]
 fn help_exits_successfully() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

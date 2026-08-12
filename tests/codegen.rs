@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
+    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::emit_x86_64_linux_asm;
 
@@ -711,6 +711,128 @@ fn rejects_shift_count_other_than_immediate_or_cl() {
     assert_eq!(
         error,
         "shl count must be an immediate value or cl, found register rcx"
+    );
+}
+
+#[test]
+fn emits_zero_and_sign_extension() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::Converted {
+                operand: Box::new(reg("al")),
+                conversion: WidthConversion::ZeroExtend,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rbx")),
+            value: AssignmentValue::Operand(Operand::Converted {
+                operand: Box::new(reg("cl")),
+                conversion: WidthConversion::SignExtend,
+            }),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movzx rax, al\n"));
+    assert!(asm.contains("  movsx rbx, cl\n"));
+}
+
+#[test]
+fn emits_32_to_64_bit_extensions() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::Converted {
+                operand: Box::new(reg("ebx")),
+                conversion: WidthConversion::ZeroExtend,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rdi")),
+            value: AssignmentValue::Operand(Operand::Converted {
+                operand: Box::new(reg("esi")),
+                conversion: WidthConversion::SignExtend,
+            }),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov eax, ebx\n"));
+    assert!(asm.contains("  movsxd rdi, esi\n"));
+}
+
+#[test]
+fn emits_implicit_register_truncation() {
+    let program = Program {
+        entry: s("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("buf"),
+            width: MemoryWidth::U8,
+            count: 1,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("al")),
+                    value: AssignmentValue::Operand(reg("rbx")),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("buf", Some(MemoryWidth::U8))),
+                    value: AssignmentValue::Operand(reg("rax")),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov al, bl\n"));
+    assert!(asm.contains("  mov byte ptr [buf], al\n"));
+}
+
+#[test]
+fn rejects_implicit_widening() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Operand(reg("al")),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "Cannot use 8-bit source with 64-bit destination");
+}
+
+#[test]
+fn rejects_width_conversion_to_memory() {
+    let program = Program {
+        entry: s("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("buf"),
+            width: MemoryWidth::U64,
+            count: 1,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![Instruction::Assign {
+                dst: AssignmentTarget::Operand(deref_ident("buf", Some(MemoryWidth::U64))),
+                value: AssignmentValue::Operand(Operand::Converted {
+                    operand: Box::new(reg("al")),
+                    conversion: WidthConversion::ZeroExtend,
+                }),
+            }],
+        }],
+    };
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Width conversion destination must be an integer register"
     );
 }
 

@@ -111,7 +111,14 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         Some('}') => Some(Token::RBrace),
         Some('[') => Some(Token::LBracket),
         Some(']') => Some(Token::RBracket),
-        Some(':') => Some(Token::Colon),
+        Some(':') => {
+            if chars.peek() == Some(&':') {
+                chars.next();
+                Some(Token::DoubleColon)
+            } else {
+                Some(Token::Colon)
+            }
+        }
         Some(',') => Some(Token::Comma),
         Some('"') => {
             let mut value = String::new();

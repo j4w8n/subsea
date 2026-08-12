@@ -1,7 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    ReadSource, StringInitializer, StringProperty,
+    ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -443,6 +443,50 @@ fn parses_arithmetic_shift_right_assignment() {
                 rhs: Operand::Immediate(3),
             },
         }
+    );
+}
+
+#[test]
+fn parses_width_converted_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("al"),
+        Token::DoubleColon,
+        tid("zx"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::Converted {
+                operand: Box::new(reg("al")),
+                conversion: WidthConversion::ZeroExtend,
+            }),
+        }
+    );
+}
+
+#[test]
+fn rejects_unknown_width_conversion() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        treg("al"),
+        Token::DoubleColon,
+        tid("wide"),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Unknown width conversion ::wide; expected ::zx or ::sx"
     );
 }
 

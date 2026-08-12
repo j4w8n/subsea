@@ -2,7 +2,7 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
     MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty,
+    StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -2442,6 +2442,9 @@ fn validate_float_math_operand(
     stack: &StackFrame,
 ) -> Result<(), String> {
     match operand {
+        Operand::Converted { .. } => Err(format!(
+            "{name} cannot use integer width conversion in floating-point math"
+        )),
         Operand::Register(register) if is_xmm_register(register) => Ok(()),
         Operand::FloatLiteral(value) => validate_float_literal(value, width),
         Operand::Ident(binding) if stack_scalar_slot(stack, binding).is_some() => {
@@ -2618,7 +2621,15 @@ fn emit_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    if let Some(opcode) = float_move_opcode(src, dst, strings, stack)? {
+    if let Operand::Converted {
+        operand,
+        conversion,
+    } = src
+    {
+        emit_width_conversion_copy(asm, operand, *conversion, dst, strings, label_name, stack)
+    } else if emit_truncating_copy(asm, src, dst, strings, label_name, stack)? {
+        Ok(())
+    } else if let Some(opcode) = float_move_opcode(src, dst, strings, stack)? {
         let src = emit_operand(src, strings, label_name, stack)?;
         let dst = emit_operand(dst, strings, label_name, stack)?;
         asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
@@ -2646,6 +2657,102 @@ fn emit_copy_instruction(
     }
 }
 
+fn emit_width_conversion_copy(
+    asm: &mut String,
+    src: &Operand,
+    conversion: WidthConversion,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Width conversion destination must be an integer register",
+        ));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Width conversion destination must be an integer register",
+        ));
+    }
+
+    validate_width_conversion_source(src, strings, label_name, stack)?;
+
+    let dst_width = register_width(dst_register)
+        .ok_or_else(|| String::from("Width conversion destination must be an integer register"))?;
+    let src_width = operand_width(src, strings, label_name, stack)?
+        .ok_or_else(|| String::from("Width conversion source must have a known integer width"))?;
+
+    if src_width.bits() >= dst_width.bits() {
+        return Err(format!(
+            "Width conversion source must be narrower than destination, found {}-bit source and {}-bit destination",
+            src_width.bits(),
+            dst_width.bits()
+        ));
+    }
+
+    if operand_uses_high_byte_register(src) && is_extended_register(dst_register) {
+        return Err(String::from(
+            "Width conversion cannot combine high-byte registers ah, bh, ch, or dh with extended registers",
+        ));
+    }
+
+    let src = emit_operand(src, strings, label_name, stack)?;
+    match (conversion, src_width, dst_width) {
+        (WidthConversion::ZeroExtend, Width::Bits32, Width::Bits64) => {
+            let dst = register_alias(dst_register, Width::Bits32)?;
+            asm.push_str(&format!("  mov {dst}, {src}\n"));
+        }
+        (WidthConversion::ZeroExtend, _, _) => {
+            let dst = emit_operand(dst, strings, label_name, stack)?;
+            asm.push_str(&format!("  movzx {dst}, {src}\n"));
+        }
+        (WidthConversion::SignExtend, Width::Bits32, Width::Bits64) => {
+            let dst = emit_operand(dst, strings, label_name, stack)?;
+            asm.push_str(&format!("  movsxd {dst}, {src}\n"));
+        }
+        (WidthConversion::SignExtend, _, _) => {
+            let dst = emit_operand(dst, strings, label_name, stack)?;
+            asm.push_str(&format!("  movsx {dst}, {src}\n"));
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_truncating_copy(
+    asm: &mut String,
+    src: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<bool, String> {
+    let Operand::Register(src_register) = src else {
+        return Ok(false);
+    };
+
+    let Some(src_width) = register_width(src_register) else {
+        return Ok(false);
+    };
+    let Some(dst_width) = operand_width(dst, strings, label_name, stack)? else {
+        return Ok(false);
+    };
+
+    if src_width.bits() <= dst_width.bits() {
+        return Ok(false);
+    }
+
+    validate_binary_operands("mov", src, dst, strings, label_name, stack)?;
+    let dst = emit_operand(dst, strings, label_name, stack)?;
+    let src = register_alias(src_register, dst_width)?;
+    asm.push_str(&format!("  mov {dst}, {src}\n"));
+
+    Ok(true)
+}
+
 fn validate_binary_operands(
     opcode: &str,
     src: &Operand,
@@ -2667,7 +2774,10 @@ fn validate_binary_operands(
 
     if matches!(
         dst,
-        Operand::Immediate(_) | Operand::Pointer(_) | Operand::StringProperty { .. }
+        Operand::Immediate(_)
+            | Operand::Pointer(_)
+            | Operand::StringProperty { .. }
+            | Operand::Converted { .. }
     ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
     {
         return Err(format!(
@@ -2677,6 +2787,10 @@ fn validate_binary_operands(
 
     if matches!(src, Operand::Pointer(_)) {
         return Err(format!("{opcode} source cannot be an address-of operand"));
+    }
+
+    if matches!(src, Operand::Converted { .. }) {
+        return Err(format!("{opcode} source cannot use width conversion here"));
     }
 
     if matches!(src, Operand::FloatLiteral(_)) || matches!(dst, Operand::FloatLiteral(_)) {
@@ -2718,6 +2832,13 @@ fn validate_binary_operands(
         operand_width(dst, strings, label_name, stack)?,
     ) && src_width != dst_width
     {
+        if opcode == "mov"
+            && matches!(src, Operand::Register(_))
+            && src_width.bits() > dst_width.bits()
+        {
+            return Ok(());
+        }
+
         return Err(format!(
             "Cannot use {}-bit source with {}-bit destination",
             src_width.bits(),
@@ -2762,6 +2883,37 @@ fn validate_shift_operands(
         )),
         _ => Err(format!("{opcode} count must be an immediate value or cl")),
     }
+}
+
+fn validate_width_conversion_source(
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(src, Operand::Converted { .. }) {
+        return Err(String::from("Width conversions cannot be nested"));
+    }
+
+    if matches!(src, Operand::Immediate(_) | Operand::Pointer(_)) {
+        return Err(String::from(
+            "Width conversion source must be an integer register or memory operand",
+        ));
+    }
+
+    if operand_uses_xmm_register(src) || is_float_memory_operand(src, strings, stack)? {
+        return Err(String::from(
+            "Width conversion source must be an integer register or memory operand",
+        ));
+    }
+
+    if operand_width(src, strings, label_name, stack)?.is_none() {
+        return Err(String::from(
+            "Width conversion source must have a known integer width",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_boolean_assignment_destination(
@@ -3089,6 +3241,9 @@ fn emit_operand(
     stack: &StackFrame,
 ) -> Result<String, String> {
     match operand {
+        Operand::Converted { .. } => Err(String::from(
+            "Width conversion operands are only supported as assignment sources",
+        )),
         Operand::Dereference { address, width } => {
             let emitted_address = emit_address(address);
 
@@ -3175,6 +3330,7 @@ fn operand_width(
     stack: &StackFrame,
 ) -> Result<Option<Width>, String> {
     match operand {
+        Operand::Converted { operand, .. } => operand_width(operand, strings, _label_name, stack),
         Operand::Register(name) => Ok(register_width(name)),
         Operand::Dereference { address, width } => {
             Ok(resolve_memory_width(address, *width, strings)?.map(memory_width_bits))
@@ -3224,6 +3380,7 @@ fn float_memory_width(
     stack: &StackFrame,
 ) -> Result<Option<MemoryWidth>, String> {
     match operand {
+        Operand::Converted { operand, .. } => float_memory_width(operand, strings, stack),
         Operand::Dereference { address, width } => {
             Ok(resolve_memory_width(address, *width, strings)?.filter(|width| width.is_float()))
         }
@@ -3287,6 +3444,81 @@ fn register_width(name: &str) -> Option<Width> {
     crate::register::width(name)
 }
 
+fn register_alias(name: &str, width: Width) -> Result<String, String> {
+    let family = crate::register::family(name)
+        .ok_or_else(|| format!("Expected integer register, found {name}"))?;
+
+    let alias = match (family, width) {
+        ("rax", Width::Bits64) => "rax",
+        ("rax", Width::Bits32) => "eax",
+        ("rax", Width::Bits16) => "ax",
+        ("rax", Width::Bits8) => "al",
+        ("rbx", Width::Bits64) => "rbx",
+        ("rbx", Width::Bits32) => "ebx",
+        ("rbx", Width::Bits16) => "bx",
+        ("rbx", Width::Bits8) => "bl",
+        ("rcx", Width::Bits64) => "rcx",
+        ("rcx", Width::Bits32) => "ecx",
+        ("rcx", Width::Bits16) => "cx",
+        ("rcx", Width::Bits8) => "cl",
+        ("rdx", Width::Bits64) => "rdx",
+        ("rdx", Width::Bits32) => "edx",
+        ("rdx", Width::Bits16) => "dx",
+        ("rdx", Width::Bits8) => "dl",
+        ("rdi", Width::Bits64) => "rdi",
+        ("rdi", Width::Bits32) => "edi",
+        ("rdi", Width::Bits16) => "di",
+        ("rdi", Width::Bits8) => "dil",
+        ("rsi", Width::Bits64) => "rsi",
+        ("rsi", Width::Bits32) => "esi",
+        ("rsi", Width::Bits16) => "si",
+        ("rsi", Width::Bits8) => "sil",
+        ("rbp", Width::Bits64) => "rbp",
+        ("rbp", Width::Bits32) => "ebp",
+        ("rbp", Width::Bits16) => "bp",
+        ("rbp", Width::Bits8) => "bpl",
+        ("rsp", Width::Bits64) => "rsp",
+        ("rsp", Width::Bits32) => "esp",
+        ("rsp", Width::Bits16) => "sp",
+        ("rsp", Width::Bits8) => "spl",
+        ("r8", Width::Bits64) => "r8",
+        ("r8", Width::Bits32) => "r8d",
+        ("r8", Width::Bits16) => "r8w",
+        ("r8", Width::Bits8) => "r8b",
+        ("r9", Width::Bits64) => "r9",
+        ("r9", Width::Bits32) => "r9d",
+        ("r9", Width::Bits16) => "r9w",
+        ("r9", Width::Bits8) => "r9b",
+        ("r10", Width::Bits64) => "r10",
+        ("r10", Width::Bits32) => "r10d",
+        ("r10", Width::Bits16) => "r10w",
+        ("r10", Width::Bits8) => "r10b",
+        ("r11", Width::Bits64) => "r11",
+        ("r11", Width::Bits32) => "r11d",
+        ("r11", Width::Bits16) => "r11w",
+        ("r11", Width::Bits8) => "r11b",
+        ("r12", Width::Bits64) => "r12",
+        ("r12", Width::Bits32) => "r12d",
+        ("r12", Width::Bits16) => "r12w",
+        ("r12", Width::Bits8) => "r12b",
+        ("r13", Width::Bits64) => "r13",
+        ("r13", Width::Bits32) => "r13d",
+        ("r13", Width::Bits16) => "r13w",
+        ("r13", Width::Bits8) => "r13b",
+        ("r14", Width::Bits64) => "r14",
+        ("r14", Width::Bits32) => "r14d",
+        ("r14", Width::Bits16) => "r14w",
+        ("r14", Width::Bits8) => "r14b",
+        ("r15", Width::Bits64) => "r15",
+        ("r15", Width::Bits32) => "r15d",
+        ("r15", Width::Bits16) => "r15w",
+        ("r15", Width::Bits8) => "r15b",
+        _ => return Err(format!("Expected integer register, found {name}")),
+    };
+
+    Ok(alias.to_string())
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Width {
     Bits8,
@@ -3297,6 +3529,7 @@ pub(crate) enum Width {
 
 fn operand_uses_high_byte_register(operand: &Operand) -> bool {
     match operand {
+        Operand::Converted { operand, .. } => operand_uses_high_byte_register(operand),
         Operand::Register(name) => is_high_byte_register(name),
         Operand::Dereference { address, .. } => {
             address_uses_register(address, is_high_byte_register)
@@ -3307,6 +3540,7 @@ fn operand_uses_high_byte_register(operand: &Operand) -> bool {
 
 fn operand_uses_extended_register(operand: &Operand) -> bool {
     match operand {
+        Operand::Converted { operand, .. } => operand_uses_extended_register(operand),
         Operand::Register(name) => is_extended_register(name),
         Operand::Dereference { address, .. } => {
             address_uses_register(address, is_extended_register)
@@ -3317,6 +3551,7 @@ fn operand_uses_extended_register(operand: &Operand) -> bool {
 
 fn operand_uses_xmm_register(operand: &Operand) -> bool {
     match operand {
+        Operand::Converted { operand, .. } => operand_uses_xmm_register(operand),
         Operand::Register(name) => is_xmm_register(name),
         Operand::Dereference { address, .. } => address_uses_register(address, is_xmm_register),
         _ => false,
@@ -3325,6 +3560,7 @@ fn operand_uses_xmm_register(operand: &Operand) -> bool {
 
 fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
     match operand {
+        Operand::Converted { operand, .. } => operand_uses_register_family(operand, register),
         Operand::Register(name) => same_register_family(name, register),
         Operand::Dereference { address, .. } => address_uses_register_family(address, register),
         _ => false,
@@ -3333,6 +3569,9 @@ fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
 
 fn operand_address_uses_register_family(operand: &Operand, register: &str) -> bool {
     match operand {
+        Operand::Converted { operand, .. } => {
+            operand_address_uses_register_family(operand, register)
+        }
         Operand::Dereference { address, .. } => address_uses_register_family(address, register),
         _ => false,
     }

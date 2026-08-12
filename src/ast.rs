@@ -141,6 +141,15 @@ impl Instruction {
     }
 }
 
+impl Operand {
+    pub fn unconverted(&self) -> &Operand {
+        match self {
+            Operand::Converted { operand, .. } => operand.unconverted(),
+            operand => operand,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum ReadSource {
     Stdin,
@@ -287,6 +296,10 @@ pub enum PrintPart {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
+    Converted {
+        operand: Box<Operand>,
+        conversion: WidthConversion,
+    },
     Dereference {
         address: Address,
         width: Option<MemoryWidth>,
@@ -300,6 +313,12 @@ pub enum Operand {
         property: StringProperty,
     },
     Pointer(String),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WidthConversion {
+    SignExtend,
+    ZeroExtend,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

@@ -101,6 +101,11 @@ fn lexes_bitwise_operators() {
 }
 
 #[test]
+fn lexes_double_colon() {
+    assert_eq!(lex_one("::").unwrap(), Some(Token::DoubleColon));
+}
+
+#[test]
 fn lexes_bitwise_and_without_spaces() {
     assert_eq!(
         lex_all("rbx&rcx").unwrap(),

@@ -2,7 +2,7 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
     MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty,
+    StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -649,7 +649,7 @@ impl Parser {
     }
 
     fn parse_operand(&mut self) -> Result<Operand, String> {
-        match self.advance() {
+        let operand = match self.advance() {
             Some(Token::Ampersand) => match self.advance() {
                 Some(Token::Ident(name)) => Ok(Operand::Pointer(name)),
                 Some(Token::Register(name)) => Err(format!(
@@ -702,7 +702,41 @@ impl Parser {
             }
             Some(token) => Err(format!("Expected operand, found {token:?}")),
             None => Err(String::from("Expected operand, found end of input")),
+        }?;
+
+        self.parse_optional_converted_operand(operand)
+    }
+
+    fn parse_optional_converted_operand(&mut self, operand: Operand) -> Result<Operand, String> {
+        if !matches!(self.peek(), Some(Token::DoubleColon)) {
+            return Ok(operand);
         }
+
+        self.advance();
+        let conversion = match self.advance() {
+            Some(Token::Ident(name)) if name == "zx" => WidthConversion::ZeroExtend,
+            Some(Token::Ident(name)) if name == "sx" => WidthConversion::SignExtend,
+            Some(Token::Ident(name)) => {
+                return Err(format!(
+                    "Unknown width conversion ::{name}; expected ::zx or ::sx"
+                ));
+            }
+            Some(token) => {
+                return Err(format!(
+                    "Expected width conversion after '::', found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected width conversion after '::', found end of input",
+                ));
+            }
+        };
+
+        Ok(Operand::Converted {
+            operand: Box::new(operand),
+            conversion,
+        })
     }
 
     fn parse_optional_memory_width(&mut self) -> Result<Option<MemoryWidth>, String> {
@@ -1330,6 +1364,15 @@ fn validate_operand_symbol(
     current_label: &str,
 ) -> Result<(), String> {
     match operand {
+        Operand::Converted { operand, .. } => validate_operand_symbol(
+            operand,
+            bindings,
+            operand_bindings,
+            string_bindings,
+            memory,
+            labels,
+            current_label,
+        ),
         Operand::Ident(name) if !operand_bindings.contains(name.as_str()) => {
             if bindings.contains(name.as_str()) {
                 Err(format!(
