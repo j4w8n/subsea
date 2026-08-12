@@ -678,6 +678,8 @@ Instructions work with a small set of operand forms:
 
 ```ss
 rax         // register
+al::zx      // zero-extend an integer source operand
+al::sx      // sign-extend an integer source operand
 xmm0        // XMM register
 42          // immediate integer
 -1          // negative immediate integer
@@ -707,11 +709,32 @@ XMM registers can be used for floating-point loads, stores, and arithmetic. They
 
 ## Width Rules
 
-Subsea currently rejects mixed-width register operations. These are invalid:
+Same-width integer moves work directly. Moving from a wider integer register into a narrower destination truncates to the low bits:
 
 ```ss
-eax = rax
-rax = eax
+rax = 257
+al = rax   // al gets the low 8 bits: 1
+ax = rax   // ax gets the low 16 bits: 257
+```
+
+Moving from a narrower source into a wider destination requires an explicit width conversion. Use `::zx` to zero-extend and `::sx` to sign-extend:
+
+```ss
+rax = al::zx   // zero-extend al into rax
+rax = al::sx   // sign-extend al into rax
+rax = eax::zx  // zero-extend eax into rax
+rax = eax::sx  // sign-extend eax into rax
+```
+
+Implicit widening is invalid because Subsea needs to know how to fill the new upper bits:
+
+```ss
+rax = al   // invalid; use al::zx or al::sx
+```
+
+Other mixed-width arithmetic is still rejected:
+
+```ss
 rax = rax + eax
 eax = eax * ax
 ```
