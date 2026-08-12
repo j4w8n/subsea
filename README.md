@@ -6,7 +6,7 @@ Status: working, but early development. If you'd like to play with subsea, you'l
 
 ## Quickstart
 
-Every program must define a top-level `main` function; subsea starts execution there. Create a `main.ss` file with the following, then run with `subsea run main.ss`:
+Every program must define a top-level `main` function; subsea starts execution there. In emitted assembly, the source-level `main` entry is exposed as the linker-visible entry symbol `_start` by default. Create a `main.ss` file with the following, then run with `subsea run main.ss`:
 
 ```ss
 main: {
@@ -162,6 +162,7 @@ These are top-level entities that execute instructions within their code block. 
 
 - `ret` emits generated stack-frame cleanup automatically - unless the stack is manually changed via `push` or `pop`.
 - `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
+- `hlt` emits the x86-64 `hlt` instruction. It is mainly useful in freestanding code, usually inside an infinite loop.
 
 ```ss
 main: {
@@ -179,6 +180,16 @@ helper: {
 ```bash
 Helping!
 Done
+```
+
+Freestanding `hlt` loop:
+
+```ss
+main: {
+.hang:
+  hlt
+  jmp .hang
+}
 ```
 
 Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
@@ -854,6 +865,26 @@ subsea emit-asm main.ss   // Compile to x86-64 assembly and print it
 
 > `run` exits with the compiled program's exit code.
 
+### targets
+
+The default target is `x86_64`, which means x86-64 Linux userland. This target supports Linux helpers such as `print`, `read stdin`, and `exit`.
+
+Use `x86_64-free` for freestanding x86-64 assembly. This target still emits x86-64 instructions, but it rejects Linux-only helpers because there may be no Linux process, stdout, stdin, or process exit:
+
+```sh
+subsea emit-asm --target x86_64-free kernel.ss
+subsea emit-asm -t x86_64-free kernel.ss
+subsea build --target x86_64-free kernel.ss
+```
+
+By default, Subsea emits source-level `main` as the linker-visible symbol `_start`. Freestanding mode can override that symbol with `--entry`:
+
+```sh
+subsea emit-asm -t x86_64-free --entry kernel_entry kernel.ss
+```
+
+Freestanding support is early. Object-only output and linker-script support are planned next steps.
+
 ### build flags
 
 Writes intermediate assembly and object files to a unique per-build directory under `target/subsea/build-*`. The default executable is written to `target/subsea/main`
@@ -864,10 +895,22 @@ Writes intermediate assembly and object files to a unique per-build directory un
 subsea build -o my_util main.ss
 ```
 
-`--timings` or `-t`: show build times for various phases of the process.
+`--target` or `-t`: select a target. Supported targets are `x86_64` and `x86_64-free`.
 
 ```sh
-subsea build -t main.ss
+subsea build -t x86_64-free kernel.ss
+```
+
+`--entry`: select the linker-visible entry symbol for `x86_64-free`. The source program still uses `main`; codegen emits that entry block with the requested symbol.
+
+```sh
+subsea build -t x86_64-free --entry kernel_entry kernel.ss
+```
+
+`--timings`: show build times for various phases of the process.
+
+```sh
+subsea build --timings main.ss
 ```
 
 ## Control-Flow Recipes
