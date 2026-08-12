@@ -243,6 +243,238 @@ fn freestanding_target_rejects_linux_helpers() {
 }
 
 #[test]
+fn freestanding_build_writes_object_file() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let output_path =
+        std::env::temp_dir().join(format!("subsea-test-kernel-{}.o", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Wrote object file:"));
+
+    let file_output = Command::new("file")
+        .arg(&output_path)
+        .output()
+        .expect("failed to run file");
+    let _ = std::fs::remove_file(&output_path);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(file_output.status.success());
+    assert!(String::from_utf8_lossy(&file_output.stdout).contains("relocatable"));
+}
+
+#[test]
+fn freestanding_build_links_with_linker_script() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let output_path =
+        std::env::temp_dir().join(format!("subsea-test-kernel-{}.elf", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "--linker-script",
+            "tests/fixtures/kernel.ld",
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Wrote executable:"));
+
+    let file_output = Command::new("file")
+        .arg(&output_path)
+        .output()
+        .expect("failed to run file");
+    let _ = std::fs::remove_file(&output_path);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(file_output.status.success());
+    assert!(String::from_utf8_lossy(&file_output.stdout).contains("ELF"));
+    assert!(!String::from_utf8_lossy(&file_output.stdout).contains("relocatable"));
+}
+
+#[test]
+fn freestanding_build_writes_raw_binary() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let output_path =
+        std::env::temp_dir().join(format!("subsea-test-kernel-{}.bin", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "-T",
+            "tests/fixtures/kernel.ld",
+            "--format",
+            "binary",
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    let binary = std::fs::read(&output_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&output_path);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Wrote binary:"));
+    assert!(!binary.is_empty());
+    assert!(binary.windows(2).any(|window| window == [0xf4, 0xeb]));
+}
+
+#[test]
+fn freestanding_build_accepts_custom_linker() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let output_path = std::env::temp_dir().join(format!(
+        "subsea-test-kernel-linker-{}.elf",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "--linker",
+            "ld",
+            "-T",
+            "tests/fixtures/kernel.ld",
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    let _ = std::fs::remove_file(&output_path);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn freestanding_build_accepts_short_linker_script_flag() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let output_path = std::env::temp_dir().join(format!(
+        "subsea-test-kernel-short-{}.elf",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "-T",
+            "tests/fixtures/kernel.ld",
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    let _ = std::fs::remove_file(&output_path);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn linux_target_rejects_linker_script() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "--linker-script",
+            "tests/fixtures/kernel.ld",
+            "tests/fixtures/main.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--linker-script/-T is only supported")
+    );
+}
+
+#[test]
+fn binary_format_requires_linker_script() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "--format",
+            "binary",
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--format binary requires"));
+}
+
+#[test]
+fn linux_target_rejects_custom_linker() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["build", "--linker", "ld", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--linker is only supported"));
+}
+
+#[test]
 fn run_removes_its_build_directory() {
     let _guard = CLI_LOCK.lock().unwrap();
     let before = build_dirs();

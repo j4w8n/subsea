@@ -6,7 +6,10 @@ use std::{
 };
 
 use subsea::codegen::{Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol};
-use subsea::driver::{self, build_executable, run_executable};
+use subsea::driver::{
+    self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
+    build_freestanding_executable, build_object, run_executable,
+};
 use subsea::grammar::Token;
 use subsea::lexer::get_next_token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -28,13 +31,23 @@ fn main() {
             show_timings,
             target,
             entry_symbol,
+            linker_script,
+            output_format,
+            linker,
         }) => {
             let started = Instant::now();
 
             match compile_to_asm_with_timings(&source_path, target, entry_symbol.as_deref())
                 .and_then(|compilation| {
-                    build_executable(&compilation.asm, output_path.as_deref())
-                        .map(|build| (compilation.timings, build))
+                    build_output(
+                        &compilation.asm,
+                        target,
+                        output_path.as_deref(),
+                        linker_script.as_deref(),
+                        output_format,
+                        &linker,
+                    )
+                    .map(|build| (compilation.timings, build))
                 }) {
                 Ok((compile_timings, output)) => {
                     let total = started.elapsed();
@@ -43,9 +56,15 @@ fn main() {
                         print_build_timings(&compile_timings, &output.timings, total);
                     }
 
+                    let output_label = match output.output_kind {
+                        BuildOutputKind::Executable => "executable",
+                        BuildOutputKind::Object => "object file",
+                        BuildOutputKind::Binary => "binary",
+                    };
+
                     println!(
-                        "Wrote executable: {} (built in {total:?})",
-                        output.executable_path.display(),
+                        "Wrote {output_label}: {} (built in {total:?})",
+                        output.output_path.display(),
                     );
                 }
                 Err(error) => exit_with_error(error),
@@ -55,7 +74,7 @@ fn main() {
             match compile_to_asm(&source_path, Target::X86_64, None)
                 .and_then(|asm| build_executable(&asm, None))
             {
-                Ok(output) => match run_executable(&output.executable_path) {
+                Ok(output) => match run_executable(&output.output_path) {
                     Ok(status) => {
                         if let Err(error) = driver::remove_build_dir(&output.build_dir) {
                             eprintln!("Warning: {error}");
@@ -87,11 +106,20 @@ enum CommandLine {
         show_timings: bool,
         target: Target,
         entry_symbol: Option<String>,
+        linker_script: Option<PathBuf>,
+        output_format: BuildOutputFormat,
+        linker: String,
     },
     Help,
     Run {
         source_path: String,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildOutputFormat {
+    Elf,
+    Binary,
 }
 
 fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
@@ -125,6 +153,11 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     let mut target = Target::X86_64;
     let mut target_provided = false;
     let mut entry_symbol = None;
+    let mut linker_script = None;
+    let mut output_format = BuildOutputFormat::Elf;
+    let mut format_provided = false;
+    let mut linker = String::from("ld");
+    let mut linker_provided = false;
     let mut position = 0;
 
     while position < args.len() {
@@ -178,6 +211,48 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
                 validate_entry_symbol(symbol)?;
                 entry_symbol = Some(symbol.clone());
             }
+            "--linker-script" | "-T" => {
+                position += 1;
+
+                let path = args.get(position).ok_or_else(|| {
+                    String::from("Expected linker script path after --linker-script/-T")
+                })?;
+
+                if linker_script.is_some() {
+                    return Err(String::from("Linker script was already provided"));
+                }
+
+                linker_script = Some(PathBuf::from(path));
+            }
+            "--format" => {
+                position += 1;
+
+                let format = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected format after --format"))?;
+
+                if format_provided {
+                    return Err(String::from("Output format was already provided"));
+                }
+
+                output_format = parse_build_output_format(format)?;
+                format_provided = true;
+            }
+            "--linker" => {
+                position += 1;
+
+                let program = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected linker program after --linker"))?;
+
+                if linker_provided {
+                    return Err(String::from("Linker was already provided"));
+                }
+
+                validate_program_name(program, "Linker")?;
+                linker = program.clone();
+                linker_provided = true;
+            }
             flag if flag.starts_with('-') => return Err(format!("Unknown build flag {flag:?}")),
             path => {
                 if source_path.is_some() {
@@ -193,6 +268,10 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
 
     let source_path = source_path.ok_or_else(|| String::from("Missing build source path"))?;
     validate_entry_target(target, entry_symbol.as_deref())?;
+    validate_linker_script_target(target, linker_script.as_deref())?;
+    validate_format_target(target, output_format)?;
+    validate_linker_target(target, linker_provided)?;
+    validate_binary_requires_linker_script(output_format, linker_script.as_deref())?;
 
     Ok(CommandLine::Build {
         source_path,
@@ -200,6 +279,9 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
         show_timings,
         target,
         entry_symbol,
+        linker_script,
+        output_format,
+        linker,
     })
 }
 
@@ -273,6 +355,70 @@ fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(
     Ok(())
 }
 
+fn validate_linker_script_target(
+    target: Target,
+    linker_script: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if linker_script.is_some() && target != Target::X86_64Free {
+        return Err(String::from(
+            "--linker-script/-T is only supported for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> Result<(), String> {
+    if output_format == BuildOutputFormat::Binary && target != Target::X86_64Free {
+        return Err(String::from(
+            "--format binary is only supported for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), String> {
+    if linker_provided && target != Target::X86_64Free {
+        return Err(String::from(
+            "--linker is only supported for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_binary_requires_linker_script(
+    output_format: BuildOutputFormat,
+    linker_script: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if output_format == BuildOutputFormat::Binary && linker_script.is_none() {
+        return Err(String::from(
+            "--format binary requires --linker-script/-T for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_build_output_format(format: &str) -> Result<BuildOutputFormat, String> {
+    match format {
+        "elf" => Ok(BuildOutputFormat::Elf),
+        "binary" => Ok(BuildOutputFormat::Binary),
+        _ => Err(format!(
+            "Unknown output format {format:?}; expected elf or binary"
+        )),
+    }
+}
+
+fn validate_program_name(program: &str, label: &str) -> Result<(), String> {
+    if program.is_empty() {
+        return Err(format!("{label} cannot be empty"));
+    }
+
+    Ok(())
+}
+
 fn validate_entry_symbol(symbol: &str) -> Result<(), String> {
     if symbol.is_empty() {
         return Err(String::from("Entry symbol cannot be empty"));
@@ -288,6 +434,61 @@ fn validate_entry_symbol(symbol: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn build_output(
+    asm: &str,
+    target: Target,
+    output_path: Option<&std::path::Path>,
+    linker_script: Option<&std::path::Path>,
+    output_format: BuildOutputFormat,
+    linker: &str,
+) -> Result<driver::BuildOutput, String> {
+    if target == Target::X86_64Free {
+        if let Some(linker_script) = linker_script {
+            let output_path = output_path
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| default_freestanding_link_output(output_format));
+
+            build_freestanding_executable(
+                asm,
+                FreestandingLinkOptions {
+                    output_path: &output_path,
+                    linker_script,
+                    output_format: output_format.into(),
+                    linker,
+                },
+            )
+        } else {
+            let object_path = output_path
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::Path::new("target").join("subsea").join("main.o"));
+
+            build_object(asm, &object_path)
+        }
+    } else {
+        build_executable(asm, output_path)
+    }
+}
+
+fn default_freestanding_link_output(output_format: BuildOutputFormat) -> PathBuf {
+    let file_name = match output_format {
+        BuildOutputFormat::Elf => "main",
+        BuildOutputFormat::Binary => "main.bin",
+    };
+
+    std::path::Path::new("target")
+        .join("subsea")
+        .join(file_name)
+}
+
+impl From<BuildOutputFormat> for FreestandingOutputFormat {
+    fn from(format: BuildOutputFormat) -> Self {
+        match format {
+            BuildOutputFormat::Elf => Self::Elf,
+            BuildOutputFormat::Binary => Self::Binary,
+        }
+    }
 }
 
 fn compile_to_asm(
@@ -365,7 +566,9 @@ fn print_build_timings(
     println!("  parse/AST:   {:?}", compile_timings.parse_ast);
     println!("  codegen:     {:?}", compile_timings.codegen);
     println!("  assemble:    {:?}", build_timings.assemble);
-    println!("  link:        {:?}", build_timings.link);
+    if let Some(link) = build_timings.link {
+        println!("  link:        {link:?}");
+    }
     println!("  total:       {total:?}");
 }
 
@@ -378,7 +581,7 @@ fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
     eprintln!("  subsea run <file.ss>");
     eprintln!(
-        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--timings] [-o output] <file.ss>"
+        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--linker-script|-T script.ld] [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
     );
     eprintln!("  subsea emit-asm [--target|-t x86_64|x86_64-free] [--entry symbol] <file.ss>");
     process::exit(code);
