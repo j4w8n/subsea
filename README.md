@@ -481,22 +481,48 @@ rax = &[rax]
 
 ## Memory Arithmetic
 
-Memory operands support x86-64-style address expressions:
+Declared memory can be indexed with byte offsets. The access width is inferred from the `mem` declaration unless you add an explicit width:
+
+```ss
+mem values:u64(4)
+mem bytes:u8(128)
+
+values[0] = 10
+values[8] = 20
+rax = values[8]       // u64 load
+
+bytes[rax] = 72       // u8 store
+al = bytes[rax]       // u8 load
+```
+
+Use `&name[offset]` to compute the address of indexed memory without loading or storing through it:
+
+```ss
+rsi = &bytes[rax]
+stack text:str = slice &bytes[10], 20
+```
+
+Index expressions can use scaled registers, with scale values of 1, 2, 4, and 8:
+
+```ss
+rax = values[r8 * 8]
+rsi = &values[r8 * 8]
+```
+
+Raw memory operands also support x86-64-style address expressions. Use this form when the base address is already in a register:
 
 ```ss
 rbx = [rax + 8]
 rcx = [rbp - 16]
 rdx = [rax + rbx + 8]
-r8 = [buf + 4]
 ```
 
-Scaled index addressing is also supported for registers, with allowed values of 1, 2, 4, and 8:
+Scaled index addressing is also supported in raw memory operands:
 
 ```ss
 rbx = [rax + rcx * 1]
 rbx = [rax + rcx * 2]
 rbx = [rax + rcx * 4 + 8]
-rbx = [buf + rcx * 8 - 16]
 ```
 
 Nested dereferences and address-of inside memory operands are not supported:
@@ -687,11 +713,12 @@ count       // integer binding
 message.ptr // stack string pointer
 message.len // stack string length
 &count      // address-of identifier or memory storage
+values[rax] // indexed memory rooted at declared storage
+&values[rax] // address of indexed memory
 [count]     // memory at address count
 [rax]       // memory at address in rax
 [rax]:u64   // memory at address in rax, with explicit width
-[buf + rax]       // memory at identifier plus register offset
-[buf + rax * 8]:u64 // scaled register offset; scale must be 1, 2, 4, or 8
+[rax + rbx * 8]:u64 // raw memory with scaled register offset
 ```
 
 Numbers inside brackets are memory addresses, not immediate values:
@@ -982,17 +1009,17 @@ Array iteration with scaled addressing:
 mem values:u64(4)
 
 main: {
-  [values]:u64 = 10
-  [values + 8]:u64 = 20
-  [values + 16]:u64 = 30
-  [values + 24]:u64 = 40
+  values[0] = 10
+  values[8] = 20
+  values[16] = 30
+  values[24] = 40
 
   r8 = 0
   r9 = 4
 
 .loop:
   jmp .done if r8 u>= r9
-  rax = [values + r8 * 8]:u64
+  rax = values[r8 * 8]
   print rax
   print "\n"
   r8 = r8 + 1
