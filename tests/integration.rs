@@ -136,7 +136,7 @@ fn build_accepts_flags_before_source_path() {
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
         .args([
             "build",
-            "-t",
+            "--timings",
             "-o",
             output_path.to_str().unwrap(),
             "tests/fixtures/main.ss",
@@ -160,12 +160,86 @@ fn build_accepts_flags_before_source_path() {
 fn build_rejects_duplicate_timings_flag() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
-        .args(["build", "-t", "--timings", "tests/fixtures/main.ss"])
+        .args(["build", "--timings", "--timings", "tests/fixtures/main.ss"])
         .output()
         .expect("failed to start subsea");
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Timings flag was already provided"));
+}
+
+#[test]
+fn emit_asm_accepts_freestanding_target() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "x86_64-free",
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("  hlt\n"));
+}
+
+#[test]
+fn freestanding_target_accepts_custom_entry_symbol() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "-t",
+            "x86_64-free",
+            "--entry",
+            "kernel_entry",
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains(".global kernel_entry\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("kernel_entry:\n"));
+}
+
+#[test]
+fn linux_target_rejects_custom_entry_symbol() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--entry",
+            "kernel_entry",
+            "tests/fixtures/main.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--entry is only supported"));
+}
+
+#[test]
+fn freestanding_target_rejects_linux_helpers() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "-t", "x86_64-free", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("print is only supported"));
 }
 
 #[test]

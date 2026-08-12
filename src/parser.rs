@@ -142,6 +142,7 @@ impl Parser {
                 let code = self.parse_exit_code()?;
                 Ok(Instruction::Exit { code })
             }
+            Some(Token::Halt) => Ok(Instruction::Halt),
             Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => match self.advance() {
                 Some(Token::Ident(name)) => {

@@ -741,6 +741,16 @@ fn parses_call_and_ret() {
 }
 
 #[test]
+fn parses_hlt() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Halt]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(program.labels[0].instructions, vec![Instruction::Halt]);
+}
+
+#[test]
 fn parses_push_and_pop() {
     let mut tokens = empty_main_prefix();
     tokens.extend([Token::Push, treg("rax"), Token::Pop, treg("rbx")]);

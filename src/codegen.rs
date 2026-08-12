@@ -6,19 +6,77 @@ use crate::ast::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Target {
+    X86_64,
+    X86_64Free,
+}
+
+struct LabelSymbols<'a> {
+    source_entry: &'a str,
+    entry_symbol: &'a str,
+}
+
+impl<'a> LabelSymbols<'a> {
+    fn emit_label(&self, source_label: &str) -> String {
+        if source_label == self.source_entry {
+            self.entry_symbol.to_string()
+        } else {
+            source_label.to_string()
+        }
+    }
+}
+
+impl Target {
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "x86_64" => Ok(Self::X86_64),
+            "x86_64-free" => Ok(Self::X86_64Free),
+            _ => Err(format!(
+                "Unknown target {name:?}; expected x86_64 or x86_64-free"
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::X86_64Free => "x86_64-free",
+        }
+    }
+
+    fn is_freestanding(self) -> bool {
+        matches!(self, Self::X86_64Free)
+    }
+}
+
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
+    emit_x86_64_asm(program, Target::X86_64)
+}
+
+pub fn emit_x86_64_asm(program: &Program, target: Target) -> Result<String, String> {
+    emit_x86_64_asm_with_entry_symbol(program, target, "_start")
+}
+
+pub fn emit_x86_64_asm_with_entry_symbol(
+    program: &Program,
+    target: Target,
+    entry_symbol: &str,
+) -> Result<String, String> {
     let strings = collect_string_bindings(program)?;
     let mut literal_indexes = HashMap::new();
     let mut asm = String::new();
+    let labels = LabelSymbols {
+        source_entry: &program.entry,
+        entry_symbol,
+    };
 
     asm.push_str(".intel_syntax noprefix\n");
     emit_data(&mut asm, &program.memory);
     emit_bss(&mut asm, &program.memory);
     emit_rodata(&mut asm, &strings.all, &strings.floats);
     asm.push_str(".section .text\n");
-    asm.push_str(".global _start\n\n");
-    asm.push_str("_start:\n");
-    asm.push_str(&format!("  jmp {}\n\n", program.entry));
+    asm.push_str(&format!(".global {entry_symbol}\n\n"));
 
     let top_level_labels: HashSet<&str> = program
         .labels
@@ -30,7 +88,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
         let stack = build_stack_frame(label)?;
         validate_stack_register_use(label, &stack)?;
 
-        asm.push_str(&format!("{}:\n", label.name));
+        asm.push_str(&format!("{}:\n", labels.emit_label(&label.name)));
 
         if stack.has_slots() {
             emit_frame_prologue(&mut asm, &stack);
@@ -69,19 +127,28 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("{skip_label}:\n"));
                 }
                 Instruction::Call { target } => {
-                    asm.push_str(&format!("  call {target}\n"));
+                    asm.push_str(&format!("  call {}\n", labels.emit_label(target)));
                 }
                 Instruction::Exit { code } => {
+                    if target.is_freestanding() {
+                        return Err(String::from(
+                            "exit is only supported for target x86_64; use hlt or an explicit loop for x86_64-free",
+                        ));
+                    }
+
                     asm.push_str("  mov rax, 60\n");
                     asm.push_str(&format!("  mov rdi, {code}\n"));
                     asm.push_str("  syscall\n");
+                }
+                Instruction::Halt => {
+                    asm.push_str("  hlt\n");
                 }
                 Instruction::Jmp { target, condition } => {
                     if let Some(condition) = condition {
                         conditional_jump_index += 1;
                         emit_conditional_jump(
                             &mut asm,
-                            target,
+                            &labels.emit_label(target),
                             condition,
                             &strings,
                             &label.name,
@@ -89,7 +156,7 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                             conditional_jump_index,
                         )?;
                     } else {
-                        asm.push_str(&format!("  jmp {target}\n"));
+                        asm.push_str(&format!("  jmp {}\n", labels.emit_label(target)));
                     }
                 }
                 Instruction::Label { name } => {
@@ -107,6 +174,10 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     )?;
                 }
                 Instruction::Print { parts } => {
+                    if target.is_freestanding() {
+                        return Err(String::from("print is only supported for target x86_64"));
+                    }
+
                     for part in parts {
                         match part {
                             PrintPart::Binding(name) => {
@@ -175,6 +246,10 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
                     asm.push_str(&format!("  push {src}\n"));
                 }
                 Instruction::Read { src, dst, len } => {
+                    if target.is_freestanding() {
+                        return Err(String::from("read is only supported for target x86_64"));
+                    }
+
                     emit_read_instruction(&mut asm, src, dst, len, &strings, &label.name, &stack)?;
                 }
                 Instruction::Ret => {

@@ -5,7 +5,9 @@ use subsea::ast::{
     ConditionExpr, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
     Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
-use subsea::codegen::emit_x86_64_linux_asm;
+use subsea::codegen::{
+    Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
+};
 
 fn s(value: &str) -> String {
     value.to_string()
@@ -210,7 +212,7 @@ fn emits_stack_frame_and_stack_assignment() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("main:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
+    assert!(asm.contains("_start:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
     assert!(asm.contains("  mov qword ptr [rbp - 8], 8\n"));
     assert!(asm.contains("  add qword ptr [rbp - 8], 1\n"));
     assert!(asm.contains("  mov rax, qword ptr [rbp - 8]\n"));
@@ -232,7 +234,7 @@ fn emits_stack_string_literal_print() {
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains(".Lstr_main_message:\n  .byte 104, 101, 108, 108, 111\n"));
-    assert!(asm.contains("main:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
+    assert!(asm.contains("_start:\n  push rbp\n  mov rbp, rsp\n  sub rsp, 16\n"));
     assert!(asm.contains("  push r10\n"));
     assert!(asm.contains("  lea r10, [rip + .Lstr_main_message]\n"));
     assert!(asm.contains("  mov qword ptr [rbp - 8], r10\n"));
@@ -1316,6 +1318,26 @@ fn emits_call_and_ret() {
 }
 
 #[test]
+fn emits_hlt() {
+    let program = main_program(vec![Instruction::Halt]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  hlt\n"));
+}
+
+#[test]
+fn freestanding_rejects_print() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::Literal(s("hi"))],
+    }]);
+
+    let error = emit_x86_64_asm(&program, Target::X86_64Free).unwrap_err();
+
+    assert_eq!(error, "print is only supported for target x86_64");
+}
+
+#[test]
 fn emits_push_and_pop() {
     let program = main_program(vec![
         Instruction::Push { src: reg("rax") },
@@ -1389,7 +1411,70 @@ fn emits_inline_label() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("main:\n.L.main.loop:\n  jmp .L.main.loop\n"));
+    assert!(asm.contains("_start:\n.L.main.loop:\n  jmp .L.main.loop\n"));
+}
+
+#[test]
+fn emits_program_entry_as_start_symbol() {
+    let program = main_program(vec![]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".global _start\n\n_start:\n"));
+    assert!(!asm.contains("\nmain:\n"));
+    assert!(!asm.contains("jmp main"));
+}
+
+#[test]
+fn rewrites_entry_label_references_to_start_symbol() {
+    let program = Program {
+        entry: s("main"),
+        memory: Vec::new(),
+        labels: vec![
+            Label {
+                name: s("main"),
+                instructions: vec![Instruction::Exit { code: 0 }],
+            },
+            Label {
+                name: s("again"),
+                instructions: vec![
+                    Instruction::Call { target: s("main") },
+                    Instruction::Exit { code: 0 },
+                ],
+            },
+        ],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("again:\n  call _start\n"));
+}
+
+#[test]
+fn emits_custom_entry_symbol() {
+    let program = Program {
+        entry: s("main"),
+        memory: Vec::new(),
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Label {
+                    name: s(".L.main.hang"),
+                },
+                Instruction::Halt,
+                Instruction::Jmp {
+                    target: s(".L.main.hang"),
+                    condition: None,
+                },
+            ],
+        }],
+    };
+
+    let asm =
+        emit_x86_64_asm_with_entry_symbol(&program, Target::X86_64Free, "kernel_entry").unwrap();
+
+    assert!(asm.contains(".global kernel_entry\n\nkernel_entry:\n"));
+    assert!(!asm.contains("\n_start:\n"));
 }
 
 #[test]

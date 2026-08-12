@@ -51,6 +51,7 @@ pub enum Instruction {
         target: String,
         condition: Option<ConditionExpr>,
     },
+    Halt,
     Label {
         name: String,
     },

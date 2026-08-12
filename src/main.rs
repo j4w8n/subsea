@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::codegen::emit_x86_64_linux_asm;
+use subsea::codegen::{Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol};
 use subsea::driver::{self, build_executable, run_executable};
 use subsea::grammar::Token;
 use subsea::lexer::get_next_token;
@@ -13,7 +13,11 @@ use subsea::parser::{Parser, validate_program_symbols};
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
-        Ok(CommandLine::EmitAsm { source_path }) => match compile_to_asm(&source_path) {
+        Ok(CommandLine::EmitAsm {
+            source_path,
+            target,
+            entry_symbol,
+        }) => match compile_to_asm(&source_path, target, entry_symbol.as_deref()) {
             Ok(asm) => print!("{asm}"),
             Err(error) => exit_with_error(error),
         },
@@ -22,13 +26,16 @@ fn main() {
             source_path,
             output_path,
             show_timings,
+            target,
+            entry_symbol,
         }) => {
             let started = Instant::now();
 
-            match compile_to_asm_with_timings(&source_path).and_then(|compilation| {
-                build_executable(&compilation.asm, output_path.as_deref())
-                    .map(|build| (compilation.timings, build))
-            }) {
+            match compile_to_asm_with_timings(&source_path, target, entry_symbol.as_deref())
+                .and_then(|compilation| {
+                    build_executable(&compilation.asm, output_path.as_deref())
+                        .map(|build| (compilation.timings, build))
+                }) {
                 Ok((compile_timings, output)) => {
                     let total = started.elapsed();
 
@@ -45,7 +52,9 @@ fn main() {
             }
         }
         Ok(CommandLine::Run { source_path }) => {
-            match compile_to_asm(&source_path).and_then(|asm| build_executable(&asm, None)) {
+            match compile_to_asm(&source_path, Target::X86_64, None)
+                .and_then(|asm| build_executable(&asm, None))
+            {
                 Ok(output) => match run_executable(&output.executable_path) {
                     Ok(status) => {
                         if let Err(error) = driver::remove_build_dir(&output.build_dir) {
@@ -69,11 +78,15 @@ fn main() {
 enum CommandLine {
     EmitAsm {
         source_path: String,
+        target: Target,
+        entry_symbol: Option<String>,
     },
     Build {
         source_path: String,
         output_path: Option<PathBuf>,
         show_timings: bool,
+        target: Target,
+        entry_symbol: Option<String>,
     },
     Help,
     Run {
@@ -84,9 +97,7 @@ enum CommandLine {
 fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
     match args.as_slice() {
         [flag] if flag == "--help" || flag == "-h" => Ok(CommandLine::Help),
-        [command, source_path] if command == "emit-asm" => Ok(CommandLine::EmitAsm {
-            source_path: source_path.clone(),
-        }),
+        [command, rest @ ..] if command == "emit-asm" => parse_emit_asm_command(rest),
         [command, source_path] if command == "run" => Ok(CommandLine::Run {
             source_path: source_path.clone(),
         }),
@@ -96,11 +107,24 @@ fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
     }
 }
 
+fn parse_emit_asm_command(args: &[String]) -> Result<CommandLine, String> {
+    let (source_path, target, entry_symbol) = parse_source_target_and_entry(args, "emit-asm")?;
+
+    Ok(CommandLine::EmitAsm {
+        source_path,
+        target,
+        entry_symbol,
+    })
+}
+
 fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     let mut source_path = None;
     let mut output_path = None;
     let mut show_timings = false;
     let mut timings_provided = false;
+    let mut target = Target::X86_64;
+    let mut target_provided = false;
+    let mut entry_symbol = None;
     let mut position = 0;
 
     while position < args.len() {
@@ -118,13 +142,41 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
 
                 output_path = Some(PathBuf::from(path));
             }
-            "--timings" | "-t" => {
+            "--timings" => {
                 if timings_provided {
                     return Err(String::from("Timings flag was already provided"));
                 }
 
                 timings_provided = true;
                 show_timings = true;
+            }
+            "--target" | "-t" => {
+                position += 1;
+
+                let target_name = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected target after --target/-t"))?;
+
+                if target_provided {
+                    return Err(String::from("Target was already provided"));
+                }
+
+                target = Target::parse(target_name)?;
+                target_provided = true;
+            }
+            "--entry" => {
+                position += 1;
+
+                let symbol = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected symbol after --entry"))?;
+
+                if entry_symbol.is_some() {
+                    return Err(String::from("Entry symbol was already provided"));
+                }
+
+                validate_entry_symbol(symbol)?;
+                entry_symbol = Some(symbol.clone());
             }
             flag if flag.starts_with('-') => return Err(format!("Unknown build flag {flag:?}")),
             path => {
@@ -140,16 +192,111 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     }
 
     let source_path = source_path.ok_or_else(|| String::from("Missing build source path"))?;
+    validate_entry_target(target, entry_symbol.as_deref())?;
 
     Ok(CommandLine::Build {
         source_path,
         output_path,
         show_timings,
+        target,
+        entry_symbol,
     })
 }
 
-fn compile_to_asm(source_path: &str) -> Result<String, String> {
-    compile_to_asm_with_timings(source_path).map(|compilation| compilation.asm)
+fn parse_source_target_and_entry(
+    args: &[String],
+    command: &str,
+) -> Result<(String, Target, Option<String>), String> {
+    let mut source_path = None;
+    let mut target = Target::X86_64;
+    let mut target_provided = false;
+    let mut entry_symbol = None;
+    let mut position = 0;
+
+    while position < args.len() {
+        match args[position].as_str() {
+            "--target" | "-t" => {
+                position += 1;
+
+                let target_name = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected target after --target/-t"))?;
+
+                if target_provided {
+                    return Err(String::from("Target was already provided"));
+                }
+
+                target = Target::parse(target_name)?;
+                target_provided = true;
+            }
+            "--entry" => {
+                position += 1;
+
+                let symbol = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected symbol after --entry"))?;
+
+                if entry_symbol.is_some() {
+                    return Err(String::from("Entry symbol was already provided"));
+                }
+
+                validate_entry_symbol(symbol)?;
+                entry_symbol = Some(symbol.clone());
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("Unknown {command} flag {flag:?}"));
+            }
+            path => {
+                if source_path.is_some() {
+                    return Err(String::from("Source path was already provided"));
+                }
+
+                source_path = Some(path.to_string());
+            }
+        }
+
+        position += 1;
+    }
+
+    let source_path = source_path.ok_or_else(|| format!("Missing {command} source path"))?;
+    validate_entry_target(target, entry_symbol.as_deref())?;
+    Ok((source_path, target, entry_symbol))
+}
+
+fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(), String> {
+    if entry_symbol.is_some() && target != Target::X86_64Free {
+        return Err(String::from(
+            "--entry is only supported for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_entry_symbol(symbol: &str) -> Result<(), String> {
+    if symbol.is_empty() {
+        return Err(String::from("Entry symbol cannot be empty"));
+    }
+
+    if !symbol
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+    {
+        return Err(format!(
+            "Entry symbol {symbol:?} can only contain ASCII letters, digits, '_' and '.'"
+        ));
+    }
+
+    Ok(())
+}
+
+fn compile_to_asm(
+    source_path: &str,
+    target: Target,
+    entry_symbol: Option<&str>,
+) -> Result<String, String> {
+    compile_to_asm_with_timings(source_path, target, entry_symbol)
+        .map(|compilation| compilation.asm)
 }
 
 struct CompilationOutput {
@@ -164,7 +311,11 @@ struct CompileTimings {
     codegen: Duration,
 }
 
-fn compile_to_asm_with_timings(source_path: &str) -> Result<CompilationOutput, String> {
+fn compile_to_asm_with_timings(
+    source_path: &str,
+    target: Target,
+    entry_symbol: Option<&str>,
+) -> Result<CompilationOutput, String> {
     let read_started = Instant::now();
     let source = fs::read_to_string(source_path)
         .map_err(|error| format!("Failed to read {source_path:?}: {error}"))?;
@@ -186,7 +337,10 @@ fn compile_to_asm_with_timings(source_path: &str) -> Result<CompilationOutput, S
     let parse_ast = parse_started.elapsed();
 
     let codegen_started = Instant::now();
-    let asm = emit_x86_64_linux_asm(&program)?;
+    let asm = match entry_symbol {
+        Some(entry_symbol) => emit_x86_64_asm_with_entry_symbol(&program, target, entry_symbol)?,
+        None => emit_x86_64_asm(&program, target)?,
+    };
     let codegen = codegen_started.elapsed();
 
     Ok(CompilationOutput {
@@ -223,7 +377,9 @@ fn exit_with_error(error: String) -> ! {
 fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
     eprintln!("  subsea run <file.ss>");
-    eprintln!("  subsea build [--timings|-t] [-o output] <file.ss>");
-    eprintln!("  subsea emit-asm <file.ss>");
+    eprintln!(
+        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--timings] [-o output] <file.ss>"
+    );
+    eprintln!("  subsea emit-asm [--target|-t x86_64|x86_64-free] [--entry symbol] <file.ss>");
     process::exit(code);
 }

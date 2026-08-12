@@ -24,6 +24,7 @@ pub enum Token {
     FloatLiteral(String),
     Greater,
     GreaterEquals,
+    Halt,
     Ident(String),
     If,
     IGreater,
