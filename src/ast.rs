@@ -304,6 +304,7 @@ pub enum Operand {
         address: Address,
         width: Option<MemoryWidth>,
     },
+    AddressOf(Address),
     FloatLiteral(String),
     Immediate(i128),
     Register(String),

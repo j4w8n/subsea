@@ -472,6 +472,92 @@ fn parses_width_converted_operand() {
 }
 
 #[test]
+fn parses_indexed_memory_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tid("values"),
+        Token::LBracket,
+        treg("r8"),
+        Token::Star,
+        tnum("8"),
+        Token::RBracket,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::Dereference {
+                address: subsea::ast::Address {
+                    first: subsea::ast::AddressTerm::Ident(s("values")),
+                    rest: vec![(
+                        subsea::ast::AddressOperator::Add,
+                        subsea::ast::AddressTerm::ScaledRegister {
+                            register: s("r8"),
+                            scale: 8,
+                        },
+                    )],
+                },
+                width: None,
+            }),
+        }
+    );
+}
+
+#[test]
+fn parses_indexed_memory_assignment_target() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        tid("values"),
+        Token::LBracket,
+        treg("r8"),
+        Token::Star,
+        tnum("8"),
+        Token::RBracket,
+        Token::Equals,
+        treg("rax"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert!(matches!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Dereference { .. }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parses_address_of_indexed_memory() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rsi"),
+        Token::Equals,
+        Token::Ampersand,
+        tid("buf"),
+        Token::LBracket,
+        treg("rax"),
+        Token::RBracket,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert!(matches!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            value: AssignmentValue::Operand(Operand::AddressOf(_)),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn rejects_unknown_width_conversion() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

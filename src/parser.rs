@@ -217,6 +217,15 @@ impl Parser {
             Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::Colon)) => Err(format!(
                 "Nested label {name}: must be local; write .{name}: instead"
             )),
+            Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::LBracket)) => {
+                let address = self.parse_indexed_address(name)?;
+                let width = self.parse_optional_memory_width()?;
+
+                self.parse_assignment(AssignmentTarget::Operand(Operand::Dereference {
+                    address,
+                    width,
+                }))
+            }
             Some(Token::Ident(name)) => {
                 self.parse_assignment(AssignmentTarget::Operand(Operand::Ident(name)))
             }
@@ -651,6 +660,9 @@ impl Parser {
     fn parse_operand(&mut self) -> Result<Operand, String> {
         let operand = match self.advance() {
             Some(Token::Ampersand) => match self.advance() {
+                Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::LBracket)) => {
+                    self.parse_indexed_address(name).map(Operand::AddressOf)
+                }
                 Some(Token::Ident(name)) => Ok(Operand::Pointer(name)),
                 Some(Token::Register(name)) => Err(format!(
                     "Cannot take the address of register {name}; expected a label after '&'"
@@ -690,6 +702,11 @@ impl Parser {
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
             Some(Token::FloatLiteral(value)) => Ok(Operand::FloatLiteral(value)),
             Some(Token::Register(name)) => Ok(Operand::Register(name)),
+            Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::LBracket)) => {
+                let address = self.parse_indexed_address(name)?;
+                let width = self.parse_optional_memory_width()?;
+                Ok(Operand::Dereference { address, width })
+            }
             Some(Token::Ident(name)) => self.parse_ident_operand(name),
             Some(Token::Pointer(name)) => {
                 if is_register_name(&name) {
@@ -736,6 +753,32 @@ impl Parser {
         Ok(Operand::Converted {
             operand: Box::new(operand),
             conversion,
+        })
+    }
+
+    fn parse_indexed_address(&mut self, base: String) -> Result<Address, String> {
+        self.expect(Token::LBracket, "Expected '[' after indexed memory base")?;
+
+        let mut rest = Vec::new();
+        if !matches!(self.peek(), Some(Token::RBracket)) {
+            rest.push((AddressOperator::Add, self.parse_address_term()?));
+
+            while matches!(self.peek(), Some(Token::Plus | Token::Minus)) {
+                let operator = match self.advance() {
+                    Some(Token::Plus) => AddressOperator::Add,
+                    Some(Token::Minus) => AddressOperator::Subtract,
+                    _ => unreachable!(),
+                };
+
+                rest.push((operator, self.parse_address_term()?));
+            }
+        }
+
+        self.expect(Token::RBracket, "Expected ']' after indexed memory offset")?;
+
+        Ok(Address {
+            first: AddressTerm::Ident(base),
+            rest,
         })
     }
 
@@ -1397,7 +1440,7 @@ fn validate_operand_symbol(
                 "Unknown address target {name:?} in label {current_label:?}"
             ))
         }
-        Operand::Dereference { address, .. } => {
+        Operand::Dereference { address, .. } | Operand::AddressOf(address) => {
             for term in
                 std::iter::once(&address.first).chain(address.rest.iter().map(|(_, term)| term))
             {

@@ -837,6 +837,93 @@ fn rejects_width_conversion_to_memory() {
 }
 
 #[test]
+fn emits_indexed_memory_load_and_store() {
+    let program = Program {
+        entry: s("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("values"),
+            width: MemoryWidth::U64,
+            count: 4,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("rax")),
+                    value: AssignmentValue::Operand(Operand::Dereference {
+                        address: subsea::ast::Address {
+                            first: subsea::ast::AddressTerm::Ident(s("values")),
+                            rest: vec![(
+                                subsea::ast::AddressOperator::Add,
+                                subsea::ast::AddressTerm::ScaledRegister {
+                                    register: s("r8"),
+                                    scale: 8,
+                                },
+                            )],
+                        },
+                        width: None,
+                    }),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: subsea::ast::Address {
+                            first: subsea::ast::AddressTerm::Ident(s("values")),
+                            rest: vec![(
+                                subsea::ast::AddressOperator::Add,
+                                subsea::ast::AddressTerm::ScaledRegister {
+                                    register: s("r8"),
+                                    scale: 8,
+                                },
+                            )],
+                        },
+                        width: None,
+                    }),
+                    value: AssignmentValue::Operand(reg("rax")),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, qword ptr [values + r8 * 8]\n"));
+    assert!(asm.contains("  mov qword ptr [values + r8 * 8], rax\n"));
+}
+
+#[test]
+fn emits_address_of_indexed_memory() {
+    let program = Program {
+        entry: s("main"),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("buf"),
+            width: MemoryWidth::U8,
+            count: 16,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("rsi")),
+                    value: AssignmentValue::Operand(Operand::AddressOf(subsea::ast::Address {
+                        first: subsea::ast::AddressTerm::Ident(s("buf")),
+                        rest: vec![(
+                            subsea::ast::AddressOperator::Add,
+                            subsea::ast::AddressTerm::Register(s("rax")),
+                        )],
+                    })),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  lea rsi, [buf + rax]\n"));
+}
+
+#[test]
 fn emits_boolean_comparison_assignment() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),

@@ -104,6 +104,18 @@ fn compiles_and_runs_width_conversion_features() {
 }
 
 #[test]
+fn compiles_and_runs_indexed_memory_features() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/indexed_memory.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n20\n30\ni!\n");
+}
+
+#[test]
 fn help_exits_successfully() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

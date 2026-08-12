@@ -2445,6 +2445,7 @@ fn validate_float_math_operand(
         Operand::Converted { .. } => Err(format!(
             "{name} cannot use integer width conversion in floating-point math"
         )),
+        Operand::AddressOf(_) => Err(format!("{name} cannot be an address-of operand")),
         Operand::Register(register) if is_xmm_register(register) => Ok(()),
         Operand::FloatLiteral(value) => validate_float_literal(value, width),
         Operand::Ident(binding) if stack_scalar_slot(stack, binding).is_some() => {
@@ -2652,6 +2653,14 @@ fn emit_copy_instruction(
         asm.push_str(&format!("  lea {dst}, [rip + {name}]\n"));
 
         Ok(())
+    } else if let Operand::AddressOf(address) = src {
+        validate_address_copy_dst(dst)?;
+
+        let dst = emit_operand(dst, strings, label_name, stack)?;
+        let address = emit_address(address);
+        asm.push_str(&format!("  lea {dst}, [{address}]\n"));
+
+        Ok(())
     } else {
         emit_binary_instruction(asm, "mov", src, dst, strings, label_name, stack)
     }
@@ -2776,6 +2785,7 @@ fn validate_binary_operands(
         dst,
         Operand::Immediate(_)
             | Operand::Pointer(_)
+            | Operand::AddressOf(_)
             | Operand::StringProperty { .. }
             | Operand::Converted { .. }
     ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
@@ -2786,6 +2796,10 @@ fn validate_binary_operands(
     }
 
     if matches!(src, Operand::Pointer(_)) {
+        return Err(format!("{opcode} source cannot be an address-of operand"));
+    }
+
+    if matches!(src, Operand::AddressOf(_)) {
         return Err(format!("{opcode} source cannot be an address-of operand"));
     }
 
@@ -2895,7 +2909,10 @@ fn validate_width_conversion_source(
         return Err(String::from("Width conversions cannot be nested"));
     }
 
-    if matches!(src, Operand::Immediate(_) | Operand::Pointer(_)) {
+    if matches!(
+        src,
+        Operand::Immediate(_) | Operand::Pointer(_) | Operand::AddressOf(_)
+    ) {
         return Err(String::from(
             "Width conversion source must be an integer register or memory operand",
         ));
@@ -2925,6 +2942,7 @@ fn validate_boolean_assignment_destination(
         dst,
         Operand::Immediate(_)
             | Operand::Pointer(_)
+            | Operand::AddressOf(_)
             | Operand::StringProperty { .. }
             | Operand::FloatLiteral(_)
     ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
@@ -2997,6 +3015,7 @@ fn validate_bitwise_unary_operand(
         dst,
         Operand::Immediate(_)
             | Operand::Pointer(_)
+            | Operand::AddressOf(_)
             | Operand::StringProperty { .. }
             | Operand::FloatLiteral(_)
     ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
@@ -3160,7 +3179,7 @@ fn validate_push_operand(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    if matches!(src, Operand::Pointer(_)) {
+    if matches!(src, Operand::Pointer(_) | Operand::AddressOf(_)) {
         return Err(String::from("push source cannot be an address-of operand"));
     }
 
@@ -3178,7 +3197,10 @@ fn validate_pop_operand(
 ) -> Result<(), String> {
     if matches!(
         dst,
-        Operand::Immediate(_) | Operand::Pointer(_) | Operand::StringProperty { .. }
+        Operand::Immediate(_)
+            | Operand::Pointer(_)
+            | Operand::AddressOf(_)
+            | Operand::StringProperty { .. }
     ) {
         return Err(String::from(
             "pop destination must be a 64-bit register or explicitly 64-bit memory operand",
@@ -3243,6 +3265,9 @@ fn emit_operand(
     match operand {
         Operand::Converted { .. } => Err(String::from(
             "Width conversion operands are only supported as assignment sources",
+        )),
+        Operand::AddressOf(_) => Err(String::from(
+            "Address-of operands are only supported as assignment sources",
         )),
         Operand::Dereference { address, width } => {
             let emitted_address = emit_address(address);
@@ -3331,6 +3356,7 @@ fn operand_width(
 ) -> Result<Option<Width>, String> {
     match operand {
         Operand::Converted { operand, .. } => operand_width(operand, strings, _label_name, stack),
+        Operand::AddressOf(_) => Ok(Some(Width::Bits64)),
         Operand::Register(name) => Ok(register_width(name)),
         Operand::Dereference { address, width } => {
             Ok(resolve_memory_width(address, *width, strings)?.map(memory_width_bits))
@@ -3381,6 +3407,7 @@ fn float_memory_width(
 ) -> Result<Option<MemoryWidth>, String> {
     match operand {
         Operand::Converted { operand, .. } => float_memory_width(operand, strings, stack),
+        Operand::AddressOf(_) => Ok(None),
         Operand::Dereference { address, width } => {
             Ok(resolve_memory_width(address, *width, strings)?.filter(|width| width.is_float()))
         }
@@ -3530,6 +3557,7 @@ pub(crate) enum Width {
 fn operand_uses_high_byte_register(operand: &Operand) -> bool {
     match operand {
         Operand::Converted { operand, .. } => operand_uses_high_byte_register(operand),
+        Operand::AddressOf(address) => address_uses_register(address, is_high_byte_register),
         Operand::Register(name) => is_high_byte_register(name),
         Operand::Dereference { address, .. } => {
             address_uses_register(address, is_high_byte_register)
@@ -3541,6 +3569,7 @@ fn operand_uses_high_byte_register(operand: &Operand) -> bool {
 fn operand_uses_extended_register(operand: &Operand) -> bool {
     match operand {
         Operand::Converted { operand, .. } => operand_uses_extended_register(operand),
+        Operand::AddressOf(address) => address_uses_register(address, is_extended_register),
         Operand::Register(name) => is_extended_register(name),
         Operand::Dereference { address, .. } => {
             address_uses_register(address, is_extended_register)
@@ -3552,6 +3581,7 @@ fn operand_uses_extended_register(operand: &Operand) -> bool {
 fn operand_uses_xmm_register(operand: &Operand) -> bool {
     match operand {
         Operand::Converted { operand, .. } => operand_uses_xmm_register(operand),
+        Operand::AddressOf(address) => address_uses_register(address, is_xmm_register),
         Operand::Register(name) => is_xmm_register(name),
         Operand::Dereference { address, .. } => address_uses_register(address, is_xmm_register),
         _ => false,
@@ -3561,6 +3591,7 @@ fn operand_uses_xmm_register(operand: &Operand) -> bool {
 fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
     match operand {
         Operand::Converted { operand, .. } => operand_uses_register_family(operand, register),
+        Operand::AddressOf(address) => address_uses_register_family(address, register),
         Operand::Register(name) => same_register_family(name, register),
         Operand::Dereference { address, .. } => address_uses_register_family(address, register),
         _ => false,
@@ -3572,6 +3603,7 @@ fn operand_address_uses_register_family(operand: &Operand, register: &str) -> bo
         Operand::Converted { operand, .. } => {
             operand_address_uses_register_family(operand, register)
         }
+        Operand::AddressOf(address) => address_uses_register_family(address, register),
         Operand::Dereference { address, .. } => address_uses_register_family(address, register),
         _ => false,
     }
