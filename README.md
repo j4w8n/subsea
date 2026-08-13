@@ -416,7 +416,7 @@ Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`,
 - `section` selects the exact output section name.
 - `align` must be a non-zero power of two.
 - `export` makes the data block symbol global.
-- `keep` marks the block as retention-sensitive for readers and linker scripts; the linker script should still use `KEEP(*(.section_name))` when section garbage collection is enabled.
+- On x86-64 ELF, `keep` emits a retained section using the GNU `R` section flag. Linker scripts can still use `KEEP(*(.section_name))` for compatibility with linkers that do not honor retained sections.
 
 Scalar floating-point arithmetic uses explicit width-prefixed operators:
 
@@ -959,6 +959,12 @@ subsea build -t x86_64-free -T kernel.ld --format binary -o kernel.bin kernel.ss
 
 ```sh
 subsea build -t x86_64-free --linker ld.lld -T kernel.ld -o kernel.elf kernel.ss
+```
+
+`--link-input`: add an extra object file to an `x86_64-free` linker-script build. This flag can be repeated.
+
+```sh
+subsea build -t x86_64-free -T kernel.ld --link-input boot.o --link-input tables.o -o kernel.elf kernel.ss
 ```
 
 `--target` or `-t`: select a target. Supported targets are `x86_64` and `x86_64-free`.
