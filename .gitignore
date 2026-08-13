@@ -1,1 +1,8 @@
 /target
+/examples/limine/subsea.iso
+/examples/limine/target
+/examples/limine/iso_root/boot/kernel.elf
+/examples/limine/iso_root/boot/limine-bios-cd.bin
+/examples/limine/iso_root/boot/limine-bios.sys
+/examples/limine/iso_root/boot/limine-uefi-cd.bin
+/examples/limine/iso_root/EFI/BOOT/BOOTX64.EFI

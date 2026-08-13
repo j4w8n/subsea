@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp,
-    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PortOperand, PrintPart,
+    Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -144,6 +144,10 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                 Instruction::Halt => {
                     asm.push_str("  hlt\n");
                 }
+                Instruction::In { dst, port } => {
+                    validate_in_instruction(dst)?;
+                    asm.push_str(&format!("  in al, {}\n", emit_port_operand(port)));
+                }
                 Instruction::Jmp { target, condition } => {
                     if let Some(condition) = condition {
                         conditional_jump_index += 1;
@@ -235,6 +239,10 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                             }
                         }
                     }
+                }
+                Instruction::Out { port, src } => {
+                    validate_out_instruction(src)?;
+                    asm.push_str(&format!("  out {}, al\n", emit_port_operand(port)));
                 }
                 Instruction::Pop { dst } => {
                     validate_pop_operand(dst, &strings, &stack)?;
@@ -1671,6 +1679,29 @@ fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
         }
 
         asm.push('\n');
+    }
+}
+
+fn validate_in_instruction(dst: &str) -> Result<(), String> {
+    if dst == "al" {
+        Ok(())
+    } else {
+        Err(format!("in destination must be al, found {dst}"))
+    }
+}
+
+fn validate_out_instruction(src: &str) -> Result<(), String> {
+    if src == "al" {
+        Ok(())
+    } else {
+        Err(format!("out source must be al, found {src}"))
+    }
+}
+
+fn emit_port_operand(port: &PortOperand) -> String {
+    match port {
+        PortOperand::Immediate(value) => value.to_string(),
+        PortOperand::Dx => String::from("dx"),
     }
 }
 

@@ -1,7 +1,8 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     DataDeclaration, DataItem, FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    Operand, PortOperand, PrintPart, ReadSource, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -862,6 +863,47 @@ fn parses_hlt() {
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(program.labels[0].instructions, vec![Instruction::Halt]);
+}
+
+#[test]
+fn parses_port_io() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Out,
+        tnum("0x80"),
+        Token::Comma,
+        treg("al"),
+        Token::In,
+        treg("al"),
+        Token::Comma,
+        treg("dx"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Out {
+                port: PortOperand::Immediate(0x80),
+                src: s("al"),
+            },
+            Instruction::In {
+                dst: s("al"),
+                port: PortOperand::Dx,
+            },
+        ]
+    );
+}
+
+#[test]
+fn rejects_out_immediate_port_larger_than_u8() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Out, tnum("256"), Token::Comma, treg("al")]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(error, "output port must be between 0 and 255");
 }
 
 #[test]

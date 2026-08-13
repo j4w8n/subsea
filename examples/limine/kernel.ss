@@ -9,7 +9,19 @@ data limine_requests_end section ".limine_requests_end" align 8 keep {
 }
 
 main: {
+  al = 83  // S
+  call debug_write_byte
+  al = 117 // u
+  call debug_write_byte
+  al = 98  // b
+  call debug_write_byte
+
 .hang:
   hlt
   jmp .hang
+}
+
+debug_write_byte: {
+  out 0xe9, al
+  ret
 }

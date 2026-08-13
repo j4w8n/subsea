@@ -146,6 +146,8 @@ fn lexes_storage_and_cleanup_keywords() {
     for (source, token) in [
         ("const", Token::Const),
         ("hlt", Token::Halt),
+        ("in", Token::In),
+        ("out", Token::Out),
         ("read", Token::Read),
         ("slice", Token::Slice),
         ("stack", Token::Stack),

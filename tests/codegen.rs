@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction, Label, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    MemoryDeclaration, MemoryWidth, Operand, PortOperand, PrintPart, Program, ReadSource,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -1335,6 +1335,50 @@ fn emits_hlt() {
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains("  hlt\n"));
+}
+
+#[test]
+fn emits_port_io() {
+    let program = main_program(vec![
+        Instruction::Out {
+            port: PortOperand::Immediate(0x80),
+            src: s("al"),
+        },
+        Instruction::In {
+            dst: s("al"),
+            port: PortOperand::Dx,
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  out 128, al\n"));
+    assert!(asm.contains("  in al, dx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_non_al_out_source() {
+    let program = main_program(vec![Instruction::Out {
+        port: PortOperand::Immediate(0x80),
+        src: s("bl"),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "out source must be al, found bl");
+}
+
+#[test]
+fn rejects_non_al_in_destination() {
+    let program = main_program(vec![Instruction::In {
+        dst: s("bl"),
+        port: PortOperand::Immediate(0x80),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "in destination must be al, found bl");
 }
 
 #[test]

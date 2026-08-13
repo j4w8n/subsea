@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction,
-    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
-    StringInitializer, StringProperty, WidthConversion,
+    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PortOperand, PrintPart, Program,
+    ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -260,6 +260,44 @@ impl Parser {
         }
     }
 
+    fn parse_in_instruction(&mut self) -> Result<Instruction, String> {
+        let dst = self.expect_register("input destination after in")?;
+        self.expect(Token::Comma, "Expected ',' after input destination")?;
+        let port = self.parse_port_operand("input port")?;
+
+        Ok(Instruction::In { dst, port })
+    }
+
+    fn parse_out_instruction(&mut self) -> Result<Instruction, String> {
+        let port = self.parse_port_operand("output port")?;
+        self.expect(Token::Comma, "Expected ',' after output port")?;
+        let src = self.expect_register("output source after ','")?;
+
+        Ok(Instruction::Out { port, src })
+    }
+
+    fn parse_port_operand(&mut self, context: &str) -> Result<PortOperand, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value)) => {
+                let port = parse_integer_value(&value, false)
+                    .map_err(|_| format!("Invalid {context} {value:?}"))?;
+
+                if (0..=u8::MAX as i128).contains(&port) {
+                    Ok(PortOperand::Immediate(port as u8))
+                } else {
+                    Err(format!("{context} must be between 0 and 255"))
+                }
+            }
+            Some(Token::Register(name)) if name == "dx" => Ok(PortOperand::Dx),
+            Some(Token::Register(name)) => {
+                Err(format!("{context} register must be dx, found {name}"))
+            }
+            Some(Token::Minus) => Err(format!("{context} cannot be negative")),
+            Some(token) => Err(format!("Expected {context}, found {token:?}")),
+            None => Err(format!("Expected {context}, found end of input")),
+        }
+    }
+
     fn parse_instruction(&mut self, current_label: &str) -> Result<Instruction, String> {
         match self.advance() {
             Some(Token::Call) => {
@@ -276,6 +314,7 @@ impl Parser {
                 Ok(Instruction::Exit { code })
             }
             Some(Token::Halt) => Ok(Instruction::Halt),
+            Some(Token::In) => self.parse_in_instruction(),
             Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => match self.advance() {
                 Some(Token::Ident(name)) => {
@@ -331,6 +370,7 @@ impl Parser {
                 let dst = self.parse_operand()?;
                 Ok(Instruction::Pop { dst })
             }
+            Some(Token::Out) => self.parse_out_instruction(),
             Some(Token::Push) => {
                 let src = self.parse_operand()?;
                 Ok(Instruction::Push { src })
