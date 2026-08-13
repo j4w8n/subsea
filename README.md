@@ -209,6 +209,39 @@ main: {
 
 Port I/O is mainly useful in freestanding code for hardware interaction, such as serial output after UART initialization.
 
+For simple QEMU smoke tests, the debug console can be connected to port `0xe9`. You can build a tiny string-output helper by choosing a local calling convention. In this example, the caller passes the string pointer in `rsi` and the byte length in `rdx`; `debug_write` then loops over the bytes and emits each one with raw x86 port I/O:
+
+```ss
+main: {
+  const message = "Subsea\n"
+
+  rsi = message.ptr
+  rdx = message.len
+  call debug_write
+
+.hang:
+  x86 "hlt"
+  jmp .hang
+}
+
+debug_write: {
+.loop:
+  jmp .done if rdx == 0
+
+  al = [rsi]:u8
+  x86 "out 0xe9, al"
+
+  rsi = rsi + 1
+  rdx = rdx - 1
+  jmp .loop
+
+.done:
+  ret
+}
+```
+
+This keeps the hardware boundary explicit while avoiding manual ASCII byte assignments for every character.
+
 Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
 
 The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
