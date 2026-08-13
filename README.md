@@ -11,21 +11,21 @@ Every program must define a top-level `main` function; subsea starts execution t
 ```ss
 main: {
   const message = "Hello from subsea!\n"
-  print message
+  linux.print message
 
-  exit 0
+  linux.exit 0
 }
 ```
 
 ## Assembly-like Power
 
-Below is an example of using registers and calling the linux kernel. In reality, you can use `exit 0` to do the same thing without the ceremony.
+Below is an example of using registers and calling the linux kernel. In reality, you can use `linux.exit 0` to do the same thing without the ceremony.
 
 ```ss
 main: {
   rax = 60
   rdi = 0
-  syscall
+  linux.syscall
 }
 ```
 
@@ -106,22 +106,22 @@ Bitwise operations are integer-only. They do not support XMM registers or floati
 
 ## Printing
 
-`print "..."` prints literal text directly. `print rax` prints a runtime integer operand as unsigned decimal text. Printing does not add a newline automatically:
+`linux.print "..."` prints literal text directly. `linux.print rax` prints a runtime integer operand as unsigned decimal text. Printing does not add a newline automatically:
 
 ```ss
-print "Printed directly!\n"
+linux.print "Printed directly!\n"
 
 rax = 42
-print "rax = "
-print rax
-print "\n"
+linux.print "rax = "
+linux.print rax
+linux.print "\n"
 ```
 
 Formatted printing supports `{}` placeholders with bindings or stack variables:
 
 ```ss
 const name = "Subsea"
-print "Hello, {}\n", name
+linux.print "Hello, {}\n", name
 ```
 
 - Each `{}` consumes one following identifier argument.
@@ -132,8 +132,8 @@ Runtime integer printing is intentionally simple for now. It accepts registers a
 
 ```ss
 rax = 42
-print rax
-print "\n"
+linux.print rax
+linux.print "\n"
 ```
 
 Supported string escapes:
@@ -147,33 +147,33 @@ Supported string escapes:
 
 Print clobbers:
 
-`print` lowers to the Linux x86-64 `write` syscall. Runtime integer printing also uses `rax` and `rdx` for decimal conversion. Preserve values yourself with `push` and `pop` if you need them after printing:
+`linux.print` lowers to the Linux x86-64 `write` syscall. Runtime integer printing also uses `rax` and `rdx` for decimal conversion. Preserve values yourself with `push` and `pop` if you need them after printing:
 
 ```text
-// print may clobber these registers
+// linux.print may clobber these registers
 rax rdi rsi rdx rcx r11
 ```
 
-The current convention is that `print` preserves `rbx`, `rbp`, `rsp`, and all registers not listed above. This convention applies to both literal and runtime-integer printing; it may be expanded with explicit save/restore instructions as the runtime grows.
+The current convention is that `linux.print` preserves `rbx`, `rbp`, `rsp`, and all registers not listed above. This convention applies to both literal and runtime-integer printing; it may be expanded with explicit save/restore instructions as the runtime grows.
 
 ## Functions
 
-These are top-level entities that execute instructions within their code block. Use `call <function>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `exit`, or an equivalent `syscall`.
+These are top-level entities that execute instructions within their code block. Use `call <function>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `linux.exit`, or an equivalent `linux.syscall`.
 
 - `ret` emits generated stack-frame cleanup automatically - unless the stack is manually changed via `push` or `pop`.
-- `exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
-- `hlt` emits the x86-64 `hlt` instruction. It is mainly useful in freestanding code, usually inside an infinite loop.
+- `linux.exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
+- `x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
 
 ```ss
 main: {
   call helper
 
-  print "Done\n"
-  exit 0
+  linux.print "Done\n"
+  linux.exit 0
 }
 
 helper: {
-  print "Helping!\n"
+  linux.print "Helping!\n"
   ret
 }
 ```
@@ -182,27 +182,27 @@ Helping!
 Done
 ```
 
-Freestanding `hlt` loop:
+Freestanding halt loop:
 
 ```ss
 main: {
 .hang:
-  hlt
+  x86 "hlt"
   jmp .hang
 }
 ```
 
-Port I/O uses x86-64 `in` and `out` instructions. The first supported form is byte-sized and intentionally narrow: `al` is the data register, and the port must be an immediate `0..255` or `dx`.
+Port I/O can be written as raw x86 assembly. The examples below use byte-sized `in`/`out`: `al` is the data register, and the port must be an immediate `0..255` or `dx`.
 
 ```ss
 main: {
   al = 72
-  out 0x80, al
+  x86 "out 0x80, al"
 
-  in al, dx
+  x86 "in al, dx"
 
 .hang:
-  hlt
+  x86 "hlt"
   jmp .hang
 }
 ```
@@ -220,7 +220,7 @@ main: {
   call add
   // result is now in rax
 
-  exit 0
+  linux.exit 0
 }
 
 add: {
@@ -233,7 +233,7 @@ add: {
 
 These are named positions that code execution can jump to at any time; like a bookmark. They don't start a nested block or own the instructions after them, which is why it's best practice to not indent the label name.
 
-If execution naturally reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `exit`, `syscall` or another control-flow transfer changes execution.
+If execution naturally reaches a label, it continues through the instructions after that label until a `jmp`, `ret`, `linux.exit`, `linux.syscall` or another control-flow transfer changes execution.
 
 Use `jmp .<label>` to jump to a label and continue executing code from that point.
 
@@ -242,8 +242,8 @@ main: {
   r10 = 5
 
 .loop:
-  print r10
-  print "\n"
+  linux.print r10
+  linux.print "\n"
 
   r10 = r10 - 1
   jmp .loop
@@ -258,8 +258,8 @@ main: {
   rbx = 5
 
 .loop:
-  print rbx
-  print "\n"
+  linux.print rbx
+  linux.print "\n"
 
   jmp .done if rbx == 1
 
@@ -267,8 +267,8 @@ main: {
   jmp .loop
 
 .done:
-  print "Liftoff!\n"
-  exit 0
+  linux.print "Liftoff!\n"
+  linux.exit 0
 }
 ```
 
@@ -340,14 +340,14 @@ Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers
 
 ## Compile-time Bindings
 
-Integer constants can be inlined as operands. Any constant used by `print` is emitted as bytes in `.rodata` and referenced by generated print code.
+Integer constants can be inlined as operands. Any constant used by `linux.print` is emitted as bytes in `.rodata` and referenced by generated print code.
 
 ```ss
 const count = 3   // inlined
 rax = count
 
 const message = "Hello World!\n"  // referenced
-print message
+linux.print message
 ```
 
 String bindings can't be used for register or memory assignment:
@@ -369,7 +369,7 @@ Floating-point bindings must be given an explicit `f32` or `f64` width, and are 
 ```ss
 const ratio:f32 = 1.5
 const pi:f64 = 3.14159
-print pi  // valid
+linux.print pi  // valid
 ```
 
 Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers. They can also be used as runtime operands when a floating-point width is supplied by context, such as `xmm0 = xmm0 f64+ 1.5`; assignments like `rax = 1.5` are rejected.
@@ -384,7 +384,7 @@ mem ratio:f64 = 1.5
 mem buf:u8(128)
 
 main: {
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -404,7 +404,7 @@ main: {
   [single] = xmm0
   [double] = xmm1
 
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -450,7 +450,7 @@ main: {
   xmm0 = xmm0 f64+ 1.5
   [result] = xmm0
 
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -470,7 +470,7 @@ main: {
   xmm0 = xmm0 + ratio
   xmm0 = xmm0 f64* 2.0
 
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -484,7 +484,7 @@ main: {
   xmm0 = xmm0 f64+ 2.0
   ratio = xmm0
 
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -497,10 +497,10 @@ main: {
   xmm0 = [left]
 
   jmp .less if xmm0 < [left]
-  exit 0
+  linux.exit 0
 
 .less:
-  exit 1
+  linux.exit 1
 }
 ```
 
@@ -597,11 +597,11 @@ main: {
   rdi = 0
   rsi = &buf
   rdx = 1024
-  syscall
+  linux.syscall
 
   stack input:str = slice &buf, rax
-  print input
-  exit 0
+  linux.print input
+  linux.exit 0
 }
 ```
 
@@ -617,14 +617,14 @@ main: {
 .loop:
   jmp .done if count u>= limit
 
-  print count
-  print "\n"
+  linux.print count
+  linux.print "\n"
 
   count = count + 1
   jmp .loop
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -644,7 +644,7 @@ Stack strings are runtime string slices stored as an address and a byte length. 
 
 ```ss
 stack message:str = "Hello\n"
-print message
+linux.print message
 ```
 
 Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
@@ -676,7 +676,7 @@ pop 10            // invalid: destination cannot be immediate
 ## Stack Cleanup
 
 - Using `push` or `pop` requires you to keep the stack in balance across function control flow.
-  - Every reachable `ret` must have no unmatched manual `push` instructions. A function path that reaches the end of the block without `ret`, `exit`, or an unconditional local `jmp` is also invalid; if that path has unmatched pushes, subsea reports it as unbalanced stack depth first.
+  - Every reachable `ret` must have no unmatched manual `push` instructions. A function path that reaches the end of the block without `ret`, `linux.exit`, or an unconditional local `jmp` is also invalid; if that path has unmatched pushes, subsea reports it as unbalanced stack depth first.
   - Local labels must be reached with one consistent stack depth from every path.
 
 ```ss
@@ -684,7 +684,7 @@ main: {
   push rax
   call helper
   pop rax   // must pop here, or you'll get a stack balance error
-  exit 0
+  linux.exit 0
 }
 
 helper: {
@@ -694,7 +694,7 @@ helper: {
 
 ## Reading Input
 
-`read stdin, <destination>, <buffer_size>` reads bytes from stdin into writable memory.
+`linux.read stdin, <destination>, <buffer_size>` reads bytes from stdin into writable memory.
 
 - The destination must be address-of top-level memory or a 64-bit register containing an address.
 - The buffer size must be an integer immediate, integer `const`, 64-bit register, or 64-bit stack variable.
@@ -705,10 +705,10 @@ helper: {
 mem buf:u8(1024)
 
 main: {
-  read stdin, &buf, 1024
+  linux.read stdin, &buf, 1024
   stack input:str = slice &buf, rax
-  print input
-  exit 0
+  linux.print input
+  linux.exit 0
 }
 ```
 
@@ -909,7 +909,7 @@ subsea emit-asm main.ss   // Compile to x86-64 assembly and print it
 
 ### targets
 
-The default target is `x86_64`, which means x86-64 Linux userland. This target supports Linux helpers such as `print`, `read stdin`, and `exit`.
+The default target is `x86_64`, which means x86-64 Linux userland. This target supports Linux helpers such as `linux.print`, `linux.read stdin`, and `linux.exit`.
 
 Use `x86_64-free` for freestanding x86-64 assembly. This target still emits x86-64 instructions, but it rejects Linux-only helpers because there may be no Linux process, stdout, stdin, or process exit:
 
@@ -985,7 +985,7 @@ Run it in QEMU with the debug console connected to port `0xe9`:
 qemu-system-x86_64 -M q35 -m 256M -cdrom subsea.iso -debugcon stdio -global isa-debugcon.iobase=0xe9
 ```
 
-If `kernel.ss` writes bytes with `out 0xe9, al`, they appear in the terminal where QEMU is running. The QEMU display window may stay blank because this example does not write to the framebuffer.
+If `kernel.ss` writes bytes with `x86 "out 0xe9, al"`, they appear in the terminal where QEMU is running. The QEMU display window may stay blank because this example does not write to the framebuffer.
 
 ### build flags
 
@@ -1054,13 +1054,13 @@ main: {
 
 .loop:
   jmp .done if r8 u>= 5
-  print r8
-  print "\n"
+  linux.print r8
+  linux.print "\n"
   r8 = r8 + 1
   jmp .loop
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -1071,12 +1071,12 @@ main: {
   r8 = 0
 
 .loop:
-  print r8
-  print "\n"
+  linux.print r8
+  linux.print "\n"
   r8 = r8 + 1
   jmp .loop if r8 u< 5
 
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -1089,13 +1089,13 @@ main: {
 
 .loop:
   jmp .done if r8 u>= r9
-  print r8
-  print "\n"
+  linux.print r8
+  linux.print "\n"
   r8 = r8 + 1
   jmp .loop
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -1106,30 +1106,30 @@ main: {
   rax = 3
 
   jmp .nonzero if rax != 0
-  print "zero\n"
+  linux.print "zero\n"
   jmp .done
 
 .nonzero:
-  print "non-zero\n"
+  linux.print "non-zero\n"
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
 
-Guard clause or early exit:
+Guard clause or early linux.exit:
 
 ```ss
 main: {
   rax = 0
   jmp .fail if rax == 0
 
-  print "ok\n"
-  exit 0
+  linux.print "ok\n"
+  linux.exit 0
 
 .fail:
-  print "fail\n"
-  exit 1
+  linux.print "fail\n"
+  linux.exit 1
 }
 ```
 
@@ -1143,12 +1143,12 @@ main: {
   r8 = r8 + 1
   jmp .done if r8 u> 10  // break
   jmp .loop if r8 == 5   // continue
-  print r8
-  print "\n"
+  linux.print r8
+  linux.print "\n"
   jmp .loop
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
 
@@ -1160,18 +1160,18 @@ main: {
   jmp .state_start
 
 .state_start:
-  print "start\n"
+  linux.print "start\n"
   rax = 1
   jmp .state_done if rax == 1
   jmp .state_error
 
 .state_done:
-  print "done\n"
-  exit 0
+  linux.print "done\n"
+  linux.exit 0
 
 .state_error:
-  print "error\n"
-  exit 1
+  linux.print "error\n"
+  linux.exit 1
 }
 ```
 
@@ -1192,12 +1192,12 @@ main: {
 .loop:
   jmp .done if r8 u>= r9
   rax = values[r8 * 8]
-  print rax
-  print "\n"
+  linux.print rax
+  linux.print "\n"
   r8 = r8 + 1
   jmp .loop
 
 .done:
-  exit 0
+  linux.exit 0
 }
 ```
