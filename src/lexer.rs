@@ -157,23 +157,30 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 .or_else(|| Some(Token::Ident(s))),
                 "call" => Some(Token::Call),
                 "const" => Some(Token::Const),
+                "addr" => Some(Token::Addr),
+                "align" => Some(Token::Align),
+                "data" => Some(Token::Data),
                 "exit" => Some(Token::Exit),
+                "export" => Some(Token::Export),
                 "f32" => prefixed_float_operator(chars, MemoryWidthTokens::F32)
                     .or_else(|| Some(Token::Ident(s))),
                 "f64" => prefixed_float_operator(chars, MemoryWidthTokens::F64)
                     .or_else(|| Some(Token::Ident(s))),
                 "hlt" => Some(Token::Halt),
                 "jmp" => Some(Token::Jmp),
+                "keep" => Some(Token::Keep),
                 "mem" => Some(Token::Mem),
                 "pop" => Some(Token::Pop),
                 "print" => Some(Token::Print),
                 "push" => Some(Token::Push),
                 "read" => Some(Token::Read),
                 "ret" => Some(Token::Ret),
+                "section" => Some(Token::Section),
                 "slice" => Some(Token::Slice),
                 "stack" => Some(Token::Stack),
                 "stdin" => Some(Token::Stdin),
                 "syscall" => Some(Token::Syscall),
+                "zero" => Some(Token::Zero),
                 "u" => prefixed_integer_operator(
                     chars,
                     Token::ULess,
@@ -341,6 +348,26 @@ fn prefixed_equals(chars: &mut Peekable<Chars<'_>>, token: Token) -> Option<Toke
 
 fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> Result<Token, String> {
     let mut num_str = String::from(first);
+
+    if first == '0' && matches!(chars.peek(), Some('x' | 'X')) {
+        num_str.push(chars.next().unwrap());
+
+        let mut has_digits = false;
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_hexdigit() {
+                has_digits = true;
+                num_str.push(chars.next().unwrap());
+            } else {
+                break;
+            }
+        }
+
+        if !has_digits {
+            return Err(String::from("Expected hexadecimal digits after 0x"));
+        }
+
+        return Ok(Token::NumberLiteral(num_str));
+    }
 
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {

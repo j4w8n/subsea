@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp,
+    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -72,6 +72,7 @@ pub fn emit_x86_64_asm_with_entry_symbol(
     };
 
     asm.push_str(".intel_syntax noprefix\n");
+    emit_static_data(&mut asm, &program.data);
     emit_data(&mut asm, &program.memory);
     emit_bss(&mut asm, &program.memory);
     emit_rodata(&mut asm, &strings.all, &strings.floats);
@@ -1628,6 +1629,57 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
     }
 
     asm.push('\n');
+}
+
+fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
+    for declaration in data {
+        asm.push_str(&format!(".section {}\n", declaration.section));
+
+        if declaration.export {
+            asm.push_str(&format!(".global {}\n", declaration.name));
+        }
+
+        if declaration.keep {
+            asm.push_str("  # keep\n");
+        }
+
+        if let Some(align) = declaration.align {
+            asm.push_str(&format!(".balign {align}\n"));
+        }
+
+        asm.push_str(&format!("{}:\n", declaration.name));
+
+        for item in &declaration.items {
+            match item {
+                DataItem::Scalar { width, value } => {
+                    asm.push_str(&format!(
+                        "  {} {}\n",
+                        width.directive(),
+                        format_data_scalar(*width, *value)
+                    ));
+                }
+                DataItem::Addr { target } => {
+                    asm.push_str(&format!("  .quad {target}\n"));
+                }
+                DataItem::Zero { count } => {
+                    asm.push_str(&format!("  .zero {count}\n"));
+                }
+                DataItem::Label { name } => {
+                    asm.push_str(&format!("{name}:\n"));
+                }
+            }
+        }
+
+        asm.push('\n');
+    }
+}
+
+fn format_data_scalar(width: MemoryWidth, value: i128) -> String {
+    if width == MemoryWidth::U64 {
+        (value as u64).to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {

@@ -2,8 +2,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    ConditionExpr, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction, Label, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -52,6 +53,7 @@ fn main_program(mut instructions: Vec<Instruction>) -> Program {
 
     Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![Label {
             name: s("main"),
@@ -248,6 +250,7 @@ fn emits_stack_string_literal_print() {
 fn emits_stack_string_slice_print() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -340,6 +343,7 @@ fn rejects_stack_string_property_as_destination() {
 fn emits_read_from_stdin() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -409,6 +413,7 @@ fn rejects_cross_label_jump_from_stack_label() {
 fn rejects_cross_function_jump_without_stack_frame() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![
             Label {
@@ -770,6 +775,7 @@ fn emits_32_to_64_bit_extensions() {
 fn emits_implicit_register_truncation() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -813,6 +819,7 @@ fn rejects_implicit_widening() {
 fn rejects_width_conversion_to_memory() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U64,
@@ -842,6 +849,7 @@ fn rejects_width_conversion_to_memory() {
 fn emits_indexed_memory_load_and_store() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("values"),
             width: MemoryWidth::U64,
@@ -897,6 +905,7 @@ fn emits_indexed_memory_load_and_store() {
 fn emits_address_of_indexed_memory() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -1051,6 +1060,7 @@ fn emits_unsigned_widened_multiply() {
 fn rejects_address_of_into_non_64_bit_register() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -1293,6 +1303,7 @@ fn rejects_widened_divide_rhs_that_uses_rdx() {
 fn emits_call_and_ret() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![
             Label {
@@ -1429,6 +1440,7 @@ fn emits_program_entry_as_start_symbol() {
 fn rewrites_entry_label_references_to_start_symbol() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![
             Label {
@@ -1454,6 +1466,7 @@ fn rewrites_entry_label_references_to_start_symbol() {
 fn emits_custom_entry_symbol() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![Label {
             name: s("main"),
@@ -1475,6 +1488,51 @@ fn emits_custom_entry_symbol() {
 
     assert!(asm.contains(".global kernel_entry\n\nkernel_entry:\n"));
     assert!(!asm.contains("\n_start:\n"));
+}
+
+#[test]
+fn emits_custom_data_blocks() {
+    let program = Program {
+        entry: s("main"),
+        data: vec![DataDeclaration {
+            name: s("request"),
+            section: s(".requests"),
+            align: Some(8),
+            export: true,
+            keep: true,
+            items: vec![
+                DataItem::Scalar {
+                    width: MemoryWidth::U64,
+                    value: 1,
+                },
+                DataItem::Addr {
+                    target: s("response"),
+                },
+                DataItem::Zero { count: 16 },
+                DataItem::Label {
+                    name: s("response"),
+                },
+                DataItem::Scalar {
+                    width: MemoryWidth::U64,
+                    value: 0,
+                },
+            ],
+        }],
+        memory: Vec::new(),
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![Instruction::Exit { code: 0 }],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".section .requests\n.global request\n  # keep\n.balign 8\nrequest:\n"));
+    assert!(asm.contains("  .quad 1\n"));
+    assert!(asm.contains("  .quad response\n"));
+    assert!(asm.contains("  .zero 16\n"));
+    assert!(asm.contains("response:\n  .quad 0\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
@@ -1523,6 +1581,7 @@ fn emits_unsigned_conditional_jump() {
 fn rejects_function_fallthrough() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: Vec::new(),
         labels: vec![
             Label {
@@ -1678,6 +1737,7 @@ fn rejects_high_byte_register_with_extended_register() {
 fn emits_memory_scalars_and_buffers() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![
             MemoryDeclaration::Scalar {
                 name: s("count"),
@@ -1706,6 +1766,7 @@ fn emits_memory_scalars_and_buffers() {
 fn emits_float_memory_scalars() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![
             MemoryDeclaration::FloatScalar {
                 name: s("single"),
@@ -1735,6 +1796,7 @@ fn emits_float_memory_scalars() {
 fn emits_xmm_float_loads_and_stores() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![
             MemoryDeclaration::FloatScalar {
                 name: s("single"),
@@ -1784,6 +1846,7 @@ fn emits_xmm_float_loads_and_stores() {
 fn infers_memory_width_from_declared_base() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -1830,6 +1893,7 @@ fn infers_memory_width_from_declared_base() {
 fn rejects_inferred_memory_width_mismatch() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -1874,6 +1938,7 @@ fn rejects_untyped_pointer_memory_immediate_store() {
 fn rejects_negative_immediate_for_inferred_unsigned_memory() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,
@@ -1982,6 +2047,7 @@ fn emits_xmm_float_register_arithmetic() {
 fn emits_xmm_float_memory_arithmetic() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![
             MemoryDeclaration::FloatScalar {
                 name: s("single"),
@@ -2097,6 +2163,7 @@ fn infers_plain_float_arithmetic_width_from_const() {
 fn infers_plain_float_arithmetic_width_from_memory() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::FloatScalar {
             name: s("ratio"),
             width: MemoryWidth::F32,
@@ -2230,6 +2297,7 @@ fn infers_plain_float_comparison_width_from_const() {
 fn infers_plain_float_comparison_width_from_memory() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::FloatScalar {
             name: s("limit"),
             width: MemoryWidth::F32,
@@ -2347,6 +2415,7 @@ fn rejects_float_arithmetic_width_mismatch() {
 fn generated_edge_case_assembly_assembles() {
     let program = Program {
         entry: s("main"),
+        data: Vec::new(),
         memory: vec![MemoryDeclaration::Buffer {
             name: s("buf"),
             width: MemoryWidth::U8,

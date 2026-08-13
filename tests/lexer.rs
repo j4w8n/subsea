@@ -48,6 +48,14 @@ fn lexes_float_number_literal() {
 }
 
 #[test]
+fn lexes_hex_number_literal() {
+    assert_eq!(
+        lex_one("0xf6b8f4b39de7d1ae").unwrap(),
+        Some(Token::NumberLiteral(s("0xf6b8f4b39de7d1ae")))
+    );
+}
+
+#[test]
 fn lexes_comparison_operators() {
     for (source, token) in [
         ("==", Token::EqualsEquals),

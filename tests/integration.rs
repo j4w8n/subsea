@@ -392,6 +392,46 @@ fn freestanding_build_accepts_custom_linker() {
 }
 
 #[test]
+fn limine_example_builds_kernel_elf() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let kernel_elf =
+        std::env::temp_dir().join(format!("subsea-test-limine-{}.elf", std::process::id()));
+
+    let build_output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "-T",
+            "examples/limine/kernel.ld",
+            "-o",
+            kernel_elf.to_str().unwrap(),
+            "examples/limine/kernel.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    assert!(
+        build_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let sections_output = Command::new("readelf")
+        .args(["-S", kernel_elf.to_str().unwrap()])
+        .output()
+        .expect("failed to run readelf");
+
+    let _ = std::fs::remove_file(&kernel_elf);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(sections_output.status.success());
+    assert!(String::from_utf8_lossy(&sections_output.stdout).contains(".limine_requests"));
+}
+
+#[test]
 fn freestanding_build_accepts_short_linker_script_flag() {
     let _guard = CLI_LOCK.lock().unwrap();
     let before = build_dirs();

@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, ConditionExpr, FloatMathOp, Instruction, Label, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction,
+    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -21,26 +21,159 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        let mut data = Vec::new();
         let mut memory = Vec::new();
         let mut labels = Vec::new();
 
         while !self.is_at_end() {
-            if matches!(self.peek(), Some(Token::Mem)) {
+            if matches!(self.peek(), Some(Token::Data)) {
+                data.push(self.parse_data_declaration()?);
+            } else if matches!(self.peek(), Some(Token::Mem)) {
                 memory.push(self.parse_memory_declaration()?);
             } else {
                 labels.push(self.parse_top_level_label()?);
             }
         }
 
+        validate_data_names(&data)?;
         validate_memory_names(&memory)?;
-        validate_label_storage_names(&memory, &labels)?;
+        validate_label_storage_names(&data, &memory, &labels)?;
         validate_main_label(&labels)?;
 
         Ok(Program {
             entry: String::from("main"),
+            data,
             memory,
             labels,
         })
+    }
+
+    fn parse_data_declaration(&mut self) -> Result<DataDeclaration, String> {
+        self.expect(Token::Data, "Expected data declaration")?;
+
+        let name = self.expect_ident("data name after data")?;
+        let mut section = None;
+        let mut align = None;
+        let mut export = false;
+        let mut keep = false;
+
+        while !matches!(self.peek(), Some(Token::LBrace)) {
+            match self.advance() {
+                Some(Token::Section) => {
+                    if section.is_some() {
+                        return Err(format!("Data block {name:?} already has a section"));
+                    }
+
+                    section = match self.advance() {
+                        Some(Token::Text(value)) => Some(value),
+                        Some(token) => {
+                            return Err(format!(
+                                "Expected section name string after section, found {token:?}"
+                            ));
+                        }
+                        None => {
+                            return Err(String::from(
+                                "Expected section name string after section, found end of input",
+                            ));
+                        }
+                    };
+                }
+                Some(Token::Align) => {
+                    if align.is_some() {
+                        return Err(format!("Data block {name:?} already has an alignment"));
+                    }
+
+                    let value = self.parse_usize_literal("data alignment")?;
+                    if value == 0 || !value.is_power_of_two() {
+                        return Err(format!(
+                            "Data block {name:?} alignment must be a non-zero power of two"
+                        ));
+                    }
+
+                    align = Some(value);
+                }
+                Some(Token::Export) => {
+                    if export {
+                        return Err(format!("Data block {name:?} already has export"));
+                    }
+
+                    export = true;
+                }
+                Some(Token::Keep) => {
+                    if keep {
+                        return Err(format!("Data block {name:?} already has keep"));
+                    }
+
+                    keep = true;
+                }
+                Some(token) => {
+                    return Err(format!(
+                        "Expected data option section, align, export, keep, or '{{', found {token:?}"
+                    ));
+                }
+                None => return Err(format!("Expected '{{' to start data block {name:?}")),
+            }
+        }
+
+        let section = section.ok_or_else(|| format!("Data block {name:?} must specify section"))?;
+        self.expect(Token::LBrace, "Expected '{' to start data block")?;
+
+        let mut items = Vec::new();
+        while !matches!(self.peek(), Some(Token::RBrace)) {
+            if self.is_at_end() {
+                return Err(format!("Expected '}}' to close data block {name:?}"));
+            }
+
+            items.push(self.parse_data_item(&name)?);
+        }
+
+        self.expect(Token::RBrace, "Expected '}' after data block")?;
+
+        Ok(DataDeclaration {
+            name,
+            section,
+            align,
+            export,
+            keep,
+            items,
+        })
+    }
+
+    fn parse_data_item(&mut self, data_name: &str) -> Result<DataItem, String> {
+        match self.advance() {
+            Some(Token::Ident(name)) => {
+                if matches!(self.peek(), Some(Token::Colon)) {
+                    self.advance();
+                    return Ok(DataItem::Label { name });
+                }
+
+                let width = MemoryWidth::parse(&name)?;
+                if width.is_float() {
+                    return Err(format!(
+                        "Data block {data_name:?} does not support floating-point scalar {}",
+                        width.name()
+                    ));
+                }
+
+                let value = self.parse_integer_literal_for_width("data scalar", width)?;
+                validate_integer_binding_width(value, width)?;
+                Ok(DataItem::Scalar { width, value })
+            }
+            Some(Token::Addr) => {
+                let target = self.expect_ident("address target after addr")?;
+                Ok(DataItem::Addr { target })
+            }
+            Some(Token::Zero) => {
+                let count = self.parse_usize_literal("zero byte count")?;
+                Ok(DataItem::Zero { count })
+            }
+            Some(token) => Err(format!(
+                "Expected data item width, addr, zero, or label in data block {data_name:?}, found {token:?}"
+            )),
+            None => Err(format!(
+                "Expected data item in data block {data_name:?}, found end of input"
+            )),
+        }
     }
 
     fn parse_top_level_label(&mut self) -> Result<Label, String> {
@@ -582,11 +715,33 @@ impl Parser {
 
     fn parse_integer_literal(&mut self, context: &str) -> Result<i128, String> {
         match self.advance() {
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<i128>()
+            Some(Token::NumberLiteral(value)) => parse_integer_value(&value, false)
                 .map_err(|_| format!("Invalid integer {context} {value:?}")),
             Some(Token::Minus) => match self.advance() {
                 Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
+                    .map_err(|_| format!("Invalid integer {context} -{value}")),
+                Some(token) => Err(format!(
+                    "Expected number after '-' in {context}, found {token:?}"
+                )),
+                None => Err(format!(
+                    "Expected number after '-' in {context}, found end of input"
+                )),
+            },
+            Some(token) => Err(format!("Expected integer {context}, found {token:?}")),
+            None => Err(format!("Expected integer {context}, found end of input")),
+        }
+    }
+
+    fn parse_integer_literal_for_width(
+        &mut self,
+        context: &str,
+        width: MemoryWidth,
+    ) -> Result<i128, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value)) => parse_integer_value_for_width(&value, false, width)
+                .map_err(|_| format!("Invalid integer {context} {value:?}")),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) => parse_integer_value_for_width(&value, true, width)
                     .map_err(|_| format!("Invalid integer {context} -{value}")),
                 Some(token) => Err(format!(
                     "Expected number after '-' in {context}, found {token:?}"
@@ -621,6 +776,17 @@ impl Parser {
             },
             Some(token) => Err(format!("Expected float {context}, found {token:?}")),
             None => Err(format!("Expected float {context}, found end of input")),
+        }
+    }
+
+    fn parse_usize_literal(&mut self, context: &str) -> Result<usize, String> {
+        match self.advance() {
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<usize>()
+                .map_err(|_| format!("Invalid {context} {value:?}")),
+            Some(Token::Minus) => Err(format!("{context} cannot be negative")),
+            Some(token) => Err(format!("Expected {context}, found {token:?}")),
+            None => Err(format!("Expected {context}, found end of input")),
         }
     }
 
@@ -1069,8 +1235,7 @@ fn parse_integer_binding_value(
         ));
     }
 
-    let value = value
-        .parse::<i128>()
+    let value = parse_integer_value(value, false)
         .map_err(|_| format!("Invalid integer binding value {value:?}"))?;
 
     if let Some(width) = width {
@@ -1117,10 +1282,44 @@ fn validate_float_literal(value: &str, width: MemoryWidth, context: &str) -> Res
 }
 
 fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
-    if negative {
-        value.parse::<i128>().map(|value| -value).map_err(|_| ())
+    parse_integer_value(value, negative)
+}
+
+fn parse_integer_value(value: &str, negative: bool) -> Result<i128, ()> {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        let parsed = u128::from_str_radix(hex, 16).map_err(|_| ())?;
+        i128::try_from(parsed).map_err(|_| ())?
     } else {
-        value.parse::<i128>().map_err(|_| ())
+        value.parse::<i128>().map_err(|_| ())?
+    };
+
+    if negative {
+        Ok(-parsed)
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn parse_integer_value_for_width(
+    value: &str,
+    negative: bool,
+    width: MemoryWidth,
+) -> Result<i128, ()> {
+    if negative || !matches!(width, MemoryWidth::U64) {
+        return parse_integer_value(value, negative);
+    }
+
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        let parsed = u64::from_str_radix(hex, 16).map_err(|_| ())?;
+        Ok(parsed as i128)
+    } else {
+        parse_integer_value(value, false)
     }
 }
 
@@ -1152,6 +1351,29 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
     }
 }
 
+fn validate_data_names(data: &[DataDeclaration]) -> Result<(), String> {
+    let mut names = HashSet::new();
+
+    for declaration in data {
+        if !names.insert(declaration.name.as_str()) {
+            return Err(format!(
+                "Data name {:?} is already defined",
+                declaration.name
+            ));
+        }
+
+        for item in &declaration.items {
+            if let DataItem::Label { name } = item
+                && !names.insert(name.as_str())
+            {
+                return Err(format!("Data label {name:?} is already defined"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
     let mut names = HashSet::new();
 
@@ -1171,9 +1393,21 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
 }
 
 fn validate_label_storage_names(
+    data: &[DataDeclaration],
     memory: &[MemoryDeclaration],
     labels: &[Label],
 ) -> Result<(), String> {
+    let data_names: HashSet<_> = data
+        .iter()
+        .flat_map(|declaration| {
+            std::iter::once(declaration.name.as_str()).chain(declaration.items.iter().filter_map(
+                |item| match item {
+                    DataItem::Label { name } => Some(name.as_str()),
+                    _ => None,
+                },
+            ))
+        })
+        .collect();
     let memory_names: HashSet<_> = memory
         .iter()
         .map(|declaration| match declaration {
@@ -1191,6 +1425,13 @@ fn validate_label_storage_names(
                 Instruction::Const { name, .. }
                 | Instruction::Stack { name, .. }
                 | Instruction::StackString { name, .. } => {
+                    if data_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level data",
+                            label.name
+                        ));
+                    }
+
                     if memory_names.contains(name) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level memory",
@@ -1222,8 +1463,20 @@ fn validate_main_label(labels: &[Label]) -> Result<(), String> {
 }
 
 pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
+    let data = &program.data;
     let memory = &program.memory;
     let labels = &program.labels;
+    let data_names: HashSet<&str> = data
+        .iter()
+        .flat_map(|declaration| {
+            std::iter::once(declaration.name.as_str()).chain(declaration.items.iter().filter_map(
+                |item| match item {
+                    DataItem::Label { name } => Some(name.as_str()),
+                    _ => None,
+                },
+            ))
+        })
+        .collect();
     let memory_names: HashSet<&str> = memory
         .iter()
         .map(|declaration| match declaration {
@@ -1237,6 +1490,13 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         labels.iter().map(|label| label.name.as_str()).collect();
 
     for label in labels {
+        if data_names.contains(label.name.as_str()) {
+            return Err(format!(
+                "Label {:?} conflicts with top-level data",
+                label.name
+            ));
+        }
+
         if memory_names.contains(label.name.as_str()) {
             return Err(format!(
                 "Label {:?} conflicts with top-level memory",
@@ -1249,6 +1509,10 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         }
         for instruction in &label.instructions {
             if let Instruction::Label { name } = instruction {
+                if data_names.contains(name.as_str()) {
+                    return Err(format!("Label {:?} conflicts with top-level data", name));
+                }
+
                 if memory_names.contains(name.as_str()) {
                     return Err(format!("Label {:?} conflicts with top-level memory", name));
                 }
@@ -1260,6 +1524,26 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         }
     }
 
+    let global_symbols: HashSet<&str> = data_names
+        .iter()
+        .copied()
+        .chain(memory_names.iter().copied())
+        .chain(label_names.iter().copied())
+        .collect();
+
+    for declaration in data {
+        for item in &declaration.items {
+            if let DataItem::Addr { target } = item
+                && !global_symbols.contains(target.as_str())
+            {
+                return Err(format!(
+                    "Unknown address target {target:?} in data block {:?}",
+                    declaration.name
+                ));
+            }
+        }
+    }
+
     for label in labels {
         let mut bindings = HashSet::new();
         let mut operand_bindings = HashSet::new();
@@ -1267,6 +1551,13 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Const { name, value } => {
+                    if data_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level data",
+                            label.name
+                        ));
+                    }
+
                     if label_names.contains(name.as_str()) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level label",
@@ -1283,6 +1574,13 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     }
                 }
                 Instruction::Stack { name, .. } => {
+                    if data_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level data",
+                            label.name
+                        ));
+                    }
+
                     if label_names.contains(name.as_str()) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level label",
@@ -1294,6 +1592,13 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     operand_bindings.insert(name.as_str());
                 }
                 Instruction::StackString { name, .. } => {
+                    if data_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level data",
+                            label.name
+                        ));
+                    }
+
                     if label_names.contains(name.as_str()) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level label",
@@ -1315,7 +1620,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                 &operand_bindings,
                 &string_bindings,
                 &memory_names,
-                &label_names,
+                &global_symbols,
                 &top_level_label_names,
                 &label.name,
             )?;

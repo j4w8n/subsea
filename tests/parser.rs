@@ -1,7 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
-    FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    DataDeclaration, DataItem, FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth,
+    Operand, PrintPart, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -61,6 +61,120 @@ fn empty_main_prefix() -> Vec<Token> {
 fn finish_label(mut tokens: Vec<Token>) -> Vec<Token> {
     tokens.push(Token::RBrace);
     tokens
+}
+
+#[test]
+fn parses_data_block() {
+    let program = parse(vec![
+        Token::Data,
+        tid("request"),
+        Token::Section,
+        text(".requests"),
+        Token::Align,
+        tnum("8"),
+        Token::Export,
+        Token::Keep,
+        Token::LBrace,
+        tid("u64"),
+        tnum("1"),
+        Token::Addr,
+        tid("response"),
+        Token::Zero,
+        tnum("16"),
+        tid("response"),
+        Token::Colon,
+        tid("u64"),
+        tnum("0"),
+        Token::RBrace,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::Exit,
+        tnum("0"),
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.data[0],
+        DataDeclaration {
+            name: s("request"),
+            section: s(".requests"),
+            align: Some(8),
+            export: true,
+            keep: true,
+            items: vec![
+                DataItem::Scalar {
+                    width: MemoryWidth::U64,
+                    value: 1,
+                },
+                DataItem::Addr {
+                    target: s("response"),
+                },
+                DataItem::Zero { count: 16 },
+                DataItem::Label {
+                    name: s("response"),
+                },
+                DataItem::Scalar {
+                    width: MemoryWidth::U64,
+                    value: 0,
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn rejects_non_power_of_two_data_alignment() {
+    let error = parse(vec![
+        Token::Data,
+        tid("request"),
+        Token::Section,
+        text(".requests"),
+        Token::Align,
+        tnum("3"),
+        Token::LBrace,
+        Token::RBrace,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::Exit,
+        tnum("0"),
+        Token::RBrace,
+    ])
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        "Data block \"request\" alignment must be a non-zero power of two"
+    );
+}
+
+#[test]
+fn rejects_unknown_data_addr_target() {
+    let program = parse(vec![
+        Token::Data,
+        tid("request"),
+        Token::Section,
+        text(".requests"),
+        Token::LBrace,
+        Token::Addr,
+        tid("missing"),
+        Token::RBrace,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::Exit,
+        tnum("0"),
+        Token::RBrace,
+    ])
+    .unwrap();
+    let error = validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Unknown address target \"missing\" in data block \"request\""
+    );
 }
 
 #[test]

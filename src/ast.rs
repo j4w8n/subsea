@@ -1,8 +1,27 @@
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub entry: String,
+    pub data: Vec<DataDeclaration>,
     pub memory: Vec<MemoryDeclaration>,
     pub labels: Vec<Label>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct DataDeclaration {
+    pub name: String,
+    pub section: String,
+    pub align: Option<usize>,
+    pub export: bool,
+    pub keep: bool,
+    pub items: Vec<DataItem>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum DataItem {
+    Scalar { width: MemoryWidth, value: i128 },
+    Addr { target: String },
+    Zero { count: usize },
+    Label { name: String },
 }
 
 #[derive(Debug, PartialEq, Clone)]
