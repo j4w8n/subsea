@@ -393,6 +393,31 @@ main: {
 
 The inferred width is the access width; address arithmetic remains byte-based. `mem nums:u64(8)` makes `[nums + 8]` a `u64` access to the second element.
 
+### Static Data Blocks
+
+Use top-level `data` blocks for explicit static metadata layout in named object sections. This is useful for freestanding metadata, firmware tables, linker-collected registries, and boot protocol records:
+
+```ss
+data request section ".requests" align 8 export keep {
+  u64 0xc7b1dd30df4c8b88
+  u64 0x0a82e883a194f07b
+  u64 0
+  u64 0
+  addr response
+  zero 16
+
+response:
+  u64 0
+}
+```
+
+Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`), `addr <symbol>` for an address-sized symbol reference, `zero <bytes>` for zero-filled bytes, and labels inside the block. On x86-64, `addr` emits an 8-byte relocation.
+
+- `section` selects the exact output section name.
+- `align` must be a non-zero power of two.
+- `export` makes the data block symbol global.
+- `keep` marks the block as retention-sensitive for readers and linker scripts; the linker script should still use `KEEP(*(.section_name))` when section garbage collection is enabled.
+
 Scalar floating-point arithmetic uses explicit width-prefixed operators:
 
 ```ss
@@ -902,6 +927,8 @@ subsea build -t x86_64-free -T kernel.ld --format binary -o kernel.bin kernel.ss
 ```
 
 Freestanding support is early. Raw binaries are not bootable by themselves; they still need a boot sector, firmware header, bootloader protocol metadata, or an external bootloader before a QEMU smoke test is meaningful.
+
+See `examples/freestanding` for object/ELF/raw-binary examples, and `examples/limine` for a minimal Limine-oriented kernel ELF with request metadata supplied by a companion assembly object. The Limine example documents the external image creation and QEMU command; it is not run automatically because it depends on external Limine binaries and image tooling.
 
 ### build flags
 
