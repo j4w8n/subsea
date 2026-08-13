@@ -152,9 +152,26 @@ fn lexes_storage_and_cleanup_keywords() {
         ("slice", Token::Slice),
         ("stack", Token::Stack),
         ("stdin", Token::Stdin),
+        ("x86", Token::X86),
     ] {
         assert_eq!(lex_one(source).unwrap(), Some(token));
     }
+}
+
+#[test]
+fn lexes_namespaced_linux_instruction_parts() {
+    assert_eq!(
+        lex_all("linux.print").unwrap(),
+        vec![Token::Ident(s("linux")), Token::LocalIdent(s("print"))]
+    );
+}
+
+#[test]
+fn lexes_raw_x86_instruction_parts() {
+    assert_eq!(
+        lex_all("x86 \"out 0xe9, al\"").unwrap(),
+        vec![Token::X86, Token::Text(s("out 0xe9, al"))]
+    );
 }
 
 #[test]

@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction, Label, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PortOperand, PrintPart, Program, ReadSource,
-    StringInitializer, StringProperty, WidthConversion,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -1330,7 +1330,7 @@ fn emits_call_and_ret() {
 
 #[test]
 fn emits_hlt() {
-    let program = main_program(vec![Instruction::Halt]);
+    let program = main_program(vec![Instruction::InlineAsm { text: s("hlt") }]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
@@ -1340,45 +1340,19 @@ fn emits_hlt() {
 #[test]
 fn emits_port_io() {
     let program = main_program(vec![
-        Instruction::Out {
-            port: PortOperand::Immediate(0x80),
-            src: s("al"),
+        Instruction::InlineAsm {
+            text: s("out 0x80, al"),
         },
-        Instruction::In {
-            dst: s("al"),
-            port: PortOperand::Dx,
+        Instruction::InlineAsm {
+            text: s("in al, dx"),
         },
     ]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  out 128, al\n"));
+    assert!(asm.contains("  out 0x80, al\n"));
     assert!(asm.contains("  in al, dx\n"));
     assert_assembles(&asm);
-}
-
-#[test]
-fn rejects_non_al_out_source() {
-    let program = main_program(vec![Instruction::Out {
-        port: PortOperand::Immediate(0x80),
-        src: s("bl"),
-    }]);
-
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
-
-    assert_eq!(error, "out source must be al, found bl");
-}
-
-#[test]
-fn rejects_non_al_in_destination() {
-    let program = main_program(vec![Instruction::In {
-        dst: s("bl"),
-        port: PortOperand::Immediate(0x80),
-    }]);
-
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
-
-    assert_eq!(error, "in destination must be al, found bl");
 }
 
 #[test]
@@ -1518,7 +1492,7 @@ fn emits_custom_entry_symbol() {
                 Instruction::Label {
                     name: s(".L.main.hang"),
                 },
-                Instruction::Halt,
+                Instruction::InlineAsm { text: s("hlt") },
                 Instruction::Jmp {
                     target: s(".L.main.hang"),
                     condition: None,

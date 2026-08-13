@@ -52,6 +52,6 @@ Run with QEMU debugcon on port `0xe9`:
 qemu-system-x86_64 -M q35 -m 256M -cdrom subsea.iso -debugcon stdio -global isa-debugcon.iobase=0xe9
 ```
 
-Bytes written by `out 0xe9, al` appear in the terminal where QEMU is running. The display window may stay blank because this example does not write to the framebuffer.
+Bytes written by `x86 "out 0xe9, al"` appear in the terminal where QEMU is running. The display window may stay blank because this example does not write to the framebuffer.
 
 This example is a manual QEMU smoke test. It is not run by `cargo test` because it requires external Limine binaries, ISO creation tools, and QEMU.

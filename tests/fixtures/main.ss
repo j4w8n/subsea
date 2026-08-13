@@ -1,11 +1,11 @@
 main: {
   const message = "Hello World!\n"
-  print message
+  linux.print message
 
-  print "Printed directly!\n"
+  linux.print "Printed directly!\n"
 
   stack stack_message:str = "Hello from the stack!\n"
-  print stack_message
+  linux.print stack_message
 
-  exit 0
+  linux.exit 0
 }

@@ -182,6 +182,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "stack" => Some(Token::Stack),
                 "stdin" => Some(Token::Stdin),
                 "syscall" => Some(Token::Syscall),
+                "x86" => Some(Token::X86),
                 "zero" => Some(Token::Zero),
                 "u" => prefixed_integer_operator(
                     chars,

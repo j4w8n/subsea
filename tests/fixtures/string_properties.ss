@@ -5,10 +5,10 @@ main: {
   rdi = 1
   rsi = message.ptr
   rdx = message.len
-  syscall
+  linux.syscall
 
-  print message.len
-  print "\n"
+  linux.print message.len
+  linux.print "\n"
 
-  exit 0
+  linux.exit 0
 }

@@ -7,9 +7,9 @@ main: {
   [buf + 1]:u8 = 105
   stack input:str = slice &buf, 2
 
-  print literal
-  print input
-  print "\n"
+  linux.print literal
+  linux.print input
+  linux.print "\n"
 
-  exit 0
+  linux.exit 0
 }

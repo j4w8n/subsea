@@ -66,15 +66,13 @@ pub enum Instruction {
     Exit {
         code: u8,
     },
-    In {
-        dst: String,
-        port: PortOperand,
+    InlineAsm {
+        text: String,
     },
     Jmp {
         target: String,
         condition: Option<ConditionExpr>,
     },
-    Halt,
     Label {
         name: String,
     },
@@ -84,10 +82,6 @@ pub enum Instruction {
     },
     Print {
         parts: Vec<PrintPart>,
-    },
-    Out {
-        port: PortOperand,
-        src: String,
     },
     Pop {
         dst: Operand,
@@ -111,12 +105,6 @@ pub enum Instruction {
         value: StringInitializer,
     },
     Syscall,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum PortOperand {
-    Immediate(u8),
-    Dx,
 }
 
 impl Instruction {

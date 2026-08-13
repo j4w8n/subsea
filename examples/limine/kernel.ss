@@ -17,11 +17,11 @@ main: {
   call debug_write_byte
 
 .hang:
-  hlt
+  x86 "hlt"
   jmp .hang
 }
 
 debug_write_byte: {
-  out 0xe9, al
+  x86 "out 0xe9, al"
   ret
 }

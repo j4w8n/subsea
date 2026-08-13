@@ -1,5 +1,5 @@
 main: {
 .hang:
-  hlt
+  x86 "hlt"
   jmp .hang
 }

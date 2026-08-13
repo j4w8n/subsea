@@ -3,8 +3,8 @@ main: {
   al = rax
   rbx = al::zx
 
-  print rbx
-  print "\n"
+  linux.print rbx
+  linux.print "\n"
 
-  exit 0
+  linux.exit 0
 }

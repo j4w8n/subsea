@@ -12,8 +12,8 @@ main: {
 .loop:
   jmp .done if r8 u>= r9
   rax = values[r8 * 8]
-  print rax
-  print "\n"
+  linux.print rax
+  linux.print "\n"
   r8 = r8 + 1
   jmp .loop
 
@@ -25,7 +25,7 @@ main: {
 
   rsi = &bytes[1]
   stack message:str = slice rsi, 3
-  print message
+  linux.print message
 
-  exit 0
+  linux.exit 0
 }

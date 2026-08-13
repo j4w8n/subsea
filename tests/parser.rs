@@ -1,8 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     DataDeclaration, DataItem, FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PortOperand, PrintPart, ReadSource, StringInitializer, StringProperty,
-    WidthConversion,
+    Operand, PrintPart, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -25,6 +24,10 @@ fn tid(value: &str) -> Token {
 
 fn tlocal(value: &str) -> Token {
     Token::LocalIdent(s(value))
+}
+
+fn linux(operation: &str) -> [Token; 2] {
+    [tid("linux"), tlocal(operation)]
 }
 
 fn tnum(value: &str) -> Token {
@@ -90,7 +93,8 @@ fn parses_data_block() {
         tid("main"),
         Token::Colon,
         Token::LBrace,
-        Token::Exit,
+        tid("linux"),
+        tlocal("exit"),
         tnum("0"),
         Token::RBrace,
     ])
@@ -139,7 +143,8 @@ fn rejects_non_power_of_two_data_alignment() {
         tid("main"),
         Token::Colon,
         Token::LBrace,
-        Token::Exit,
+        tid("linux"),
+        tlocal("exit"),
         tnum("0"),
         Token::RBrace,
     ])
@@ -165,7 +170,8 @@ fn rejects_unknown_data_addr_target() {
         tid("main"),
         Token::Colon,
         Token::LBrace,
-        Token::Exit,
+        tid("linux"),
+        tlocal("exit"),
         tnum("0"),
         Token::RBrace,
     ])
@@ -425,7 +431,8 @@ fn parses_stack_string_properties_as_operands() {
 #[test]
 fn parses_stack_string_property_print_as_operand() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Print, tid("message"), tlocal("len")]);
+    tokens.extend(linux("print"));
+    tokens.extend([tid("message"), tlocal("len")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -443,8 +450,8 @@ fn parses_stack_string_property_print_as_operand() {
 #[test]
 fn parses_read_from_stdin() {
     let mut tokens = empty_main_prefix();
+    tokens.extend(linux("read"));
     tokens.extend([
-        Token::Read,
         Token::Stdin,
         Token::Comma,
         tptr("buf"),
@@ -858,52 +865,45 @@ fn parses_call_and_ret() {
 #[test]
 fn parses_hlt() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Halt]);
+    tokens.extend([Token::X86, text("hlt")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
-    assert_eq!(program.labels[0].instructions, vec![Instruction::Halt]);
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::InlineAsm { text: s("hlt") }]
+    );
 }
 
 #[test]
 fn parses_port_io() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([
-        Token::Out,
-        tnum("0x80"),
-        Token::Comma,
-        treg("al"),
-        Token::In,
-        treg("al"),
-        Token::Comma,
-        treg("dx"),
-    ]);
+    tokens.extend([Token::X86, text("out 0x80, al")]);
+    tokens.extend([Token::X86, text("in al, dx")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions,
         vec![
-            Instruction::Out {
-                port: PortOperand::Immediate(0x80),
-                src: s("al"),
+            Instruction::InlineAsm {
+                text: s("out 0x80, al"),
             },
-            Instruction::In {
-                dst: s("al"),
-                port: PortOperand::Dx,
+            Instruction::InlineAsm {
+                text: s("in al, dx"),
             },
         ]
     );
 }
 
 #[test]
-fn rejects_out_immediate_port_larger_than_u8() {
+fn rejects_multiline_x86_assembly() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Out, tnum("256"), Token::Comma, treg("al")]);
+    tokens.extend([Token::X86, text("hlt\nnop")]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
 
-    assert_eq!(error, "output port must be between 0 and 255");
+    assert_eq!(error, "x86 assembly must be a single line");
 }
 
 #[test]
@@ -925,7 +925,8 @@ fn parses_push_and_pop() {
 #[test]
 fn parses_print_register() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::Print, treg("rax")]);
+    tokens.extend(linux("print"));
+    tokens.extend([treg("rax")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -934,6 +935,56 @@ fn parses_print_register() {
         vec![Instruction::Print {
             parts: vec![PrintPart::Operand(reg("rax"))],
         }]
+    );
+}
+
+#[test]
+fn rejects_unqualified_target_specific_instructions_with_suggestions() {
+    for (token, message) in [
+        (
+            Token::Print,
+            "Unknown instruction \"print\"; did you mean linux.print?",
+        ),
+        (
+            Token::Read,
+            "Unknown instruction \"read\"; did you mean linux.read?",
+        ),
+        (
+            Token::Exit,
+            "Unknown instruction \"exit\"; did you mean linux.exit?",
+        ),
+        (
+            Token::Syscall,
+            "Unknown instruction \"syscall\"; did you mean linux.syscall?",
+        ),
+        (
+            Token::Halt,
+            "Unknown instruction \"hlt\"; use x86 \"hlt\" for raw x86 assembly",
+        ),
+        (
+            Token::In,
+            "Unknown instruction \"in\"; use x86 \"in\" for raw x86 assembly",
+        ),
+        (
+            Token::Out,
+            "Unknown instruction \"out\"; use x86 \"out\" for raw x86 assembly",
+        ),
+    ] {
+        let mut tokens = empty_main_prefix();
+        tokens.push(token);
+
+        assert_eq!(parse(finish_label(tokens)).unwrap_err(), message);
+    }
+}
+
+#[test]
+fn rejects_unknown_namespaced_instruction() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::X86, tlocal("print")]);
+
+    assert_eq!(
+        parse(finish_label(tokens)).unwrap_err(),
+        "Expected string literal after x86, found LocalIdent(\"print\")"
     );
 }
 

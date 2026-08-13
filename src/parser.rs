@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction,
-    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PortOperand, PrintPart, Program,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -260,41 +260,106 @@ impl Parser {
         }
     }
 
-    fn parse_in_instruction(&mut self) -> Result<Instruction, String> {
-        let dst = self.expect_register("input destination after in")?;
-        self.expect(Token::Comma, "Expected ',' after input destination")?;
-        let port = self.parse_port_operand("input port")?;
+    fn parse_namespaced_instruction(&mut self, namespace: String) -> Result<Instruction, String> {
+        let operation = match self.advance() {
+            Some(Token::LocalIdent(operation)) => operation,
+            Some(token) => {
+                return Err(format!(
+                    "Expected namespaced instruction after {namespace}, found {token:?}"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Expected namespaced instruction after {namespace}, found end of input"
+                ));
+            }
+        };
 
-        Ok(Instruction::In { dst, port })
+        match (namespace.as_str(), operation.as_str()) {
+            ("linux", "exit") => {
+                let code = self.parse_exit_code()?;
+                Ok(Instruction::Exit { code })
+            }
+            ("linux", "print") => self.parse_print_instruction(),
+            ("linux", "read") => self.parse_read_instruction(),
+            ("linux", "syscall") => Ok(Instruction::Syscall),
+            ("x86", operation) => Err(format!(
+                "Unknown instruction \"x86.{operation}\"; use x86 \"{operation}\" for raw x86 assembly"
+            )),
+            _ => Err(format!("Unknown instruction \"{namespace}.{operation}\"")),
+        }
     }
 
-    fn parse_out_instruction(&mut self) -> Result<Instruction, String> {
-        let port = self.parse_port_operand("output port")?;
-        self.expect(Token::Comma, "Expected ',' after output port")?;
-        let src = self.expect_register("output source after ','")?;
-
-        Ok(Instruction::Out { port, src })
-    }
-
-    fn parse_port_operand(&mut self, context: &str) -> Result<PortOperand, String> {
+    fn parse_inline_x86(&mut self) -> Result<Instruction, String> {
         match self.advance() {
-            Some(Token::NumberLiteral(value)) => {
-                let port = parse_integer_value(&value, false)
-                    .map_err(|_| format!("Invalid {context} {value:?}"))?;
-
-                if (0..=u8::MAX as i128).contains(&port) {
-                    Ok(PortOperand::Immediate(port as u8))
+            Some(Token::Text(text)) => {
+                if text.contains(['\n', '\r']) {
+                    Err(String::from("x86 assembly must be a single line"))
+                } else if text.trim().is_empty() {
+                    Err(String::from("x86 assembly cannot be empty"))
                 } else {
-                    Err(format!("{context} must be between 0 and 255"))
+                    Ok(Instruction::InlineAsm { text })
                 }
             }
-            Some(Token::Register(name)) if name == "dx" => Ok(PortOperand::Dx),
-            Some(Token::Register(name)) => {
-                Err(format!("{context} register must be dx, found {name}"))
+            Some(token) => Err(format!(
+                "Expected string literal after x86, found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected string literal after x86, found end of input",
+            )),
+        }
+    }
+
+    fn parse_print_instruction(&mut self) -> Result<Instruction, String> {
+        match self.advance() {
+            Some(Token::Ident(name)) => {
+                if matches!(self.peek(), Some(Token::LocalIdent(_))) {
+                    return self
+                        .parse_ident_operand(name)
+                        .map(|operand| Instruction::Print {
+                            parts: vec![PrintPart::Operand(operand)],
+                        });
+                }
+
+                Ok(Instruction::Print {
+                    parts: vec![PrintPart::Binding(name)],
+                })
             }
-            Some(Token::Minus) => Err(format!("{context} cannot be negative")),
-            Some(token) => Err(format!("Expected {context}, found {token:?}")),
-            None => Err(format!("Expected {context}, found end of input")),
+            Some(Token::Register(name)) => Ok(Instruction::Print {
+                parts: vec![PrintPart::Operand(Operand::Register(name))],
+            }),
+            Some(Token::NumberLiteral(value)) => value
+                .parse::<i128>()
+                .map(|value| Instruction::Print {
+                    parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                })
+                .map_err(|_| format!("Invalid integer literal {value:?}")),
+            Some(Token::FloatLiteral(value)) => Err(format!(
+                "Float literal {value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
+            )),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
+                    .map_err(|_| format!("Invalid integer literal -{value}"))
+                    .map(|value| Instruction::Print {
+                        parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                    }),
+                Some(Token::FloatLiteral(value)) => Err(format!(
+                    "Float literal -{value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
+                )),
+                Some(token) => Err(format!(
+                    "Expected number after '-' in print operand, found {token:?}"
+                )),
+                None => Err(String::from(
+                    "Expected number after '-' in print operand, found end of input",
+                )),
+            },
+            Some(Token::Text(value)) => self.parse_print_literal(value),
+            Some(token) => Err(format!(
+                "Expected binding name, register, integer, or string literal after linux.print, found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected binding name, register, integer, or string literal after linux.print, found end of input",
+            )),
         }
     }
 
@@ -309,76 +374,25 @@ impl Parser {
                 let condition = self.parse_optional_jump_condition()?;
                 Ok(Instruction::Jmp { target, condition })
             }
-            Some(Token::Exit) => {
-                let code = self.parse_exit_code()?;
-                Ok(Instruction::Exit { code })
-            }
-            Some(Token::Halt) => Ok(Instruction::Halt),
-            Some(Token::In) => self.parse_in_instruction(),
+            Some(Token::Exit) => Err(suggest_namespaced_instruction("exit", "linux.exit")),
+            Some(Token::Halt) => Err(suggest_raw_x86_instruction("hlt")),
+            Some(Token::In) => Err(suggest_raw_x86_instruction("in")),
             Some(Token::Const) => self.parse_const_declaration(),
-            Some(Token::Print) => match self.advance() {
-                Some(Token::Ident(name)) => {
-                    if matches!(self.peek(), Some(Token::LocalIdent(_))) {
-                        return self
-                            .parse_ident_operand(name)
-                            .map(|operand| Instruction::Print {
-                                parts: vec![PrintPart::Operand(operand)],
-                            });
-                    }
-
-                    Ok(Instruction::Print {
-                        parts: vec![PrintPart::Binding(name)],
-                    })
-                }
-                Some(Token::Register(name)) => Ok(Instruction::Print {
-                    parts: vec![PrintPart::Operand(Operand::Register(name))],
-                }),
-                Some(Token::NumberLiteral(value)) => value
-                    .parse::<i128>()
-                    .map(|value| Instruction::Print {
-                        parts: vec![PrintPart::Operand(Operand::Immediate(value))],
-                    })
-                    .map_err(|_| format!("Invalid integer literal {value:?}")),
-                Some(Token::FloatLiteral(value)) => Err(format!(
-                    "Float literal {value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
-                )),
-                Some(Token::Minus) => match self.advance() {
-                    Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
-                        .map_err(|_| format!("Invalid integer literal -{value}"))
-                        .map(|value| Instruction::Print {
-                            parts: vec![PrintPart::Operand(Operand::Immediate(value))],
-                        }),
-                    Some(Token::FloatLiteral(value)) => Err(format!(
-                        "Float literal -{value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
-                    )),
-                    Some(token) => Err(format!(
-                        "Expected number after '-' in print operand, found {token:?}"
-                    )),
-                    None => Err(String::from(
-                        "Expected number after '-' in print operand, found end of input",
-                    )),
-                },
-                Some(Token::Text(value)) => self.parse_print_literal(value),
-                Some(token) => Err(format!(
-                    "Expected binding name, register, integer, or string literal after print, found {token:?}"
-                )),
-                None => Err(String::from(
-                    "Expected binding name, register, integer, or string literal after print, found end of input",
-                )),
-            },
+            Some(Token::Print) => Err(suggest_namespaced_instruction("print", "linux.print")),
             Some(Token::Pop) => {
                 let dst = self.parse_operand()?;
                 Ok(Instruction::Pop { dst })
             }
-            Some(Token::Out) => self.parse_out_instruction(),
+            Some(Token::Out) => Err(suggest_raw_x86_instruction("out")),
             Some(Token::Push) => {
                 let src = self.parse_operand()?;
                 Ok(Instruction::Push { src })
             }
-            Some(Token::Read) => self.parse_read_instruction(),
+            Some(Token::Read) => Err(suggest_namespaced_instruction("read", "linux.read")),
             Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Stack) => self.parse_stack_declaration(),
-            Some(Token::Syscall) => Ok(Instruction::Syscall),
+            Some(Token::Syscall) => Err(suggest_namespaced_instruction("syscall", "linux.syscall")),
+            Some(Token::X86) => self.parse_inline_x86(),
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
             )),
@@ -387,6 +401,9 @@ impl Parser {
                 Ok(Instruction::Label {
                     name: mangle_local_label(current_label, &name),
                 })
+            }
+            Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::LocalIdent(_))) => {
+                self.parse_namespaced_instruction(name)
             }
             Some(Token::Ident(name)) if matches!(self.peek(), Some(Token::Colon)) => Err(format!(
                 "Nested label {name}: must be local; write .{name}: instead"
@@ -1361,6 +1378,14 @@ fn parse_integer_value_for_width(
     } else {
         parse_integer_value(value, false)
     }
+}
+
+fn suggest_namespaced_instruction(instruction: &str, suggestion: &str) -> String {
+    format!("Unknown instruction \"{instruction}\"; did you mean {suggestion}?")
+}
+
+fn suggest_raw_x86_instruction(instruction: &str) -> String {
+    format!("Unknown instruction \"{instruction}\"; use x86 \"{instruction}\" for raw x86 assembly")
 }
 
 fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(), String> {

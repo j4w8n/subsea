@@ -4,11 +4,11 @@ main: {
   const char = 65
   [rsp]:u8 = char
 
-  rax = 1    // write syscall
+  rax = 1    // write linux.syscall
   rdi = 1    // stdout
   rsi = rsp  // buffer address
   rdx = 1    // byte count
-  syscall
+  linux.syscall
 
-  exit 0
+  linux.exit 0
 }
