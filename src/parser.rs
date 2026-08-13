@@ -738,11 +738,15 @@ impl Parser {
         width: MemoryWidth,
     ) -> Result<i128, String> {
         match self.advance() {
-            Some(Token::NumberLiteral(value)) => parse_integer_value_for_width(&value, false, width)
-                .map_err(|_| format!("Invalid integer {context} {value:?}")),
+            Some(Token::NumberLiteral(value)) => {
+                parse_integer_value_for_width(&value, false, width)
+                    .map_err(|_| format!("Invalid integer {context} {value:?}"))
+            }
             Some(Token::Minus) => match self.advance() {
-                Some(Token::NumberLiteral(value)) => parse_integer_value_for_width(&value, true, width)
-                    .map_err(|_| format!("Invalid integer {context} -{value}")),
+                Some(Token::NumberLiteral(value)) => {
+                    parse_integer_value_for_width(&value, true, width)
+                        .map_err(|_| format!("Invalid integer {context} -{value}"))
+                }
                 Some(token) => Err(format!(
                     "Expected number after '-' in {context}, found {token:?}"
                 )),
@@ -1296,11 +1300,7 @@ fn parse_integer_value(value: &str, negative: bool) -> Result<i128, ()> {
         value.parse::<i128>().map_err(|_| ())?
     };
 
-    if negative {
-        Ok(-parsed)
-    } else {
-        Ok(parsed)
-    }
+    if negative { Ok(-parsed) } else { Ok(parsed) }
 }
 
 fn parse_integer_value_for_width(

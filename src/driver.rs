@@ -31,6 +31,7 @@ pub struct BuildTimings {
 pub struct FreestandingLinkOptions<'a> {
     pub output_path: &'a Path,
     pub linker_script: &'a Path,
+    pub link_inputs: &'a [PathBuf],
     pub output_format: FreestandingOutputFormat,
     pub linker: &'a str,
 }
@@ -146,18 +147,21 @@ pub fn build_freestanding_executable(
     let assemble = assemble_started.elapsed();
 
     let link_started = Instant::now();
-    run_command(
-        Command::new(options.linker)
-            .arg("-m")
-            .arg("elf_x86_64")
-            .arg("-T")
-            .arg(options.linker_script)
-            .arg(&object_path)
-            .arg("-o")
-            .arg(&linked_path),
-        "linker",
-        options.linker,
-    )?;
+    let mut link_command = Command::new(options.linker);
+    link_command
+        .arg("-m")
+        .arg("elf_x86_64")
+        .arg("-T")
+        .arg(options.linker_script)
+        .arg(&object_path);
+
+    for input in options.link_inputs {
+        link_command.arg(input);
+    }
+
+    link_command.arg("-o").arg(&linked_path);
+
+    run_command(&mut link_command, "linker", options.linker)?;
     let link = link_started.elapsed();
 
     let objcopy = if options.output_format == FreestandingOutputFormat::Binary {

@@ -1527,7 +1527,11 @@ fn emits_custom_data_blocks() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains(".section .requests\n.global request\n  # keep\n.balign 8\nrequest:\n"));
+    assert!(
+        asm.contains(
+            ".section .requests, \"aR\", @progbits\n.global request\n.balign 8\nrequest:\n"
+        )
+    );
     assert!(asm.contains("  .quad 1\n"));
     assert!(asm.contains("  .quad response\n"));
     assert!(asm.contains("  .zero 16\n"));

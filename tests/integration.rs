@@ -392,6 +392,73 @@ fn freestanding_build_accepts_custom_linker() {
 }
 
 #[test]
+fn freestanding_build_accepts_extra_link_input() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let before = build_dirs();
+    let unique = format!("subsea-test-link-input-{}", std::process::id());
+    let temp_dir = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let extra_asm = temp_dir.join("extra.s");
+    let extra_object = temp_dir.join("extra.o");
+    let output_path = temp_dir.join("kernel.elf");
+    std::fs::write(
+        &extra_asm,
+        ".section .extra, \"a\", @progbits\n.global extra_symbol\nextra_symbol:\n  .quad 7\n",
+    )
+    .unwrap();
+
+    let assemble_output = Command::new("as")
+        .args([
+            extra_asm.to_str().unwrap(),
+            "-o",
+            extra_object.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run as");
+
+    assert!(
+        assemble_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&assemble_output.stderr)
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "-T",
+            "tests/fixtures/kernel.ld",
+            "--link-input",
+            extra_object.to_str().unwrap(),
+            "-o",
+            output_path.to_str().unwrap(),
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+    let after = build_dirs();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let symbols_output = Command::new("readelf")
+        .args(["-s", output_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run readelf");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    remove_build_dirs(after.difference(&before));
+
+    assert!(symbols_output.status.success());
+    assert!(String::from_utf8_lossy(&symbols_output.stdout).contains("extra_symbol"));
+}
+
+#[test]
 fn limine_example_builds_kernel_elf() {
     let _guard = CLI_LOCK.lock().unwrap();
     let before = build_dirs();
@@ -512,6 +579,37 @@ fn linux_target_rejects_custom_linker() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--linker is only supported"));
+}
+
+#[test]
+fn linux_target_rejects_link_input() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["build", "--link-input", "extra.o", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--link-input is only supported"));
+}
+
+#[test]
+fn link_input_requires_linker_script() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "build",
+            "-t",
+            "x86_64-free",
+            "--link-input",
+            "extra.o",
+            "tests/fixtures/hlt.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--link-input requires"));
 }
 
 #[test]

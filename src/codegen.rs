@@ -1633,14 +1633,14 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
 
 fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
     for declaration in data {
-        asm.push_str(&format!(".section {}\n", declaration.section));
+        let flags = if declaration.keep { "aR" } else { "a" };
+        asm.push_str(&format!(
+            ".section {}, \"{}\", @progbits\n",
+            declaration.section, flags
+        ));
 
         if declaration.export {
             asm.push_str(&format!(".global {}\n", declaration.name));
-        }
-
-        if declaration.keep {
-            asm.push_str("  # keep\n");
         }
 
         if let Some(align) = declaration.align {

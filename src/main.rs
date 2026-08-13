@@ -32,6 +32,7 @@ fn main() {
             target,
             entry_symbol,
             linker_script,
+            link_inputs,
             output_format,
             linker,
         }) => {
@@ -44,6 +45,7 @@ fn main() {
                         target,
                         output_path.as_deref(),
                         linker_script.as_deref(),
+                        &link_inputs,
                         output_format,
                         &linker,
                     )
@@ -107,6 +109,7 @@ enum CommandLine {
         target: Target,
         entry_symbol: Option<String>,
         linker_script: Option<PathBuf>,
+        link_inputs: Vec<PathBuf>,
         output_format: BuildOutputFormat,
         linker: String,
     },
@@ -154,6 +157,7 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     let mut target_provided = false;
     let mut entry_symbol = None;
     let mut linker_script = None;
+    let mut link_inputs = Vec::new();
     let mut output_format = BuildOutputFormat::Elf;
     let mut format_provided = false;
     let mut linker = String::from("ld");
@@ -253,6 +257,15 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
                 linker = program.clone();
                 linker_provided = true;
             }
+            "--link-input" => {
+                position += 1;
+
+                let path = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected object path after --link-input"))?;
+
+                link_inputs.push(PathBuf::from(path));
+            }
             flag if flag.starts_with('-') => return Err(format!("Unknown build flag {flag:?}")),
             path => {
                 if source_path.is_some() {
@@ -271,6 +284,8 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     validate_linker_script_target(target, linker_script.as_deref())?;
     validate_format_target(target, output_format)?;
     validate_linker_target(target, linker_provided)?;
+    validate_link_inputs_target(target, &link_inputs)?;
+    validate_link_inputs_require_linker_script(&link_inputs, linker_script.as_deref())?;
     validate_binary_requires_linker_script(output_format, linker_script.as_deref())?;
 
     Ok(CommandLine::Build {
@@ -280,6 +295,7 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
         target,
         entry_symbol,
         linker_script,
+        link_inputs,
         output_format,
         linker,
     })
@@ -388,6 +404,29 @@ fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), S
     Ok(())
 }
 
+fn validate_link_inputs_target(target: Target, link_inputs: &[PathBuf]) -> Result<(), String> {
+    if !link_inputs.is_empty() && target != Target::X86_64Free {
+        return Err(String::from(
+            "--link-input is only supported for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_link_inputs_require_linker_script(
+    link_inputs: &[PathBuf],
+    linker_script: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if !link_inputs.is_empty() && linker_script.is_none() {
+        return Err(String::from(
+            "--link-input requires --linker-script/-T for target x86_64-free",
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_binary_requires_linker_script(
     output_format: BuildOutputFormat,
     linker_script: Option<&std::path::Path>,
@@ -441,6 +480,7 @@ fn build_output(
     target: Target,
     output_path: Option<&std::path::Path>,
     linker_script: Option<&std::path::Path>,
+    link_inputs: &[PathBuf],
     output_format: BuildOutputFormat,
     linker: &str,
 ) -> Result<driver::BuildOutput, String> {
@@ -455,6 +495,7 @@ fn build_output(
                 FreestandingLinkOptions {
                     output_path: &output_path,
                     linker_script,
+                    link_inputs,
                     output_format: output_format.into(),
                     linker,
                 },
@@ -581,7 +622,7 @@ fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
     eprintln!("  subsea run <file.ss>");
     eprintln!(
-        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--linker-script|-T script.ld] [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
+        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
     );
     eprintln!("  subsea emit-asm [--target|-t x86_64|x86_64-free] [--entry symbol] <file.ss>");
     process::exit(code);
