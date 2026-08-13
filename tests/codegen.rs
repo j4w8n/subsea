@@ -316,6 +316,37 @@ fn emits_stack_string_property_loads() {
 }
 
 #[test]
+fn emits_const_string_property_loads() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: s("message"),
+            value: BindingValue::String(s("hello")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Operand(Operand::StringProperty {
+                name: s("message"),
+                property: StringProperty::Ptr,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rbx")),
+            value: AssignmentValue::Operand(Operand::StringProperty {
+                name: s("message"),
+                property: StringProperty::Len,
+            }),
+        },
+        Instruction::Exit { code: 0 },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, offset .Lstr_main_message\n"));
+    assert!(asm.contains("  mov rbx, 5\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn rejects_stack_string_property_as_destination() {
     let program = main_program(vec![
         Instruction::StackString {

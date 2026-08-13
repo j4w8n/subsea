@@ -226,6 +226,26 @@ fn rejects_string_binding_as_operand() {
 }
 
 #[test]
+fn rejects_integer_binding_string_property() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Const,
+        tid("count"),
+        Token::Equals,
+        tnum("3"),
+        treg("rax"),
+        Token::Equals,
+        tid("count"),
+        tlocal("len"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+    let error = validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(error, "Binding \"count\" in label \"main\" is not a string");
+}
+
+#[test]
 fn parses_negative_integer_binding() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

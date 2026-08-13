@@ -1636,6 +1636,8 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                         BindingValue::Integer { .. } | BindingValue::Float { .. }
                     ) {
                         operand_bindings.insert(name.as_str());
+                    } else {
+                        string_bindings.insert(name.as_str());
                     }
                 }
                 Instruction::Stack { name, .. } => {
@@ -1802,7 +1804,7 @@ fn validate_operand_symbol(
             "Unknown string binding {name:?} in label {current_label:?}"
         )),
         Operand::StringProperty { name, .. } if !string_bindings.contains(name.as_str()) => Err(
-            format!("Stack variable {name:?} in label {current_label:?} is not a string"),
+            format!("Binding {name:?} in label {current_label:?} is not a string"),
         ),
         Operand::Pointer(name)
             if !memory.contains(name.as_str()) && !labels.contains(name.as_str()) =>

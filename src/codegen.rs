@@ -3439,11 +3439,21 @@ fn emit_operand(
             },
         },
         Operand::StringProperty { name, property } => {
-            let offset = stack_string_property_slot(stack, name, *property).ok_or_else(|| {
-                format!("Unknown string stack variable {name:?} in label {label_name:?}")
-            })?;
+            if let Some(offset) = stack_string_property_slot(stack, name, *property) {
+                return Ok(format!("qword ptr [rbp - {offset}]"));
+            }
 
-            Ok(format!("qword ptr [rbp - {offset}]"))
+            let binding = strings
+                .bindings
+                .get(&(label_name.to_string(), name.clone()))
+                .ok_or_else(|| {
+                    format!("Unknown string binding {name:?} in label {label_name:?}")
+                })?;
+
+            Ok(match property {
+                StringProperty::Len => binding.value.len().to_string(),
+                StringProperty::Ptr => format!("offset {}", binding.asm_label),
+            })
         }
         Operand::Pointer(name) => Err(format!(
             "Pointer operand &{name} is only supported as the right side of assignment"
