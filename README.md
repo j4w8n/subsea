@@ -192,6 +192,23 @@ main: {
 }
 ```
 
+Port I/O uses x86-64 `in` and `out` instructions. The first supported form is byte-sized and intentionally narrow: `al` is the data register, and the port must be an immediate `0..255` or `dx`.
+
+```ss
+main: {
+  al = 72
+  out 0x80, al
+
+  in al, dx
+
+.hang:
+  hlt
+  jmp .hang
+}
+```
+
+Port I/O is mainly useful in freestanding code for hardware interaction, such as serial output after UART initialization.
+
 Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
 
 The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
@@ -928,7 +945,47 @@ subsea build -t x86_64-free -T kernel.ld --format binary -o kernel.bin kernel.ss
 
 Freestanding support is early. Raw binaries are not bootable by themselves; they still need a boot sector, firmware header, bootloader protocol metadata, or an external bootloader before a QEMU smoke test is meaningful.
 
-See `examples/freestanding` for object/ELF/raw-binary examples, and `examples/limine` for a minimal Limine-oriented kernel ELF with request metadata supplied by a companion assembly object. The Limine example documents the external image creation and QEMU command; it is not run automatically because it depends on external Limine binaries and image tooling.
+See `examples/freestanding` for object/ELF/raw-binary examples, and `examples/limine` for a minimal Limine-oriented kernel ELF with request metadata declared in `.ss` data blocks. The Limine example documents a manual QEMU debug-port smoke test; it is not run by `cargo test` because it depends on external Limine binaries, ISO creation tools, and QEMU.
+
+### Limine/QEMU smoke test
+
+From `examples/limine`, build the kernel into the ISO staging tree:
+
+```sh
+subsea build -t x86_64-free -T kernel.ld -o iso_root/boot/kernel.elf kernel.ss
+```
+
+Build a Limine bootable ISO from `iso_root`:
+
+```sh
+xorriso -as mkisofs -R -r -J \
+  -b boot/limine-bios-cd.bin \
+  -no-emul-boot \
+  -boot-load-size 4 \
+  -boot-info-table \
+  -hfsplus \
+  -apm-block-size 2048 \
+  --efi-boot boot/limine-uefi-cd.bin \
+  -efi-boot-part \
+  --efi-boot-image \
+  --protective-msdos-label \
+  iso_root \
+  -o subsea.iso
+```
+
+Install Limine BIOS stages into the ISO:
+
+```sh
+limine bios-install subsea.iso
+```
+
+Run it in QEMU with the debug console connected to port `0xe9`:
+
+```sh
+qemu-system-x86_64 -M q35 -m 256M -cdrom subsea.iso -debugcon stdio -global isa-debugcon.iobase=0xe9
+```
+
+If `kernel.ss` writes bytes with `out 0xe9, al`, they appear in the terminal where QEMU is running. The QEMU display window may stay blank because this example does not write to the framebuffer.
 
 ### build flags
 
