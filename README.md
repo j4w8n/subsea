@@ -182,6 +182,44 @@ Helping!
 Done
 ```
 
+## Imports
+
+Reusable functions can be imported explicitly from another `.ss` file. Import paths are relative to the file that contains the import. Imported files must mark public functions with `export`; private helper functions remain callable inside the imported file but cannot be imported directly.
+
+```ss
+import debug_write from "lib/qemu_debug.ss"
+
+main: {
+  const message = "Subsea\n"
+  rsi = message.ptr
+  rdx = message.len
+  call debug_write
+
+  linux.exit 0
+}
+```
+
+The imported file exports functions with `export name: { ... }`:
+
+```ss
+export debug_write: {
+.loop:
+  jmp .done if rdx == 0
+
+  al = [rsi]:u8
+  x86 "out 0xe9, al"
+
+  rsi = rsi + 1
+  rdx = rdx - 1
+  jmp .loop
+
+.done:
+  ret
+}
+```
+
+Imports are intentionally narrow: only explicitly listed exported functions can be imported. Memory, data blocks, constants, and private helper functions are not importable API surface yet.
+
 Freestanding halt loop:
 
 ```ss
@@ -209,9 +247,11 @@ main: {
 
 Port I/O is mainly useful in freestanding code for hardware interaction, such as serial output after UART initialization.
 
-For simple QEMU smoke tests, the debug console can be connected to port `0xe9`. You can build a tiny string-output helper by choosing a local calling convention. In this example, the caller passes the string pointer in `rsi` and the byte length in `rdx`; `debug_write` then loops over the bytes and emits each one with raw x86 port I/O:
+For simple QEMU smoke tests, the debug console can be connected to port `0xe9`. The `examples/lib/qemu_debug.ss` helper uses a local calling convention: the caller passes the string pointer in `rsi` and the byte length in `rdx`; `debug_write` then loops over the bytes and emits each one with raw x86 port I/O.
 
 ```ss
+import debug_write from "../lib/qemu_debug.ss"
+
 main: {
   const message = "Subsea\n"
 
@@ -222,21 +262,6 @@ main: {
 .hang:
   x86 "hlt"
   jmp .hang
-}
-
-debug_write: {
-.loop:
-  jmp .done if rdx == 0
-
-  al = [rsi]:u8
-  x86 "out 0xe9, al"
-
-  rsi = rsi + 1
-  rdx = rdx - 1
-  jmp .loop
-
-.done:
-  ret
 }
 ```
 
