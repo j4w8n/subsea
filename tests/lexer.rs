@@ -149,6 +149,7 @@ fn lexes_storage_and_cleanup_keywords() {
         ("hlt", Token::Halt),
         ("in", Token::In),
         ("import", Token::Import),
+        ("nop", Token::Nop),
         ("out", Token::Out),
         ("read", Token::Read),
         ("slice", Token::Slice),

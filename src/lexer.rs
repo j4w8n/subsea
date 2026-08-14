@@ -173,6 +173,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "jmp" => Some(Token::Jmp),
                 "keep" => Some(Token::Keep),
                 "mem" => Some(Token::Mem),
+                "nop" => Some(Token::Nop),
                 "out" => Some(Token::Out),
                 "pop" => Some(Token::Pop),
                 "print" => Some(Token::Print),

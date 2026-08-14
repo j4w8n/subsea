@@ -480,6 +480,7 @@ impl Parser {
             Some(Token::In) => Err(suggest_raw_x86_instruction("in")),
             Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => Err(suggest_namespaced_instruction("print", "linux.print")),
+            Some(Token::Nop) => Ok(Instruction::Nop),
             Some(Token::Pop) => {
                 let dst = self.parse_operand()?;
                 Ok(Instruction::Pop { dst })
@@ -1002,9 +1003,11 @@ impl Parser {
                 Some(Token::FloatLiteral(value)) => Err(format!(
                     "Cannot take the address of float literal {value}; expected a label after '&'"
                 )),
-                Some(Token::LBracket) => Err(String::from(
-                    "Cannot take the address of a dereference; '&[...]' is invalid syntax",
-                )),
+                Some(Token::LBracket) => {
+                    let address = self.parse_address()?;
+                    self.expect(Token::RBracket, "Expected ']' after address-of expression")?;
+                    Ok(Operand::AddressOf(address))
+                }
                 Some(token) => Err(format!("Expected label after '&', found {token:?}")),
                 None => Err(String::from("Expected label after '&', found end of input")),
             },

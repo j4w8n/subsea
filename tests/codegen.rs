@@ -982,6 +982,34 @@ fn emits_address_of_indexed_memory() {
 }
 
 #[test]
+fn emits_address_of_raw_address_expression() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Operand(Operand::AddressOf(subsea::ast::Address {
+            first: subsea::ast::AddressTerm::Register(s("rbx")),
+            rest: vec![
+                (
+                    subsea::ast::AddressOperator::Add,
+                    subsea::ast::AddressTerm::ScaledRegister {
+                        register: s("rcx"),
+                        scale: 4,
+                    },
+                ),
+                (
+                    subsea::ast::AddressOperator::Add,
+                    subsea::ast::AddressTerm::Immediate(8),
+                ),
+            ],
+        })),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  lea rax, [rbx + rcx * 4 + 8]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn emits_boolean_comparison_assignment() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
@@ -1386,6 +1414,16 @@ fn emits_hlt() {
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
     assert!(asm.contains("  hlt\n"));
+}
+
+#[test]
+fn emits_nop() {
+    let program = main_program(vec![Instruction::Nop]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  nop\n"));
+    assert_assembles(&asm);
 }
 
 #[test]

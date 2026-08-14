@@ -751,6 +751,35 @@ fn parses_address_of_indexed_memory() {
 }
 
 #[test]
+fn parses_address_of_raw_address_expression() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        Token::Ampersand,
+        Token::LBracket,
+        treg("rbx"),
+        Token::Plus,
+        treg("rcx"),
+        Token::Star,
+        tnum("4"),
+        Token::Plus,
+        tnum("8"),
+        Token::RBracket,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert!(matches!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            value: AssignmentValue::Operand(Operand::AddressOf(_)),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn rejects_unknown_width_conversion() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
@@ -931,6 +960,16 @@ fn parses_call_and_ret() {
             Instruction::Ret,
         ]
     );
+}
+
+#[test]
+fn parses_nop() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Nop]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(program.labels[0].instructions, vec![Instruction::Nop]);
 }
 
 #[test]

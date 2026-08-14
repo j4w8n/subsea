@@ -84,6 +84,7 @@ pub enum Instruction {
     Label {
         name: String,
     },
+    Nop,
     Const {
         name: String,
         value: BindingValue,

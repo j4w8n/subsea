@@ -163,6 +163,9 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
                 }
+                Instruction::Nop => {
+                    asm.push_str("  nop\n");
+                }
                 Instruction::Const { .. } | Instruction::Stack { .. } => {}
                 Instruction::StackString { name, value } => {
                     emit_stack_string_initializer(

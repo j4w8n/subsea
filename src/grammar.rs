@@ -41,6 +41,7 @@ pub enum Token {
     LBracket,
     LParen,
     Minus,
+    Nop,
     NotEquals,
     NumberLiteral(String),
     F32Plus,
