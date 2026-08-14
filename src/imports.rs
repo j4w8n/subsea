@@ -295,7 +295,9 @@ fn rewrite_operand_symbols(operand: &mut Operand, symbol_map: &HashMap<String, S
                 rewrite_address_term(term, symbol_map);
             }
         }
-        Operand::Converted { operand, .. } => rewrite_operand_symbols(operand, symbol_map),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            rewrite_operand_symbols(operand, symbol_map)
+        }
         Operand::Ident(name) | Operand::Pointer(name) | Operand::StringProperty { name, .. } => {
             *name = rewrite_symbol_name(name, symbol_map);
         }

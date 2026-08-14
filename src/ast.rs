@@ -258,6 +258,7 @@ impl Operand {
     pub fn unconverted(&self) -> &Operand {
         match self {
             Operand::Converted { operand, .. } => operand.unconverted(),
+            Operand::Cast { operand, .. } => operand.unconverted(),
             operand => operand,
         }
     }
@@ -473,6 +474,10 @@ pub enum Operand {
     Converted {
         operand: Box<Operand>,
         conversion: WidthConversion,
+    },
+    Cast {
+        operand: Box<Operand>,
+        width: MemoryWidth,
     },
     Dereference {
         address: Address,

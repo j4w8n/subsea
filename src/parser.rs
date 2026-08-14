@@ -1282,39 +1282,48 @@ impl Parser {
             None => Err(String::from("Expected operand, found end of input")),
         }?;
 
-        self.parse_optional_converted_operand(operand)
+        self.parse_optional_operand_suffix(operand)
     }
 
-    fn parse_optional_converted_operand(&mut self, operand: Operand) -> Result<Operand, String> {
-        if !matches!(self.peek(), Some(Token::DoubleColon)) {
-            return Ok(operand);
+    fn parse_optional_operand_suffix(&mut self, operand: Operand) -> Result<Operand, String> {
+        let mut operand = operand;
+
+        loop {
+            if matches!(self.peek(), Some(Token::DoubleColon)) {
+                operand = self.parse_converted_operand(operand)?;
+            } else {
+                return Ok(operand);
+            }
         }
+    }
 
+    fn parse_converted_operand(&mut self, operand: Operand) -> Result<Operand, String> {
         self.advance();
-        let conversion = match self.advance() {
-            Some(Token::Ident(name)) if name == "zx" => WidthConversion::ZeroExtend,
-            Some(Token::Ident(name)) if name == "sx" => WidthConversion::SignExtend,
+        match self.advance() {
+            Some(Token::Ident(name)) if name == "zx" => Ok(Operand::Converted {
+                operand: Box::new(operand),
+                conversion: WidthConversion::ZeroExtend,
+            }),
+            Some(Token::Ident(name)) if name == "sx" => Ok(Operand::Converted {
+                operand: Box::new(operand),
+                conversion: WidthConversion::SignExtend,
+            }),
             Some(Token::Ident(name)) => {
-                return Err(format!(
-                    "Unknown width conversion ::{name}; expected ::zx or ::sx"
-                ));
+                let width = MemoryWidth::parse(&name).map_err(|_| {
+                    format!("Unknown conversion ::{name}; expected ::zx, ::sx, or a memory width")
+                })?;
+                Ok(Operand::Cast {
+                    operand: Box::new(operand),
+                    width,
+                })
             }
-            Some(token) => {
-                return Err(format!(
-                    "Expected width conversion after '::', found {token:?}"
-                ));
-            }
-            None => {
-                return Err(String::from(
-                    "Expected width conversion after '::', found end of input",
-                ));
-            }
-        };
-
-        Ok(Operand::Converted {
-            operand: Box::new(operand),
-            conversion,
-        })
+            Some(token) => Err(format!(
+                "Expected width conversion after '::', found {token:?}"
+            )),
+            None => Err(String::from(
+                "Expected width conversion after '::', found end of input",
+            )),
+        }
     }
 
     fn parse_indexed_address(&mut self, base: String) -> Result<Address, String> {
@@ -2207,15 +2216,17 @@ fn validate_operand_symbol(
     current_label: &str,
 ) -> Result<(), String> {
     match operand {
-        Operand::Converted { operand, .. } => validate_operand_symbol(
-            operand,
-            bindings,
-            operand_bindings,
-            string_bindings,
-            memory,
-            labels,
-            current_label,
-        ),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            validate_operand_symbol(
+                operand,
+                bindings,
+                operand_bindings,
+                string_bindings,
+                memory,
+                labels,
+                current_label,
+            )
+        }
         Operand::Ident(name) if !operand_bindings.contains(name.as_str()) => {
             if bindings.contains(name.as_str()) {
                 Err(format!(

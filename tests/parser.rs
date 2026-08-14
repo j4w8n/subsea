@@ -740,6 +740,31 @@ fn parses_width_converted_operand() {
 }
 
 #[test]
+fn parses_cast_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("xmm0"),
+        Token::Equals,
+        treg("rax"),
+        Token::DoubleColon,
+        tid("f64"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::Operand(Operand::Cast {
+                operand: Box::new(reg("rax")),
+                width: MemoryWidth::F64,
+            }),
+        }
+    );
+}
+
+#[test]
 fn parses_indexed_memory_operand() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
@@ -869,7 +894,7 @@ fn rejects_unknown_width_conversion() {
 
     assert_eq!(
         error,
-        "Unknown width conversion ::wide; expected ::zx or ::sx"
+        "Unknown conversion ::wide; expected ::zx, ::sx, or a memory width"
     );
 }
 

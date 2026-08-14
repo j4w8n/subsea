@@ -3130,7 +3130,7 @@ fn validate_float_math_operand(
     stack: &StackFrame,
 ) -> Result<(), String> {
     match operand {
-        Operand::Converted { .. } => Err(format!(
+        Operand::Converted { .. } | Operand::Cast { .. } => Err(format!(
             "{name} cannot use integer width conversion in floating-point math"
         )),
         Operand::AddressOf(_) => Err(format!("{name} cannot be an address-of operand")),
@@ -3292,6 +3292,8 @@ fn emit_copy_instruction(
     } = src
     {
         emit_width_conversion_copy(asm, operand, *conversion, dst, strings, label_name, stack)
+    } else if let Operand::Cast { operand, width } = src {
+        emit_numeric_cast_copy(asm, operand, *width, dst, strings, label_name, stack)
     } else if emit_truncating_copy(asm, src, dst, strings, label_name, stack)? {
         Ok(())
     } else if let Some(opcode) = float_move_opcode(src, dst, strings, stack)? {
@@ -3395,6 +3397,201 @@ fn emit_width_conversion_copy(
     Ok(())
 }
 
+fn emit_numeric_cast_copy(
+    asm: &mut String,
+    src: &Operand,
+    target_width: MemoryWidth,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(target_width, MemoryWidth::Ptr) {
+        return Err(String::from(
+            "Numeric casts cannot use ptr as a target width",
+        ));
+    }
+
+    if target_width.is_float() {
+        return emit_int_to_float_cast(asm, src, target_width, dst, strings, label_name, stack);
+    }
+
+    emit_float_to_int_cast(asm, src, target_width, dst, strings, label_name, stack)
+}
+
+fn emit_int_to_float_cast(
+    asm: &mut String,
+    src: &Operand,
+    target_width: MemoryWidth,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Integer-to-float cast destination must be an XMM register",
+        ));
+    };
+
+    if !is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Integer-to-float cast destination must be an XMM register",
+        ));
+    }
+
+    validate_integer_cast_source(src, strings, label_name, stack)?;
+    let src_width = operand_width(src, strings, label_name, stack)?
+        .ok_or_else(|| String::from("Integer-to-float cast source must have a known width"))?;
+
+    let opcode = match target_width {
+        MemoryWidth::F32 => "cvtsi2ss",
+        MemoryWidth::F64 => "cvtsi2sd",
+        _ => unreachable!(),
+    };
+    let src = cast_integer_operand_for_cvtsi(src, src_width, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {dst_register}, {src}\n"));
+
+    Ok(())
+}
+
+fn emit_float_to_int_cast(
+    asm: &mut String,
+    src: &Operand,
+    target_width: MemoryWidth,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Float-to-integer cast destination must be an integer register",
+        ));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Float-to-integer cast destination must be an integer register",
+        ));
+    }
+
+    let source_width = resolve_cast_float_source_width(src, strings, label_name, stack)?;
+    validate_integer_cast_width(target_width)?;
+
+    let dst_width = memory_width_bits(target_width);
+    let cast_dst = match dst_width {
+        Width::Bits64 => dst_register.clone(),
+        Width::Bits32 => register_alias(dst_register, Width::Bits32)?,
+        Width::Bits16 | Width::Bits8 => String::from("r11d"),
+    };
+    let opcode = match source_width {
+        MemoryWidth::F32 => "cvttss2si",
+        MemoryWidth::F64 => "cvttsd2si",
+        _ => unreachable!(),
+    };
+    let src = emit_float_operand(src, source_width, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {cast_dst}, {src}\n"));
+
+    if matches!(dst_width, Width::Bits16 | Width::Bits8) {
+        let narrowed = register_alias("r11", dst_width)?;
+        let dst = emit_operand(dst, strings, label_name, stack)?;
+        asm.push_str(&format!("  mov {dst}, {narrowed}\n"));
+    }
+
+    Ok(())
+}
+
+fn validate_integer_cast_source(
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(
+        src,
+        Operand::Pointer(_) | Operand::AddressOf(_) | Operand::FloatLiteral(_)
+    ) || operand_uses_xmm_register(src)
+        || is_float_memory_operand(src, strings, stack)?
+    {
+        return Err(String::from(
+            "Integer-to-float cast source must be an integer operand",
+        ));
+    }
+
+    if matches!(src, Operand::Immediate(_)) {
+        return Err(String::from(
+            "Integer-to-float cast source must be a register or memory operand",
+        ));
+    }
+
+    let Some(width) = operand_width(src, strings, label_name, stack)? else {
+        return Err(String::from(
+            "Integer-to-float cast source must have a known width",
+        ));
+    };
+
+    if matches!(width, Width::Bits8 | Width::Bits16) {
+        return Err(String::from(
+            "Integer-to-float cast source must be 32-bit or 64-bit for now",
+        ));
+    }
+
+    Ok(())
+}
+
+fn cast_integer_operand_for_cvtsi(
+    src: &Operand,
+    width: Width,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<String, String> {
+    match src {
+        Operand::Register(register) if width == Width::Bits32 => {
+            register_alias(register, Width::Bits32)
+        }
+        _ => emit_operand(src, strings, label_name, stack),
+    }
+}
+
+fn resolve_cast_float_source_width(
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<MemoryWidth, String> {
+    if let Some(width) = operand_float_width(src, strings, label_name, stack)? {
+        return Ok(width);
+    }
+
+    if matches!(src, Operand::Register(register) if is_xmm_register(register)) {
+        return Err(String::from(
+            "Float-to-integer cast from an XMM register needs an explicit source width; cast a typed memory operand or use f32/f64 arithmetic first",
+        ));
+    }
+
+    Err(String::from(
+        "Float-to-integer cast source must be a floating-point operand",
+    ))
+}
+
+fn validate_integer_cast_width(width: MemoryWidth) -> Result<(), String> {
+    match width {
+        MemoryWidth::I8
+        | MemoryWidth::I16
+        | MemoryWidth::I32
+        | MemoryWidth::I64
+        | MemoryWidth::U8
+        | MemoryWidth::U16
+        | MemoryWidth::U32
+        | MemoryWidth::U64 => Ok(()),
+        MemoryWidth::F32 | MemoryWidth::F64 | MemoryWidth::Ptr => Err(String::from(
+            "Float-to-integer cast target must be an integer width",
+        )),
+    }
+}
+
 fn emit_truncating_copy(
     asm: &mut String,
     src: &Operand,
@@ -3452,6 +3649,7 @@ fn validate_binary_operands(
             | Operand::AddressOf(_)
             | Operand::StringProperty { .. }
             | Operand::Converted { .. }
+            | Operand::Cast { .. }
     ) || matches!(dst, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
     {
         return Err(format!(
@@ -3467,8 +3665,8 @@ fn validate_binary_operands(
         return Err(format!("{opcode} source cannot be an address-of operand"));
     }
 
-    if matches!(src, Operand::Converted { .. }) {
-        return Err(format!("{opcode} source cannot use width conversion here"));
+    if matches!(src, Operand::Converted { .. } | Operand::Cast { .. }) {
+        return Err(format!("{opcode} source cannot use conversion here"));
     }
 
     if matches!(src, Operand::FloatLiteral(_)) || matches!(dst, Operand::FloatLiteral(_)) {
@@ -3927,8 +4125,8 @@ fn emit_operand(
     stack: &StackFrame,
 ) -> Result<String, String> {
     match operand {
-        Operand::Converted { .. } => Err(String::from(
-            "Width conversion operands are only supported as assignment sources",
+        Operand::Converted { .. } | Operand::Cast { .. } => Err(String::from(
+            "Conversion operands are only supported as assignment sources",
         )),
         Operand::AddressOf(_) => Err(String::from(
             "Address-of operands are only supported as assignment sources",
@@ -4029,7 +4227,9 @@ fn operand_width(
     stack: &StackFrame,
 ) -> Result<Option<Width>, String> {
     match operand {
-        Operand::Converted { operand, .. } => operand_width(operand, strings, _label_name, stack),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            operand_width(operand, strings, _label_name, stack)
+        }
         Operand::AddressOf(_) => Ok(Some(Width::Bits64)),
         Operand::Register(name) => Ok(register_width(name)),
         Operand::Dereference { address, width } => {
@@ -4050,6 +4250,11 @@ fn float_move_opcode(
     stack: &StackFrame,
 ) -> Result<Option<&'static str>, String> {
     match (src, dst) {
+        (Operand::Register(src), Operand::Register(dst))
+            if is_xmm_register(src) && is_xmm_register(dst) =>
+        {
+            Ok(Some("movaps"))
+        }
         (Operand::Register(register), memory) if is_xmm_register(register) => {
             float_memory_width(memory, strings, stack)?
                 .map(float_move_opcode_for_width)
@@ -4080,7 +4285,9 @@ fn float_memory_width(
     stack: &StackFrame,
 ) -> Result<Option<MemoryWidth>, String> {
     match operand {
-        Operand::Converted { operand, .. } => float_memory_width(operand, strings, stack),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            float_memory_width(operand, strings, stack)
+        }
         Operand::AddressOf(_) => Ok(None),
         Operand::Dereference { address, width } => {
             Ok(resolve_memory_width(address, *width, strings)?.filter(|width| width.is_float()))
@@ -4230,7 +4437,9 @@ pub(crate) enum Width {
 
 fn operand_uses_high_byte_register(operand: &Operand) -> bool {
     match operand {
-        Operand::Converted { operand, .. } => operand_uses_high_byte_register(operand),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            operand_uses_high_byte_register(operand)
+        }
         Operand::AddressOf(address) => address_uses_register(address, is_high_byte_register),
         Operand::Register(name) => is_high_byte_register(name),
         Operand::Dereference { address, .. } => {
@@ -4242,7 +4451,9 @@ fn operand_uses_high_byte_register(operand: &Operand) -> bool {
 
 fn operand_uses_extended_register(operand: &Operand) -> bool {
     match operand {
-        Operand::Converted { operand, .. } => operand_uses_extended_register(operand),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            operand_uses_extended_register(operand)
+        }
         Operand::AddressOf(address) => address_uses_register(address, is_extended_register),
         Operand::Register(name) => is_extended_register(name),
         Operand::Dereference { address, .. } => {
@@ -4254,7 +4465,9 @@ fn operand_uses_extended_register(operand: &Operand) -> bool {
 
 fn operand_uses_xmm_register(operand: &Operand) -> bool {
     match operand {
-        Operand::Converted { operand, .. } => operand_uses_xmm_register(operand),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            operand_uses_xmm_register(operand)
+        }
         Operand::AddressOf(address) => address_uses_register(address, is_xmm_register),
         Operand::Register(name) => is_xmm_register(name),
         Operand::Dereference { address, .. } => address_uses_register(address, is_xmm_register),
@@ -4264,7 +4477,9 @@ fn operand_uses_xmm_register(operand: &Operand) -> bool {
 
 fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
     match operand {
-        Operand::Converted { operand, .. } => operand_uses_register_family(operand, register),
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
+            operand_uses_register_family(operand, register)
+        }
         Operand::AddressOf(address) => address_uses_register_family(address, register),
         Operand::Register(name) => same_register_family(name, register),
         Operand::Dereference { address, .. } => address_uses_register_family(address, register),
@@ -4274,7 +4489,7 @@ fn operand_uses_register_family(operand: &Operand, register: &str) -> bool {
 
 fn operand_address_uses_register_family(operand: &Operand, register: &str) -> bool {
     match operand {
-        Operand::Converted { operand, .. } => {
+        Operand::Converted { operand, .. } | Operand::Cast { operand, .. } => {
             operand_address_uses_register_family(operand, register)
         }
         Operand::AddressOf(address) => address_uses_register_family(address, register),

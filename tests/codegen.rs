@@ -2347,18 +2347,84 @@ fn rejects_xmm_integer_memory_load() {
 }
 
 #[test]
-fn rejects_xmm_register_to_register_move_for_now() {
+fn emits_xmm_register_to_register_move() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("xmm0")),
         value: AssignmentValue::Operand(reg("xmm1")),
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "XMM moves require one XMM register and one explicitly f32 or f64 memory operand"
-    );
+    assert!(asm.contains("  movaps xmm0, xmm1\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_integer_to_float_casts() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::Operand(Operand::Cast {
+                operand: Box::new(reg("rax")),
+                width: MemoryWidth::F64,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm1")),
+            value: AssignmentValue::Operand(Operand::Cast {
+                operand: Box::new(reg("ecx")),
+                width: MemoryWidth::F32,
+            }),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cvtsi2sd xmm0, rax\n"));
+    assert!(asm.contains("  cvtsi2ss xmm1, ecx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_float_memory_to_integer_casts() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::FloatScalar {
+            name: s("ratio"),
+            width: MemoryWidth::F64,
+            value: s("1.5"),
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("rax")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("ratio", None)),
+                        width: MemoryWidth::I64,
+                    }),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("cx")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("ratio", None)),
+                        width: MemoryWidth::I16,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cvttsd2si rax, qword ptr [ratio]\n"));
+    assert!(asm.contains("  cvttsd2si r11d, qword ptr [ratio]\n"));
+    assert!(asm.contains("  mov cx, r11w\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
