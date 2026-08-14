@@ -610,9 +610,11 @@ mem result:f64 = 0.0
 main: {
   xmm0 = [left]
   xmm1 = [right]
+  xmm2 = xmm0
   xmm0 = xmm0 f64+ xmm1
   xmm0 = xmm0 f64* [right]
   xmm0 = xmm0 f64+ 1.5
+  xmm3 = rax::f64
   [result] = xmm0
 
   linux.exit 0
@@ -622,6 +624,24 @@ main: {
 - Supported scalar floating-point operators are `f32+`, `f32-`, `f32*`, `f32/`, `f64+`, `f64-`, `f64*`, and `f64/`
 - Floating-point arithmetic destinations must be XMM registers.
 - Operands must be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the operator width. Memory widths may be explicit or inferred from a declared `mem` base.
+- XMM register-to-register moves are supported with normal assignment syntax, such as `xmm2 = xmm0`.
+
+Use `::f32` or `::f64` to cast 32-bit or 64-bit integer register/memory operands into XMM registers:
+
+```ss
+xmm0 = eax::f32
+xmm1 = rax::f64
+```
+
+Use `::i8`, `::i16`, `::i32`, `::i64`, or the corresponding unsigned widths to cast typed floating-point memory operands into integer registers. Float-to-int casts use x86 truncating conversion semantics:
+
+```ss
+mem ratio:f64 = 1.5
+rax = [ratio]::i64
+ecx = [ratio]::i32
+```
+
+Casting directly from an XMM register to an integer register is not supported yet because XMM registers do not carry an `f32` or `f64` source width in the syntax.
 
 Floating-point literals and const operands lower to compiler-emitted readonly storage because x86-64 scalar floating-point instructions do not encode decimal float immediates directly. Plain `+`, `-`, and `*` can be used for floating-point arithmetic when an operand supplies an unambiguous `f32` or `f64` width. Use width-prefixed operators when both operands are ambiguous, such as XMM register-to-register or XMM register-to-float-literal arithmetic:
 
