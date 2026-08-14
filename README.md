@@ -446,6 +446,10 @@ Top-level `mem` declarations allocate writable memory for the lifetime of the pr
 mem count:u16 = 3
 mem ratio:f64 = 1.5
 mem buf:u8(128)
+mem greeting:u8 = "hello\n"   // stored as bytes
+mem values:u16 = [1, 2, 3]    // array initialization
+mem fill:u8 = repeat 4, 0xff
+mem callback:ptr = addr main  / store's `main`'s address
 
 main: {
   linux.exit 0
@@ -455,6 +459,18 @@ main: {
 - `mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`
 - `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
 - `mem ratio:f64 = 1.5` allocates one writable `f64` memory cell initialized to `1.5`
+- `mem greeting:u8 = "hello\n"` allocates writable bytes initialized from the string literal. String memory initializers require `u8` width and do not add an implicit NUL terminator.
+- `mem values:u16 = [1, 2, 3]` allocates initialized writable arrays. Each value is range-checked against the declared width.
+- `mem fill:u8 = repeat 4, 0xff` emits four initialized `u8` values. The `repeat` form uses `repeat <count>, <value>`.
+- `mem callback:ptr = addr main` allocates one pointer-sized address constant. On x86-64, `ptr` is 8 bytes and emits `.quad` data.
+
+Pointer-sized arrays are useful for static dispatch tables and address lists:
+
+```ss
+mem handlers:ptr = [addr init, addr update, addr shutdown]
+```
+
+`ptr` memory initializers currently require `addr <symbol>` values; integer pointer literals are intentionally not accepted yet.
 
 Memory operands rooted at declared `mem` storage infer the declaration width:
 
