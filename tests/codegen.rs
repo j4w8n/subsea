@@ -2,9 +2,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction, Label, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, Label,
+    MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -1181,6 +1181,165 @@ fn emits_signed_widened_multiply() {
 }
 
 #[test]
+fn emits_unsigned_modulo_with_immediate_rhs() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rbx")),
+        value: AssignmentValue::Expression(Expression::Binary {
+            op: ExprOp::Modulo { signed: false },
+            lhs: Box::new(Expression::Operand(reg("rbx"))),
+            rhs: Box::new(Expression::Operand(Operand::Immediate(10))),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, 10\n"));
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  xor rdx, rdx\n"));
+    assert!(asm.contains("  div r10\n"));
+    assert!(asm.contains("  mov rbx, rdx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_signed_divide_with_immediate_rhs() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rbx")),
+        value: AssignmentValue::Expression(Expression::Binary {
+            op: ExprOp::Divide { signed: true },
+            lhs: Box::new(Expression::Operand(reg("rbx"))),
+            rhs: Box::new(Expression::Operand(Operand::Immediate(10))),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cqo\n"));
+    assert!(asm.contains("  idiv r10\n"));
+    assert!(asm.contains("  mov rbx, rax\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_power_with_immediate_exponent() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Binary {
+            op: MathOp::Power,
+            lhs: reg("rbx"),
+            rhs: Operand::Immediate(3),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, rbx\n"));
+    assert!(asm.contains("  mov r11, 3\n"));
+    assert!(asm.contains("  mov rax, 1\n"));
+    assert!(asm.contains("  test r11, 1\n"));
+    assert!(asm.contains("  imul rax, r10\n"));
+    assert!(asm.contains("  imul r10, r10\n"));
+    assert!(asm.contains("  shr r11, 1\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_power_with_runtime_register_exponent() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Binary {
+            op: MathOp::Power,
+            lhs: reg("rbx"),
+            rhs: reg("rcx"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, rbx\n"));
+    assert!(asm.contains("  mov r11, rcx\n"));
+    assert!(asm.contains("  mov rax, 1\n"));
+    assert!(asm.contains("  imul rax, r10\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn zero_extends_narrow_power_register_exponent() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Binary {
+            op: MathOp::Power,
+            lhs: reg("rbx"),
+            rhs: reg("cl"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movzx r11, cl\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn zero_extends_narrow_power_memory_exponent() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("exp"),
+            width: MemoryWidth::U8,
+            value: 3,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("rax")),
+                    value: AssignmentValue::Binary {
+                        op: MathOp::Power,
+                        lhs: reg("rbx"),
+                        rhs: deref_ident("exp", None),
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movzx r11, byte ptr [exp]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn preserves_expression_rhs_when_it_uses_destination_register() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Expression(Expression::Binary {
+            op: ExprOp::Math(MathOp::Add),
+            lhs: Box::new(Expression::Operand(reg("rbx"))),
+            rhs: Box::new(Expression::Binary {
+                op: ExprOp::Math(MathOp::Multiply),
+                lhs: Box::new(Expression::Operand(reg("rax"))),
+                rhs: Box::new(Expression::Operand(Operand::Immediate(2))),
+            }),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+    let rhs_index = asm.find("  mov r10, rax\n").unwrap();
+    let lhs_index = asm.find("  mov rax, rbx\n").unwrap();
+
+    assert!(rhs_index < lhs_index);
+    assert!(asm.contains("  imul r10, 2\n"));
+    assert!(asm.contains("  add rax, r10\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn rejects_non_rdx_rax_widened_multiply_destination() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
@@ -1225,7 +1384,7 @@ fn rejects_non_rdx_rax_widened_divide_destination() {
 }
 
 #[test]
-fn rejects_immediate_widened_multiply_rhs() {
+fn emits_immediate_widened_multiply_rhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
             high: s("rdx"),
@@ -1238,16 +1397,16 @@ fn rejects_immediate_widened_multiply_rhs() {
         },
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "Widened multiply right operand cannot be an immediate value"
-    );
+    assert!(asm.contains("  mov r10, 2\n"));
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  mul r10\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
-fn rejects_immediate_widened_multiply_lhs() {
+fn emits_immediate_widened_multiply_lhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
             high: s("rdx"),
@@ -1260,16 +1419,15 @@ fn rejects_immediate_widened_multiply_lhs() {
         },
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "Widened multiply left operand cannot be an immediate value"
-    );
+    assert!(asm.contains("  mov rax, 10\n"));
+    assert!(asm.contains("  mul rcx\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
-fn rejects_widened_multiply_rhs_that_uses_rax() {
+fn materializes_widened_multiply_rhs_that_uses_rax() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
             high: s("rdx"),
@@ -1282,12 +1440,12 @@ fn rejects_widened_multiply_rhs_that_uses_rax() {
         },
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "Widened multiply right operand cannot use rax because rax is overwritten before the operation"
-    );
+    assert!(asm.contains("  mov r10, rax\n"));
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  mul r10\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
@@ -1333,7 +1491,7 @@ fn emits_signed_widened_divide() {
 }
 
 #[test]
-fn rejects_immediate_widened_divide_rhs() {
+fn emits_immediate_widened_divide_rhs() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
             high: s("rdx"),
@@ -1346,16 +1504,16 @@ fn rejects_immediate_widened_divide_rhs() {
         },
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "Widened division right operand cannot be an immediate value"
-    );
+    assert!(asm.contains("  mov r10, 2\n"));
+    assert!(asm.contains("  xor rdx, rdx\n"));
+    assert!(asm.contains("  div r10\n"));
+    assert_assembles(&asm);
 }
 
 #[test]
-fn rejects_widened_divide_rhs_that_uses_rdx() {
+fn materializes_widened_divide_rhs_that_uses_rdx() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::RegisterPair {
             high: s("rdx"),
@@ -1368,12 +1526,12 @@ fn rejects_widened_divide_rhs_that_uses_rdx() {
         },
     }]);
 
-    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert_eq!(
-        error,
-        "Widened division right operand cannot use rdx because rdx is overwritten before the operation"
-    );
+    assert!(asm.contains("  mov r10, rdx\n"));
+    assert!(asm.contains("  xor rdx, rdx\n"));
+    assert!(asm.contains("  div r10\n"));
+    assert_assembles(&asm);
 }
 
 #[test]

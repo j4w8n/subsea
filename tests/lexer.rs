@@ -99,10 +99,14 @@ fn lexes_bitwise_operators() {
         ("&", Token::Ampersand),
         ("|", Token::Pipe),
         ("^", Token::Caret),
+        ("%", Token::Percent),
         ("~", Token::Tilde),
+        ("**", Token::DoubleStar),
         ("<<", Token::ShiftLeft),
         (">>", Token::ShiftRight),
         ("i>>", Token::IShiftRight),
+        ("i%", Token::IPercent),
+        ("u%", Token::UPercent),
     ] {
         assert_eq!(lex_one(source).unwrap(), Some(token));
     }

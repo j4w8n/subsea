@@ -62,10 +62,18 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
         Some('&') => Some(Token::Ampersand),
         Some('|') => Some(Token::Pipe),
         Some('^') => Some(Token::Caret),
+        Some('%') => Some(Token::Percent),
         Some('~') => Some(Token::Tilde),
         Some('+') => Some(Token::Plus),
         Some('-') => Some(Token::Minus),
-        Some('*') => Some(Token::Star),
+        Some('*') => {
+            if chars.peek() == Some(&'*') {
+                chars.next();
+                Some(Token::DoubleStar)
+            } else {
+                Some(Token::Star)
+            }
+        }
         Some('/') => Some(Token::Slash),
         Some('=') => {
             if chars.peek() == Some(&'=') {
@@ -153,6 +161,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Token::IGreaterEquals,
                     Token::IStar,
                     Token::ISlash,
+                    Token::IPercent,
                 )
                 .or_else(|| Some(Token::Ident(s))),
                 "call" => Some(Token::Call),
@@ -195,6 +204,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Token::UGreaterEquals,
                     Token::UStar,
                     Token::USlash,
+                    Token::UPercent,
                 )
                 .or_else(|| Some(Token::Ident(s))),
                 register if is_register(register) => Some(Token::Register(s)),
@@ -243,6 +253,7 @@ fn prefixed_integer_operator(
     greater_equals: Token,
     star: Token,
     slash: Token,
+    percent: Token,
 ) -> Option<Token> {
     match chars.peek() {
         Some('>') if matches!(greater, Token::IGreater) => {
@@ -265,6 +276,10 @@ fn prefixed_integer_operator(
         Some('/') => {
             chars.next();
             Some(slash)
+        }
+        Some('%') => {
+            chars.next();
+            Some(percent)
         }
         _ => None,
     }

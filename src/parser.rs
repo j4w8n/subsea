@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, ImportDeclaration,
-    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression,
+    FloatMathOp, ImportDeclaration, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
+    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -709,6 +709,10 @@ impl Parser {
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
+        if matches!(dst, AssignmentTarget::RegisterPair { .. }) {
+            return self.parse_wide_assignment(dst);
+        }
+
         let value = if matches!(self.peek(), Some(Token::Tilde)) {
             self.advance();
             let operand = self.parse_operand()?;
@@ -717,52 +721,37 @@ impl Parser {
                 operand,
             }
         } else {
-            let lhs = self.parse_operand()?;
-            match self.peek().and_then(assignment_op) {
-                Some(AssignmentOp::UnsupportedDivision) => {
+            let expression = self.parse_expression(0)?;
+            match self.peek() {
+                Some(Token::Slash) => {
+                    return Err(String::from(
+                        "Division must specify signedness; use i/ or u/",
+                    ));
+                }
+                Some(Token::Percent) => {
+                    return Err(String::from("Modulo must specify signedness; use i% or u%"));
+                }
+                _ => {}
+            }
+
+            if let Expression::Operand(lhs) = &expression
+                && let Some(AssignmentOp::FloatBinary(_, _) | AssignmentOp::UnsupportedDivision) =
+                    self.peek().and_then(assignment_op)
+            {
+                let op = self.peek().and_then(assignment_op).unwrap();
+                if matches!(op, AssignmentOp::UnsupportedDivision) {
                     self.advance();
                     return Err(String::from(
                         "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
                     ));
                 }
-                Some(AssignmentOp::Binary(MathOp::BitAnd)) => {
-                    self.advance();
-                    let rhs = self.parse_operand()?;
-
-                    if self.peek().and_then(compare_op).is_some() {
-                        let op = self.parse_compare_op()?;
-                        let zero = self.parse_operand()?;
-
-                        if !matches!(op, CompareOp::Equal | CompareOp::NotEqual) {
-                            return Err(String::from(
-                                "Bitwise-and conditions only support == 0 or != 0",
-                            ));
-                        }
-
-                        if zero != Operand::Immediate(0) {
-                            return Err(String::from(
-                                "Bitwise-and conditions must compare against 0",
-                            ));
-                        }
-
-                        AssignmentValue::Condition(ConditionExpr::BitwiseAndZero { lhs, rhs, op })
-                    } else {
-                        AssignmentValue::Binary {
-                            op: MathOp::BitAnd,
-                            lhs,
-                            rhs,
-                        }
-                    }
-                }
-                Some(op) => {
-                    self.advance();
-                    let rhs = self.parse_operand()?;
-                    assignment_value(op, lhs, rhs)
-                }
-                _ if self.peek().and_then(compare_op).is_some() => {
-                    AssignmentValue::Condition(self.parse_condition_expr_after_lhs(lhs)?)
-                }
-                _ => AssignmentValue::Operand(lhs),
+                self.advance();
+                let rhs = self.parse_operand()?;
+                assignment_value(op, lhs.clone(), rhs)
+            } else if self.peek().and_then(compare_op).is_some() {
+                self.assignment_condition_value(expression)?
+            } else {
+                expression_assignment_value(expression)
             }
         };
 
@@ -774,6 +763,117 @@ impl Parser {
             })
         } else {
             Ok(Instruction::Assign { dst, value })
+        }
+    }
+
+    fn parse_wide_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
+        let lhs = self.parse_operand()?;
+        let Some(op) = self.peek().and_then(assignment_op) else {
+            return Err(String::from(
+                "Register-pair assignment needs a widened operator after the left operand; e.g. `rdx:rax = lhs u* rhs`",
+            ));
+        };
+
+        if !matches!(op, AssignmentOp::Wide { .. }) {
+            return Err(String::from(
+                "Register-pair assignment only supports widened `u*`, `i*`, `u/`, or `i/`.",
+            ));
+        }
+
+        self.advance();
+        let rhs = self.parse_operand()?;
+        let value = assignment_value(op, lhs, rhs);
+
+        if let Some(condition) = self.parse_optional_assignment_condition()? {
+            Ok(Instruction::AssignIf {
+                dst,
+                value,
+                condition,
+            })
+        } else {
+            Ok(Instruction::Assign { dst, value })
+        }
+    }
+
+    fn parse_expression(&mut self, min_precedence: u8) -> Result<Expression, String> {
+        let mut lhs = self.parse_expression_primary()?;
+
+        while let Some((op, precedence, right_associative)) = self.peek().and_then(expression_op) {
+            if precedence < min_precedence {
+                break;
+            }
+
+            self.advance();
+            let next_min_precedence = if right_associative {
+                precedence
+            } else {
+                precedence + 1
+            };
+            let rhs = self.parse_expression(next_min_precedence)?;
+            lhs = Expression::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+
+        Ok(lhs)
+    }
+
+    fn parse_expression_primary(&mut self) -> Result<Expression, String> {
+        if matches!(self.peek(), Some(Token::LParen)) {
+            self.advance();
+            let expression = self.parse_expression(0)?;
+            self.expect(Token::RParen, "Expected ')' after expression")?;
+            Ok(expression)
+        } else {
+            self.parse_operand().map(Expression::Operand)
+        }
+    }
+
+    fn assignment_condition_value(
+        &mut self,
+        expression: Expression,
+    ) -> Result<AssignmentValue, String> {
+        match expression {
+            Expression::Operand(lhs) => Ok(AssignmentValue::Condition(
+                self.parse_condition_expr_after_lhs(lhs)?,
+            )),
+            Expression::Binary {
+                op: ExprOp::Math(MathOp::BitAnd),
+                lhs,
+                rhs,
+            } => {
+                let op = self.parse_compare_op()?;
+                let zero = self.parse_operand()?;
+
+                if !matches!(op, CompareOp::Equal | CompareOp::NotEqual) {
+                    return Err(String::from(
+                        "Bitwise-and conditions only support == 0 or != 0",
+                    ));
+                }
+
+                if zero != Operand::Immediate(0) {
+                    return Err(String::from(
+                        "Bitwise-and conditions must compare against 0",
+                    ));
+                }
+
+                let (Expression::Operand(lhs), Expression::Operand(rhs)) = (*lhs, *rhs) else {
+                    return Err(String::from(
+                        "Bitwise-and conditions only support simple operands",
+                    ));
+                };
+
+                Ok(AssignmentValue::Condition(ConditionExpr::BitwiseAndZero {
+                    lhs,
+                    rhs,
+                    op,
+                }))
+            }
+            _ => Err(String::from(
+                "Comparison assignments require a simple operand on the left side",
+            )),
         }
     }
 
@@ -1341,6 +1441,8 @@ fn assignment_op(token: &Token) -> Option<AssignmentOp> {
         Token::IShiftRight => AssignmentOp::Binary(MathOp::ShiftRightArithmetic),
         Token::Minus => AssignmentOp::Binary(MathOp::Subtract),
         Token::Star => AssignmentOp::Binary(MathOp::Multiply),
+        Token::DoubleStar => AssignmentOp::Binary(MathOp::Power),
+        Token::Percent => AssignmentOp::UnsupportedDivision,
         Token::Slash => AssignmentOp::UnsupportedDivision,
         Token::F32Plus => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Add),
         Token::F32Minus => AssignmentOp::FloatBinary(MemoryWidth::F32, FloatMathOp::Subtract),
@@ -1354,6 +1456,7 @@ fn assignment_op(token: &Token) -> Option<AssignmentOp> {
             signed: true,
             division: true,
         },
+        Token::IPercent => AssignmentOp::UnsupportedDivision,
         Token::IStar => AssignmentOp::Wide {
             signed: true,
             division: false,
@@ -1362,12 +1465,52 @@ fn assignment_op(token: &Token) -> Option<AssignmentOp> {
             signed: false,
             division: true,
         },
+        Token::UPercent => AssignmentOp::UnsupportedDivision,
         Token::UStar => AssignmentOp::Wide {
             signed: false,
             division: false,
         },
         _ => return None,
     })
+}
+
+fn expression_op(token: &Token) -> Option<(ExprOp, u8, bool)> {
+    let op = match token {
+        Token::Pipe => (ExprOp::Math(MathOp::BitOr), 1, false),
+        Token::Caret => (ExprOp::Math(MathOp::BitXor), 2, false),
+        Token::Ampersand => (ExprOp::Math(MathOp::BitAnd), 3, false),
+        Token::ShiftLeft => (ExprOp::Math(MathOp::ShiftLeft), 4, false),
+        Token::ShiftRight => (ExprOp::Math(MathOp::ShiftRightLogical), 4, false),
+        Token::IShiftRight => (ExprOp::Math(MathOp::ShiftRightArithmetic), 4, false),
+        Token::Plus => (ExprOp::Math(MathOp::Add), 5, false),
+        Token::Minus => (ExprOp::Math(MathOp::Subtract), 5, false),
+        Token::Star => (ExprOp::Math(MathOp::Multiply), 6, false),
+        Token::ISlash => (ExprOp::Divide { signed: true }, 6, false),
+        Token::USlash => (ExprOp::Divide { signed: false }, 6, false),
+        Token::IPercent => (ExprOp::Modulo { signed: true }, 6, false),
+        Token::UPercent => (ExprOp::Modulo { signed: false }, 6, false),
+        Token::Slash | Token::Percent => return None,
+        Token::DoubleStar => (ExprOp::Power, 7, true),
+        _ => return None,
+    };
+
+    Some(op)
+}
+
+fn expression_assignment_value(expression: Expression) -> AssignmentValue {
+    match expression {
+        Expression::Operand(operand) => AssignmentValue::Operand(operand),
+        Expression::Binary { op, lhs, rhs } => match (*lhs, *rhs, op) {
+            (Expression::Operand(lhs), Expression::Operand(rhs), ExprOp::Math(op)) => {
+                AssignmentValue::Binary { op, lhs, rhs }
+            }
+            (lhs, rhs, op) => AssignmentValue::Expression(Expression::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            }),
+        },
+    }
 }
 
 fn assignment_value(op: AssignmentOp, lhs: Operand, rhs: Operand) -> AssignmentValue {

@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp,
-    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp,
+    Expression, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
+    PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -632,7 +632,8 @@ fn float_math_op_from_integer_op(op: MathOp) -> FloatMathOp {
         MathOp::Add => FloatMathOp::Add,
         MathOp::Multiply => FloatMathOp::Multiply,
         MathOp::Subtract => FloatMathOp::Subtract,
-        MathOp::BitAnd
+        MathOp::Power
+        | MathOp::BitAnd
         | MathOp::BitOr
         | MathOp::BitXor
         | MathOp::ShiftLeft
@@ -653,6 +654,7 @@ fn math_op_symbol(op: MathOp) -> &'static str {
         MathOp::BitOr => "|",
         MathOp::BitXor => "^",
         MathOp::Multiply => "*",
+        MathOp::Power => "**",
         MathOp::ShiftLeft => "<<",
         MathOp::ShiftRightArithmetic => "i>>",
         MathOp::ShiftRightLogical => ">>",
@@ -685,6 +687,7 @@ fn integer_math_opcode(op: MathOp) -> &'static str {
         MathOp::BitOr => "or",
         MathOp::BitXor => "xor",
         MathOp::Multiply => "imul",
+        MathOp::Power => unreachable!(),
         MathOp::ShiftLeft => "shl",
         MathOp::ShiftRightArithmetic => "sar",
         MathOp::ShiftRightLogical => "shr",
@@ -1147,6 +1150,7 @@ fn collect_assignment_value_float_literals(
         AssignmentValue::Condition(condition) => {
             collect_condition_float_literals(floats, float_literals, label_name, condition)?;
         }
+        AssignmentValue::Expression(_) => {}
         AssignmentValue::Operand(_)
         | AssignmentValue::BitwiseUnary { .. }
         | AssignmentValue::WideMultiply { .. }
@@ -2166,8 +2170,16 @@ fn emit_assignment(
             let dst = assignment_operand_target(dst)?;
             emit_boolean_condition_assignment(asm, dst, condition, strings, label_name, stack)
         }
+        AssignmentValue::Expression(expression) => {
+            let dst = assignment_operand_target(dst)?;
+            emit_expression_assignment(asm, dst, expression, strings, label_name, stack)
+        }
         AssignmentValue::Binary { op, lhs, rhs } => {
             let dst = assignment_operand_target(dst)?;
+
+            if *op == MathOp::Power {
+                return emit_power_assignment(asm, dst, lhs, rhs, strings, label_name, stack);
+            }
 
             if integer_op_can_be_float(*op)
                 && let Some(width) =
@@ -2257,6 +2269,497 @@ fn emit_assignment(
         AssignmentValue::WideDivide { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, true, lhs, rhs, strings, label_name, stack,
         ),
+    }
+}
+
+fn emit_expression_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    expression: &Expression,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_integer_expression(expression, strings, label_name, stack)?;
+
+    let target = match dst {
+        Operand::Register(register) if !is_xmm_register(register) => dst.clone(),
+        _ => Operand::Register(expression_temp_register(dst, expression)?),
+    };
+
+    emit_expression_to_register(asm, &target, expression, strings, label_name, stack)?;
+
+    if &target != dst {
+        emit_copy_instruction(asm, &target, dst, strings, label_name, stack)?;
+    }
+
+    Ok(())
+}
+
+fn emit_expression_to_register(
+    asm: &mut String,
+    dst: &Operand,
+    expression: &Expression,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Expression destination must be an integer register",
+        ));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Expression destination must be an integer register",
+        ));
+    }
+
+    match expression {
+        Expression::Operand(operand) => {
+            emit_copy_instruction(asm, operand, dst, strings, label_name, stack)
+        }
+        Expression::Binary { op, lhs, rhs } => {
+            let precomputed_rhs = if !matches!(op, ExprOp::Math(MathOp::Power) | ExprOp::Power)
+                && expression_uses_register_family(rhs, dst_register)
+            {
+                let temp = Operand::Register(expression_temp_register(dst, expression)?);
+                emit_expression_to_register(asm, &temp, rhs, strings, label_name, stack)?;
+                Some(temp)
+            } else {
+                None
+            };
+
+            emit_expression_to_register(asm, dst, lhs, strings, label_name, stack)?;
+
+            match op {
+                ExprOp::Math(MathOp::Power) | ExprOp::Power => {
+                    let Expression::Operand(exponent) = rhs.as_ref() else {
+                        return Err(String::from("Power exponent must be an operand"));
+                    };
+                    emit_power_operation(asm, dst, dst, exponent, strings, label_name, stack)
+                }
+                ExprOp::Math(op) => {
+                    let rhs_operand = if let Some(rhs_operand) = precomputed_rhs {
+                        rhs_operand
+                    } else {
+                        expression_rhs_operand(asm, dst, rhs, strings, label_name, stack)?
+                    };
+                    emit_integer_math_instruction(
+                        asm,
+                        *op,
+                        &rhs_operand,
+                        dst,
+                        strings,
+                        label_name,
+                        stack,
+                    )
+                }
+                ExprOp::Divide { signed } => {
+                    let rhs_operand = if let Some(rhs_operand) = precomputed_rhs {
+                        rhs_operand
+                    } else {
+                        expression_rhs_operand(asm, dst, rhs, strings, label_name, stack)?
+                    };
+                    emit_division_from_accumulator(
+                        asm,
+                        *signed,
+                        false,
+                        dst,
+                        &rhs_operand,
+                        dst,
+                        strings,
+                        label_name,
+                        stack,
+                    )
+                }
+                ExprOp::Modulo { signed } => {
+                    let rhs_operand = if let Some(rhs_operand) = precomputed_rhs {
+                        rhs_operand
+                    } else {
+                        expression_rhs_operand(asm, dst, rhs, strings, label_name, stack)?
+                    };
+                    emit_division_from_accumulator(
+                        asm,
+                        *signed,
+                        true,
+                        dst,
+                        &rhs_operand,
+                        dst,
+                        strings,
+                        label_name,
+                        stack,
+                    )
+                }
+            }
+        }
+    }
+}
+
+fn expression_rhs_operand(
+    asm: &mut String,
+    dst: &Operand,
+    rhs: &Expression,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Operand, String> {
+    match rhs {
+        Expression::Operand(operand) => Ok(operand.clone()),
+        Expression::Binary { .. } => {
+            let temp = Operand::Register(expression_temp_register(dst, rhs)?);
+            emit_expression_to_register(asm, &temp, rhs, strings, label_name, stack)?;
+            Ok(temp)
+        }
+    }
+}
+
+fn emit_power_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match dst {
+        Operand::Register(register) if !is_xmm_register(register) => {
+            emit_power_operation(asm, dst, lhs, rhs, strings, label_name, stack)
+        }
+        _ => Err(String::from(
+            "Power destination must be a 64-bit integer register",
+        )),
+    }
+}
+
+fn emit_power_operation(
+    asm: &mut String,
+    dst: &Operand,
+    base: &Operand,
+    exponent: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from("Power destination must be a register for now"));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Power destination must be an integer register",
+        ));
+    }
+
+    if register_width(dst_register) != Some(Width::Bits64) {
+        return Err(String::from(
+            "Power destination must be a 64-bit integer register",
+        ));
+    }
+
+    validate_integer_power_operands(base, exponent, dst, strings, label_name, stack)?;
+
+    if operand_uses_register_family(dst, "r10") || operand_uses_register_family(dst, "r11") {
+        return Err(String::from(
+            "Power destination cannot use r10 or r11 because they are scratch registers",
+        ));
+    }
+
+    let exponent_uses_r10_address = operand_address_uses_register_family(exponent, "r10");
+    let base_uses_r11_address = operand_address_uses_register_family(base, "r11");
+
+    match (exponent_uses_r10_address, base_uses_r11_address) {
+        (true, true) => {
+            return Err(String::from(
+                "Power cannot use r10 in the exponent address and r11 in the base address because both are scratch registers",
+            ));
+        }
+        (true, false) => {
+            emit_power_exponent_load(asm, exponent, strings, label_name, stack)?;
+            emit_copy_instruction(
+                asm,
+                base,
+                &Operand::Register(String::from("r10")),
+                strings,
+                label_name,
+                stack,
+            )?;
+        }
+        _ => {
+            emit_copy_instruction(
+                asm,
+                base,
+                &Operand::Register(String::from("r10")),
+                strings,
+                label_name,
+                stack,
+            )?;
+            emit_power_exponent_load(asm, exponent, strings, label_name, stack)?;
+        }
+    }
+
+    let loop_label = format!(".L.__subsea.{label_name}.pow_{}_loop", asm.len());
+    let skip_multiply_label = format!(".L.__subsea.{label_name}.pow_{}_skip_mul", asm.len());
+    let done_label = format!(".L.__subsea.{label_name}.pow_{}_done", asm.len());
+
+    asm.push_str(&format!("  mov {dst_register}, 1\n"));
+    asm.push_str(&format!("{loop_label}:\n"));
+    asm.push_str("  cmp r11, 0\n");
+    asm.push_str(&format!("  je {done_label}\n"));
+    asm.push_str("  test r11, 1\n");
+    asm.push_str(&format!("  je {skip_multiply_label}\n"));
+    asm.push_str(&format!("  imul {dst_register}, r10\n"));
+    asm.push_str(&format!("{skip_multiply_label}:\n"));
+    asm.push_str("  imul r10, r10\n");
+    asm.push_str("  shr r11, 1\n");
+    asm.push_str(&format!("  jmp {loop_label}\n"));
+    asm.push_str(&format!("{done_label}:\n"));
+
+    Ok(())
+}
+
+fn emit_power_exponent_load(
+    asm: &mut String,
+    exponent: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if let Some(value) = immediate_value(exponent, strings, label_name, stack) {
+        if value < 0 {
+            return Err(String::from("Power exponent must be non-negative"));
+        }
+        validate_immediate_range(value, ImmediateDestination::Register(Width::Bits64))?;
+        asm.push_str(&format!("  mov r11, {value}\n"));
+        return Ok(());
+    }
+
+    if operand_uses_high_byte_register(exponent) {
+        return Err(String::from(
+            "Power exponent cannot use high-byte registers ah, bh, ch, or dh",
+        ));
+    }
+
+    let width = operand_width(exponent, strings, label_name, stack)?
+        .ok_or_else(|| String::from("Power exponent must be an integer operand"))?;
+    let exponent = emit_operand(exponent, strings, label_name, stack)?;
+
+    match width {
+        Width::Bits64 => asm.push_str(&format!("  mov r11, {exponent}\n")),
+        Width::Bits32 => asm.push_str(&format!("  mov r11d, {exponent}\n")),
+        Width::Bits16 | Width::Bits8 => asm.push_str(&format!("  movzx r11, {exponent}\n")),
+    }
+
+    Ok(())
+}
+
+fn emit_division_from_accumulator(
+    asm: &mut String,
+    signed: bool,
+    remainder: bool,
+    lhs: &Operand,
+    rhs: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_division_operands(lhs, rhs, dst, strings, label_name, stack)?;
+
+    let divisor = materialize_divisor_if_needed(asm, lhs, rhs, strings, label_name, stack)?;
+    let rax = Operand::Register(String::from("rax"));
+    emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
+
+    if signed {
+        asm.push_str("  cqo\n");
+    } else {
+        asm.push_str("  xor rdx, rdx\n");
+    }
+
+    let opcode = if signed { "idiv" } else { "div" };
+    let divisor = emit_operand(&divisor, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {divisor}\n"));
+
+    let result = Operand::Register(if remainder {
+        String::from("rdx")
+    } else {
+        String::from("rax")
+    });
+    if &result != dst {
+        emit_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
+    }
+
+    Ok(())
+}
+
+fn materialize_divisor_if_needed(
+    asm: &mut String,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Operand, String> {
+    let needs_temp = is_immediate_operand(rhs, strings, label_name, stack)
+        || operand_uses_register_family(rhs, "rax")
+        || operand_uses_register_family(rhs, "rdx");
+
+    if !needs_temp {
+        return Ok(rhs.clone());
+    }
+
+    let temp = division_temp_register(lhs, rhs)?;
+    let temp_operand = Operand::Register(temp);
+    emit_copy_instruction(asm, rhs, &temp_operand, strings, label_name, stack)?;
+    Ok(temp_operand)
+}
+
+fn validate_integer_expression(
+    expression: &Expression,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match expression {
+        Expression::Operand(operand) => {
+            if operand_uses_xmm_register(operand)
+                || is_float_memory_operand(operand, strings, stack)?
+            {
+                return Err(String::from(
+                    "Arithmetic expressions do not support floating-point operands yet",
+                ));
+            }
+            if matches!(operand, Operand::FloatLiteral(_)) {
+                return Err(String::from(
+                    "Arithmetic expressions do not support floating-point operands yet",
+                ));
+            }
+            if matches!(operand, Operand::Pointer(_) | Operand::AddressOf(_)) {
+                return Err(String::from(
+                    "Arithmetic expressions cannot use address-of operands",
+                ));
+            }
+            Ok(())
+        }
+        Expression::Binary { lhs, rhs, .. } => {
+            validate_integer_expression(lhs, strings, label_name, stack)?;
+            validate_integer_expression(rhs, strings, label_name, stack)
+        }
+    }
+}
+
+fn validate_integer_power_operands(
+    lhs: &Operand,
+    rhs: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_wide_math_operand("Power base", lhs, strings, label_name, stack)?;
+    validate_power_exponent(rhs, strings, label_name, stack)?;
+
+    if let Some(width) = operand_width(dst, strings, label_name, stack)?
+        && width != Width::Bits64
+    {
+        return Err(format!(
+            "Power destination must be 64-bit, found {}-bit operand",
+            width.bits()
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_power_exponent(
+    exponent: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(exponent, Operand::Pointer(_) | Operand::AddressOf(_)) {
+        return Err(String::from(
+            "Power exponent cannot be an address-of operand",
+        ));
+    }
+
+    if operand_uses_xmm_register(exponent) || is_float_memory_operand(exponent, strings, stack)? {
+        return Err(String::from("Power exponent must be an integer operand"));
+    }
+
+    if let Some(value) = immediate_value(exponent, strings, label_name, stack)
+        && value < 0
+    {
+        return Err(String::from("Power exponent must be non-negative"));
+    }
+
+    Ok(())
+}
+
+fn validate_division_operands(
+    lhs: &Operand,
+    rhs: &Operand,
+    dst: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_wide_math_operand("Division left operand", lhs, strings, label_name, stack)?;
+    validate_wide_math_operand("Division right operand", rhs, strings, label_name, stack)?;
+
+    if let Some(width) = operand_width(dst, strings, label_name, stack)?
+        && width != Width::Bits64
+    {
+        return Err(format!(
+            "Division destination must be 64-bit, found {}-bit operand",
+            width.bits()
+        ));
+    }
+
+    Ok(())
+}
+
+fn expression_temp_register(dst: &Operand, expression: &Expression) -> Result<String, String> {
+    if !operand_uses_register_family(dst, "r10")
+        && !expression_uses_register_family(expression, "r10")
+    {
+        Ok(String::from("r10"))
+    } else if !operand_uses_register_family(dst, "r11")
+        && !expression_uses_register_family(expression, "r11")
+    {
+        Ok(String::from("r11"))
+    } else {
+        Err(String::from(
+            "Arithmetic expression cannot use both r10 and r11 because they are scratch registers",
+        ))
+    }
+}
+
+fn division_temp_register(lhs: &Operand, rhs: &Operand) -> Result<String, String> {
+    if !operand_uses_register_family(lhs, "r10")
+        && !operand_address_uses_register_family(rhs, "r10")
+    {
+        Ok(String::from("r10"))
+    } else if !operand_uses_register_family(lhs, "r11")
+        && !operand_address_uses_register_family(rhs, "r11")
+    {
+        Ok(String::from("r11"))
+    } else {
+        Err(String::from(
+            "Division cannot materialize its right operand because both r10 and r11 are in use",
+        ))
+    }
+}
+
+fn expression_uses_register_family(expression: &Expression, register: &str) -> bool {
+    match expression {
+        Expression::Operand(operand) => operand_uses_register_family(operand, register),
+        Expression::Binary { lhs, rhs, .. } => {
+            expression_uses_register_family(lhs, register)
+                || expression_uses_register_family(rhs, register)
+        }
     }
 }
 
@@ -2417,9 +2920,10 @@ fn emit_wide_math_assignment(
         stack,
     )?;
 
+    let rhs = materialize_divisor_if_needed(asm, lhs, rhs, strings, label_name, stack)?;
+
     let rax = Operand::Register(String::from("rax"));
     emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
-    validate_wide_math_rhs_not_clobbered(&format!("{prefix} right operand"), rhs, division)?;
 
     if division {
         if signed {
@@ -2435,7 +2939,7 @@ fn emit_wide_math_assignment(
         (true, true) => "idiv",
         (true, false) => "div",
     };
-    let rhs = emit_operand(rhs, strings, label_name, stack)?;
+    let rhs = emit_operand(&rhs, strings, label_name, stack)?;
     asm.push_str(&format!("  {opcode} {rhs}\n"));
 
     Ok(())
@@ -2713,36 +3217,12 @@ fn validate_wide_math_operand(
         return Err(format!("{name} cannot be an address-of operand"));
     }
 
-    if is_immediate_operand(operand, strings, label_name, stack) {
-        return Err(format!("{name} cannot be an immediate value"));
-    }
-
     if let Some(width) = operand_width(operand, strings, label_name, stack)?
         && width != Width::Bits64
     {
         return Err(format!(
             "{name} must be 64-bit, found {}-bit operand",
             width.bits()
-        ));
-    }
-
-    Ok(())
-}
-
-fn validate_wide_math_rhs_not_clobbered(
-    name: &str,
-    operand: &Operand,
-    clobbers_rdx_before_rhs: bool,
-) -> Result<(), String> {
-    if operand_uses_register_family(operand, "rax") {
-        return Err(format!(
-            "{name} cannot use rax because rax is overwritten before the operation"
-        ));
-    }
-
-    if clobbers_rdx_before_rhs && operand_uses_register_family(operand, "rdx") {
-        return Err(format!(
-            "{name} cannot use rdx because rdx is overwritten before the operation"
         ));
     }
 

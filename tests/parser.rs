@@ -1,7 +1,8 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
-    DataDeclaration, DataItem, FloatMathOp, Instruction, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, MathOp,
+    MemoryDeclaration, MemoryWidth, Operand, PrintPart, ReadSource, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -637,6 +638,80 @@ fn parses_arithmetic_shift_right_assignment() {
             },
         }
     );
+}
+
+#[test]
+fn parses_arithmetic_expression_with_precedence() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tnum("2"),
+        Token::Plus,
+        tnum("3"),
+        Token::Star,
+        tnum("4"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::Expression(Expression::Binary {
+                op: ExprOp::Math(MathOp::Add),
+                lhs: Box::new(Expression::Operand(Operand::Immediate(2))),
+                rhs: Box::new(Expression::Binary {
+                    op: ExprOp::Math(MathOp::Multiply),
+                    lhs: Box::new(Expression::Operand(Operand::Immediate(3))),
+                    rhs: Box::new(Expression::Operand(Operand::Immediate(4))),
+                }),
+            }),
+        }
+    );
+}
+
+#[test]
+fn parses_parenthesized_arithmetic_expression() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        Token::LParen,
+        tnum("2"),
+        Token::Plus,
+        tnum("3"),
+        Token::RParen,
+        Token::Star,
+        tnum("4"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert!(matches!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            value: AssignmentValue::Expression(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rejects_plain_modulo_without_signedness() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tnum("5"),
+        Token::Percent,
+        tnum("2"),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(error, "Modulo must specify signedness; use i% or u%");
 }
 
 #[test]

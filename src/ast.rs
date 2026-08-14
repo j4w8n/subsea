@@ -205,6 +205,7 @@ impl Instruction {
 fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnMut(&Operand)) {
     match value {
         AssignmentValue::Operand(operand) => visit(operand),
+        AssignmentValue::Expression(expression) => expression.visit_operands(visit),
         AssignmentValue::BitwiseUnary { operand, .. } => visit(operand),
         AssignmentValue::Binary { lhs, rhs, .. }
         | AssignmentValue::FloatBinary { lhs, rhs, .. }
@@ -223,6 +224,7 @@ fn visit_assignment_value_operands_mut(
 ) {
     match value {
         AssignmentValue::Operand(operand) => visit(operand),
+        AssignmentValue::Expression(expression) => expression.visit_operands_mut(visit),
         AssignmentValue::BitwiseUnary { operand, .. } => visit(operand),
         AssignmentValue::Binary { lhs, rhs, .. }
         | AssignmentValue::FloatBinary { lhs, rhs, .. }
@@ -333,6 +335,7 @@ pub enum AssignmentTarget {
 #[derive(Debug, PartialEq, Clone)]
 pub enum AssignmentValue {
     Operand(Operand),
+    Expression(Expression),
     Binary {
         op: MathOp,
         lhs: Operand,
@@ -361,6 +364,46 @@ pub enum AssignmentValue {
     },
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub enum Expression {
+    Operand(Operand),
+    Binary {
+        op: ExprOp,
+        lhs: Box<Expression>,
+        rhs: Box<Expression>,
+    },
+}
+
+impl Expression {
+    pub fn visit_operands(&self, visit: &mut impl FnMut(&Operand)) {
+        match self {
+            Self::Operand(operand) => visit(operand),
+            Self::Binary { lhs, rhs, .. } => {
+                lhs.visit_operands(visit);
+                rhs.visit_operands(visit);
+            }
+        }
+    }
+
+    pub fn visit_operands_mut(&mut self, visit: &mut impl FnMut(&mut Operand)) {
+        match self {
+            Self::Operand(operand) => visit(operand),
+            Self::Binary { lhs, rhs, .. } => {
+                lhs.visit_operands_mut(visit);
+                rhs.visit_operands_mut(visit);
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExprOp {
+    Math(MathOp),
+    Divide { signed: bool },
+    Modulo { signed: bool },
+    Power,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MathOp {
     Add,
@@ -368,6 +411,7 @@ pub enum MathOp {
     BitOr,
     BitXor,
     Multiply,
+    Power,
     ShiftLeft,
     ShiftRightArithmetic,
     ShiftRightLogical,
