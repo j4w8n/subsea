@@ -163,7 +163,6 @@ These are top-level entities that execute instructions within their code block. 
 - `ret` emits generated stack-frame cleanup automatically - unless the stack is manually changed via `push` or `pop`.
 - `linux.exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
 - `nop` emits a no-operation instruction. It is useful for padding, patch space, and low-level debugging.
-- `x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
 
 ```ss
 main: {
@@ -181,6 +180,26 @@ helper: {
 ```bash
 Helping!
 Done
+```
+
+Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
+
+The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
+
+```ss
+main: {
+  rdi = 2
+  rsi = 3
+  call add
+  // result is now in rax
+
+  linux.exit 0
+}
+
+add: {
+  rax = rdi + rsi
+  ret
+}
 ```
 
 ## Imports
@@ -220,6 +239,10 @@ export debug_write: {
 ```
 
 Imports are intentionally narrow: only explicitly listed exported functions can be imported. Memory, data blocks, constants, and private helper functions are not importable API surface yet.
+
+## Freestanding And Raw X86
+
+`x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
 
 Freestanding halt loop:
 
@@ -267,26 +290,6 @@ main: {
 ```
 
 This keeps the hardware boundary explicit while avoiding manual ASCII byte assignments for every character.
-
-Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
-
-The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
-
-```ss
-main: {
-  rdi = 2
-  rsi = 3
-  call add
-  // result is now in rax
-
-  linux.exit 0
-}
-
-add: {
-  rax = rdi + rsi
-  ret
-}
-```
 
 ## Local Labels
 
@@ -485,7 +488,74 @@ rax = &rax
 
 `&[...]` is valid and computes a raw address expression without loading memory. See [Memory Arithmetic](#memory-arithmetic).
 
-### Static Data Blocks
+## Memory Arithmetic
+
+Declared memory can be indexed with byte offsets. The access width is inferred from the `mem` declaration unless you add an explicit width:
+
+```ss
+mem values:u64(4)
+mem bytes:u8(128)
+
+values[0] = 10
+values[8] = 20
+rax = values[8]       // u64 load
+
+bytes[rax] = 72       // u8 store
+al = bytes[rax]       // u8 load
+```
+
+Use `&name[offset]` to compute the address of indexed memory without loading or storing through it:
+
+```ss
+rsi = &bytes[rax]
+stack text:str = slice &bytes[10], 20
+```
+
+The difference is whether the expression reads memory:
+
+```ss
+al = bytes[rax]   // load one byte from bytes + rax
+rsi = &bytes[rax] // compute bytes + rax; do not load memory
+```
+
+Index expressions can use scaled registers, with scale values of 1, 2, 4, and 8:
+
+```ss
+rax = values[r8 * 8]
+rsi = &values[r8 * 8]
+```
+
+Raw memory operands also support x86-64-style address expressions. Use this form when the base address is already in a register:
+
+```ss
+rbx = [rax + 8]
+rcx = [rbp - 16]
+rdx = [rax + rbx + 8]
+```
+
+Scaled index addressing is also supported in raw memory operands. Brackets without `&` mean load from the computed address:
+
+```ss
+rbx = [rax + rcx * 1]
+rbx = [rax + rcx * 2]
+rbx = [rax + rcx * 4 + 8]
+```
+
+Use `&[...]` to compute a raw register-based address expression without reading memory. On x86-64 this lowers to `lea`:
+
+```ss
+rbx = [rax + rcx * 4 + 8]  // load from memory at rax + rcx * 4 + 8
+rbx = &[rax + rcx * 4 + 8] // compute rax + rcx * 4 + 8; do not load memory
+```
+
+Nested dereferences and address-of inside memory operands are not supported:
+
+```ss
+rbx = [[rax]]
+rbx = [&buf]
+```
+
+## Static Data Blocks
 
 Use top-level `data` blocks for explicit static metadata layout in named object sections. This is useful for freestanding metadata, firmware tables, linker-collected registries, and boot protocol records:
 
@@ -593,73 +663,6 @@ Supported floating-point comparison operators are `f32==`, `f32!=`, `f32<`, `f32
 These are not yet supported:
 
 - Runtime float printing
-
-## Memory Arithmetic
-
-Declared memory can be indexed with byte offsets. The access width is inferred from the `mem` declaration unless you add an explicit width:
-
-```ss
-mem values:u64(4)
-mem bytes:u8(128)
-
-values[0] = 10
-values[8] = 20
-rax = values[8]       // u64 load
-
-bytes[rax] = 72       // u8 store
-al = bytes[rax]       // u8 load
-```
-
-Use `&name[offset]` to compute the address of indexed memory without loading or storing through it:
-
-```ss
-rsi = &bytes[rax]
-stack text:str = slice &bytes[10], 20
-```
-
-The difference is whether the expression reads memory:
-
-```ss
-al = bytes[rax]   // load one byte from bytes + rax
-rsi = &bytes[rax] // compute bytes + rax; do not load memory
-```
-
-Index expressions can use scaled registers, with scale values of 1, 2, 4, and 8:
-
-```ss
-rax = values[r8 * 8]
-rsi = &values[r8 * 8]
-```
-
-Raw memory operands also support x86-64-style address expressions. Use this form when the base address is already in a register:
-
-```ss
-rbx = [rax + 8]
-rcx = [rbp - 16]
-rdx = [rax + rbx + 8]
-```
-
-Scaled index addressing is also supported in raw memory operands. Brackets without `&` mean load from the computed address:
-
-```ss
-rbx = [rax + rcx * 1]
-rbx = [rax + rcx * 2]
-rbx = [rax + rcx * 4 + 8]
-```
-
-Use `&[...]` to compute a raw register-based address expression without reading memory. On x86-64 this lowers to `lea`:
-
-```ss
-rbx = [rax + rcx * 4 + 8]  // load from memory at rax + rcx * 4 + 8
-rbx = &[rax + rcx * 4 + 8] // compute rax + rcx * 4 + 8; do not load memory
-```
-
-Nested dereferences and address-of inside memory operands are not supported:
-
-```ss
-rbx = [[rax]]
-rbx = [&buf]
-```
 
 ## Slices
 
