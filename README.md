@@ -40,6 +40,10 @@ rax = 10
 rax = rax + 5
 rax = rax - 1
 rbx = count * 2
+rcx = (rax + 3) * 4
+rbx = rax ** 3
+rbx = rax u/ 10
+rdx = rax u% 10
 rdx:rax = rbx u* rcx
 rdx:rax = rbx i* rcx
 rdx:rax = rbx u/ rcx
@@ -47,27 +51,25 @@ rdx:rax = rbx i/ rcx
 ```
 
 - The left side is the destination that changes.
-- Math assignment currently supports `+`, `-`, and low-result `*`.
+- Integer math assignment supports `+`, `-`, low-result `*`, signed/unsigned division, signed/unsigned modulo, and power-of.
+- Arithmetic expressions support parentheses and normal precedence: `**`, then `*`/division/modulo, then `+`/`-`, then shifts, then bitwise `&`, `^`, and `|`.
+- Power uses `**`. Runtime exponents are supported for integer operands; narrower exponent registers or memory operands are zero-extended before the loop, so `rax = rbx ** cl` treats `cl` as an unsigned 8-bit exponent.
+- Power currently requires a 64-bit integer destination and 64-bit base. Narrow exponents are allowed because they only control the loop count; narrow base/result forms like `eax = ebx ** cl` are not supported yet. Negative immediate exponents are rejected. Results use normal integer wrapping/truncation behavior from repeated `imul` operations.
 - `i` and `u` prefixes mark whether the operation is for signed or unsigned values.
+- Division must use `i/` or `u/`; plain `/` is rejected.
+- Modulo must use `i%` or `u%`; plain `%` is rejected.
 - Use `u*` or `i*` with `rdx:rax` when you need the full widened multiply result.
 - Use `u/` or `i/` with `rdx:rax` when you need division; remainder is written to `rdx` and the quotient is written to `rax`.
 
-Widened multiply and divide operands must already be register or memory operands; immediate values are not supported yet. Numeric literals and integer bindings are immediate values, so put them in explicit registers first:
-
-```ss
-r10 = 100
-r11 = 10
-rdx:rax = r10 u* r11
-rdx:rax = r10 u/ r11
-```
-
-These are currently invalid because `100`, `10`, and `count` are immediate values:
+Widened multiply and divide write their hardware result to `rdx:rax`; other register pairs are not accepted. Immediate operands are allowed.
 
 ```ss
 const count = 10
-rdx:rax = 100 u* 10
-rdx:rax = r10 u/ count
+rdx:rax = 100 u* count
+rdx:rax = r10 u/ 10
 ```
+
+Arithmetic expression lowering may also use `r10` or `r11` as scratch registers. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on `r10` or `r11` being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
 
 ## Bitwise Operations
 
