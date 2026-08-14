@@ -49,6 +49,23 @@ pub enum MemoryDeclaration {
         width: MemoryWidth,
         count: usize,
     },
+    Array {
+        name: String,
+        width: MemoryWidth,
+        values: Vec<MemoryValue>,
+    },
+    Repeat {
+        name: String,
+        width: MemoryWidth,
+        count: usize,
+        value: MemoryValue,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MemoryValue {
+    Integer(i128),
+    Addr { target: String },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -497,6 +514,7 @@ pub enum MemoryWidth {
     U16,
     U32,
     U64,
+    Ptr,
 }
 
 impl MemoryWidth {
@@ -512,8 +530,9 @@ impl MemoryWidth {
             "u16" => Ok(Self::U16),
             "u32" => Ok(Self::U32),
             "u64" => Ok(Self::U64),
+            "ptr" => Ok(Self::Ptr),
             _ => Err(format!(
-                "Invalid memory width {name:?}; expected f32, f64, i8, i16, i32, i64, u8, u16, u32, or u64"
+                "Invalid memory width {name:?}; expected f32, f64, i8, i16, i32, i64, u8, u16, u32, u64, or ptr"
             )),
         }
     }
@@ -530,6 +549,7 @@ impl MemoryWidth {
             Self::U16 => "u16",
             Self::U32 => "u32",
             Self::U64 => "u64",
+            Self::Ptr => "ptr",
         }
     }
 
@@ -540,7 +560,7 @@ impl MemoryWidth {
     pub fn size(self) -> usize {
         match self {
             Self::F32 | Self::I32 | Self::U32 => 4,
-            Self::F64 | Self::I64 | Self::U64 => 8,
+            Self::F64 | Self::I64 | Self::U64 | Self::Ptr => 8,
             Self::I8 | Self::U8 => 1,
             Self::I16 | Self::U16 => 2,
         }
@@ -553,14 +573,14 @@ impl MemoryWidth {
             Self::I8 | Self::U8 => ".byte",
             Self::I16 | Self::U16 => ".word",
             Self::I32 | Self::U32 => ".long",
-            Self::I64 | Self::U64 => ".quad",
+            Self::I64 | Self::U64 | Self::Ptr => ".quad",
         }
     }
 
     pub fn ptr(self) -> &'static str {
         match self {
             Self::F32 | Self::I32 | Self::U32 => "dword",
-            Self::F64 | Self::I64 | Self::U64 => "qword",
+            Self::F64 | Self::I64 | Self::U64 | Self::Ptr => "qword",
             Self::I8 | Self::U8 => "byte",
             Self::I16 | Self::U16 => "word",
         }

@@ -1,8 +1,9 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand,
-    PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    Expression, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryValue,
+    MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -955,7 +956,9 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
         .map(|declaration| match declaration {
             MemoryDeclaration::Scalar { name, width, .. }
             | MemoryDeclaration::FloatScalar { name, width, .. }
-            | MemoryDeclaration::Buffer { name, width, .. } => (name.clone(), *width),
+            | MemoryDeclaration::Buffer { name, width, .. }
+            | MemoryDeclaration::Array { name, width, .. }
+            | MemoryDeclaration::Repeat { name, width, .. } => (name.clone(), *width),
         })
         .collect();
 
@@ -1616,31 +1619,74 @@ fn resolve_print_part<'a>(
 }
 
 fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
-    let scalars: Vec<_> = memory
+    if memory
         .iter()
-        .filter_map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { name, width, value } => {
-                Some((name, width, value.to_string()))
-            }
-            MemoryDeclaration::FloatScalar { name, width, value } => {
-                Some((name, width, value.clone()))
-            }
-            MemoryDeclaration::Buffer { .. } => None,
-        })
-        .collect();
-
-    if scalars.is_empty() {
+        .all(|declaration| matches!(declaration, MemoryDeclaration::Buffer { .. }))
+    {
         return;
     }
 
     asm.push_str(".section .data\n");
 
-    for (name, width, value) in scalars {
-        asm.push_str(&format!("{name}:\n"));
-        asm.push_str(&format!("  {} {value}\n", width.directive()));
+    for declaration in memory {
+        match declaration {
+            MemoryDeclaration::Scalar { name, width, value } => {
+                asm.push_str(&format!("{name}:\n"));
+                asm.push_str(&format!(
+                    "  {} {}\n",
+                    width.directive(),
+                    format_data_scalar(*width, *value)
+                ));
+            }
+            MemoryDeclaration::FloatScalar { name, width, value } => {
+                asm.push_str(&format!("{name}:\n"));
+                asm.push_str(&format!("  {} {value}\n", width.directive()));
+            }
+            MemoryDeclaration::Array {
+                name,
+                width,
+                values,
+            } => {
+                asm.push_str(&format!("{name}:\n"));
+                emit_memory_values(asm, *width, values);
+            }
+            MemoryDeclaration::Repeat {
+                name,
+                width,
+                count,
+                value,
+            } => {
+                asm.push_str(&format!("{name}:\n"));
+                for _ in 0..*count {
+                    emit_memory_value(asm, *width, value);
+                }
+            }
+            MemoryDeclaration::Buffer { .. } => {}
+        }
     }
 
     asm.push('\n');
+}
+
+fn emit_memory_values(asm: &mut String, width: MemoryWidth, values: &[MemoryValue]) {
+    for value in values {
+        emit_memory_value(asm, width, value);
+    }
+}
+
+fn emit_memory_value(asm: &mut String, width: MemoryWidth, value: &MemoryValue) {
+    match value {
+        MemoryValue::Integer(value) => {
+            asm.push_str(&format!(
+                "  {} {}\n",
+                width.directive(),
+                format_data_scalar(width, *value)
+            ));
+        }
+        MemoryValue::Addr { target } => {
+            asm.push_str(&format!("  .quad {target}\n"));
+        }
+    }
 }
 
 fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
@@ -1687,7 +1733,7 @@ fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
 }
 
 fn format_data_scalar(width: MemoryWidth, value: i128) -> String {
-    if width == MemoryWidth::U64 {
+    if matches!(width, MemoryWidth::U64 | MemoryWidth::Ptr) {
         (value as u64).to_string()
     } else {
         value.to_string()
@@ -1698,7 +1744,10 @@ fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
     let buffers: Vec<_> = memory
         .iter()
         .filter_map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { .. } | MemoryDeclaration::FloatScalar { .. } => None,
+            MemoryDeclaration::Scalar { .. }
+            | MemoryDeclaration::FloatScalar { .. }
+            | MemoryDeclaration::Array { .. }
+            | MemoryDeclaration::Repeat { .. } => None,
             MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
         })
         .collect();
@@ -3743,7 +3792,7 @@ fn validate_immediate_range(value: i128, destination: ImmediateDestination) -> R
         ImmediateDestination::Memory(MemoryWidth::I32) => {
             i32::MIN as i128 <= value && value <= i32::MAX as i128
         }
-        ImmediateDestination::Memory(MemoryWidth::I64 | MemoryWidth::U64) => {
+        ImmediateDestination::Memory(MemoryWidth::I64 | MemoryWidth::U64 | MemoryWidth::Ptr) => {
             if i32::MIN as i128 <= value && value <= i32::MAX as i128 {
                 true
             } else {
@@ -4088,7 +4137,7 @@ fn memory_width_bits(width: MemoryWidth) -> Width {
         MemoryWidth::I8 | MemoryWidth::U8 => Width::Bits8,
         MemoryWidth::I16 | MemoryWidth::U16 => Width::Bits16,
         MemoryWidth::I32 | MemoryWidth::U32 => Width::Bits32,
-        MemoryWidth::I64 | MemoryWidth::U64 => Width::Bits64,
+        MemoryWidth::I64 | MemoryWidth::U64 | MemoryWidth::Ptr => Width::Bits64,
     }
 }
 

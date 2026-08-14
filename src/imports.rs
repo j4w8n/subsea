@@ -1,5 +1,6 @@
 use crate::ast::{
-    AddressTerm, DataItem, ImportDeclaration, Instruction, MemoryDeclaration, Operand, Program,
+    AddressTerm, DataItem, ImportDeclaration, Instruction, MemoryDeclaration, MemoryValue, Operand,
+    Program,
 };
 use crate::grammar::Token;
 use crate::lexer::get_next_token;
@@ -187,10 +188,13 @@ fn merge_module(program: &mut Program, imported: &Program, module_id: usize) {
         match &mut declaration {
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
-            | MemoryDeclaration::Buffer { name, .. } => {
+            | MemoryDeclaration::Buffer { name, .. }
+            | MemoryDeclaration::Array { name, .. }
+            | MemoryDeclaration::Repeat { name, .. } => {
                 *name = rewrite_symbol_name(name, &symbol_map);
             }
         }
+        rewrite_memory_declaration_symbols(&mut declaration, &symbol_map);
         program.memory.push(declaration);
     }
 
@@ -235,12 +239,35 @@ fn build_symbol_map(imported: &Program, module_id: usize) -> HashMap<String, Str
         let name = match declaration {
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
-            | MemoryDeclaration::Buffer { name, .. } => name,
+            | MemoryDeclaration::Buffer { name, .. }
+            | MemoryDeclaration::Array { name, .. }
+            | MemoryDeclaration::Repeat { name, .. } => name,
         };
         symbol_map.insert(name.clone(), private_import_name(module_id, name));
     }
 
     symbol_map
+}
+
+fn rewrite_memory_declaration_symbols(
+    declaration: &mut MemoryDeclaration,
+    symbol_map: &HashMap<String, String>,
+) {
+    match declaration {
+        MemoryDeclaration::Array { values, .. } => {
+            for value in values {
+                rewrite_memory_value_symbols(value, symbol_map);
+            }
+        }
+        MemoryDeclaration::Repeat { value, .. } => rewrite_memory_value_symbols(value, symbol_map),
+        _ => {}
+    }
+}
+
+fn rewrite_memory_value_symbols(value: &mut MemoryValue, symbol_map: &HashMap<String, String>) {
+    if let MemoryValue::Addr { target } = value {
+        *target = rewrite_symbol_name(target, symbol_map);
+    }
 }
 
 fn rewrite_instruction_symbols(

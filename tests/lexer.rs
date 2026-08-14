@@ -156,6 +156,7 @@ fn lexes_storage_and_cleanup_keywords() {
         ("nop", Token::Nop),
         ("out", Token::Out),
         ("read", Token::Read),
+        ("repeat", Token::Repeat),
         ("slice", Token::Slice),
         ("stack", Token::Stack),
         ("stdin", Token::Stdin),

@@ -189,6 +189,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "push" => Some(Token::Push),
                 "read" => Some(Token::Read),
                 "ret" => Some(Token::Ret),
+                "repeat" => Some(Token::Repeat),
                 "section" => Some(Token::Section),
                 "slice" => Some(Token::Slice),
                 "stack" => Some(Token::Stack),

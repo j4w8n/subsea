@@ -1,8 +1,9 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression,
-    FloatMathOp, ImportDeclaration, Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth,
-    Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    FloatMathOp, ImportDeclaration, Instruction, Label, MathOp, MemoryDeclaration, MemoryValue,
+    MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -340,6 +341,63 @@ impl Parser {
                     return Ok(MemoryDeclaration::FloatScalar { name, width, value });
                 }
 
+                if matches!(self.peek(), Some(Token::Text(_))) {
+                    if width != MemoryWidth::U8 {
+                        return Err(String::from(
+                            "String memory initializers require u8 memory width",
+                        ));
+                    }
+
+                    let Some(Token::Text(value)) = self.advance() else {
+                        unreachable!()
+                    };
+                    return Ok(MemoryDeclaration::Array {
+                        name,
+                        width,
+                        values: value
+                            .bytes()
+                            .map(|value| MemoryValue::Integer(value as i128))
+                            .collect(),
+                    });
+                }
+
+                if matches!(self.peek(), Some(Token::LBracket)) {
+                    let values = self.parse_memory_array_values(width)?;
+                    return Ok(MemoryDeclaration::Array {
+                        name,
+                        width,
+                        values,
+                    });
+                }
+
+                if matches!(self.peek(), Some(Token::Repeat)) {
+                    self.advance();
+                    let count = self.parse_usize_literal("repeat count")?;
+                    self.expect(Token::Comma, "Expected ',' after repeat count")?;
+                    let value = self.parse_memory_value(width)?;
+                    return Ok(MemoryDeclaration::Repeat {
+                        name,
+                        width,
+                        count,
+                        value,
+                    });
+                }
+
+                if matches!(self.peek(), Some(Token::Addr)) {
+                    let value = self.parse_memory_value(width)?;
+                    return Ok(MemoryDeclaration::Array {
+                        name,
+                        width,
+                        values: vec![value],
+                    });
+                }
+
+                if width == MemoryWidth::Ptr {
+                    return Err(String::from(
+                        "ptr memory initializers require addr <symbol>",
+                    ));
+                }
+
                 let value = self.parse_integer_literal("memory initializer")?;
                 validate_integer_binding_width(value, width)?;
 
@@ -358,6 +416,77 @@ impl Parser {
             None => Err(String::from(
                 "Expected '=' for scalar memory or '(' for buffer memory, found end of input",
             )),
+        }
+    }
+
+    fn parse_memory_array_values(
+        &mut self,
+        width: MemoryWidth,
+    ) -> Result<Vec<MemoryValue>, String> {
+        self.expect(
+            Token::LBracket,
+            "Expected '[' to start memory array initializer",
+        )?;
+        let mut values = Vec::new();
+
+        if matches!(self.peek(), Some(Token::RBracket)) {
+            return Err(String::from("Memory array initializer cannot be empty"));
+        }
+
+        loop {
+            values.push(self.parse_memory_value(width)?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.advance();
+                    if matches!(self.peek(), Some(Token::RBracket)) {
+                        return Err(String::from("Memory array initializer cannot end with ','"));
+                    }
+                }
+                Some(Token::RBracket) => {
+                    self.advance();
+                    break;
+                }
+                Some(token) => {
+                    return Err(format!(
+                        "Expected ',' or ']' after memory array value, found {token:?}"
+                    ));
+                }
+                None => {
+                    return Err(String::from(
+                        "Expected ',' or ']' after memory array value, found end of input",
+                    ));
+                }
+            }
+        }
+
+        Ok(values)
+    }
+
+    fn parse_memory_value(&mut self, width: MemoryWidth) -> Result<MemoryValue, String> {
+        match self.peek() {
+            Some(Token::Addr) => {
+                if width != MemoryWidth::Ptr {
+                    return Err(String::from(
+                        "Address memory initializers require ptr memory width",
+                    ));
+                }
+
+                self.advance();
+                let target = self.expect_ident("address target after addr")?;
+                Ok(MemoryValue::Addr { target })
+            }
+            _ => {
+                if width == MemoryWidth::Ptr {
+                    return Err(String::from(
+                        "ptr memory initializers require addr <symbol>",
+                    ));
+                }
+
+                let value = self.parse_integer_literal("memory initializer")?;
+                validate_integer_binding_width(value, width)?;
+                Ok(MemoryValue::Integer(value))
+            }
         }
     }
 
@@ -1650,7 +1779,7 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
         MemoryWidth::U8 => 0 <= value && value <= u8::MAX as i128,
         MemoryWidth::U16 => 0 <= value && value <= u16::MAX as i128,
         MemoryWidth::U32 => 0 <= value && value <= u32::MAX as i128,
-        MemoryWidth::U64 => 0 <= value && value <= u64::MAX as i128,
+        MemoryWidth::U64 | MemoryWidth::Ptr => 0 <= value && value <= u64::MAX as i128,
     };
 
     if valid {
@@ -1693,7 +1822,9 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
         let name = match declaration {
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
-            | MemoryDeclaration::Buffer { name, .. } => name,
+            | MemoryDeclaration::Buffer { name, .. }
+            | MemoryDeclaration::Array { name, .. }
+            | MemoryDeclaration::Repeat { name, .. } => name,
         };
 
         if !names.insert(name) {
@@ -1725,7 +1856,9 @@ fn validate_label_storage_names(
         .map(|declaration| match declaration {
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
-            | MemoryDeclaration::Buffer { name, .. } => name,
+            | MemoryDeclaration::Buffer { name, .. }
+            | MemoryDeclaration::Array { name, .. }
+            | MemoryDeclaration::Repeat { name, .. } => name,
         })
         .collect();
 
@@ -1774,6 +1907,41 @@ fn validate_main_label(labels: &[Label]) -> Result<(), String> {
     }
 }
 
+fn validate_memory_address_targets(
+    declaration: &MemoryDeclaration,
+    global_symbols: &HashSet<&str>,
+) -> Result<(), String> {
+    match declaration {
+        MemoryDeclaration::Array { name, values, .. } => {
+            for value in values {
+                validate_memory_address_target(name, value, global_symbols)?;
+            }
+        }
+        MemoryDeclaration::Repeat { name, value, .. } => {
+            validate_memory_address_target(name, value, global_symbols)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn validate_memory_address_target(
+    declaration_name: &str,
+    value: &MemoryValue,
+    global_symbols: &HashSet<&str>,
+) -> Result<(), String> {
+    if let MemoryValue::Addr { target } = value
+        && !global_symbols.contains(target.as_str())
+    {
+        return Err(format!(
+            "Unknown address target {target:?} in memory declaration {declaration_name:?}"
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
     let data = &program.data;
     let memory = &program.memory;
@@ -1794,7 +1962,9 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         .map(|declaration| match declaration {
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
-            | MemoryDeclaration::Buffer { name, .. } => name.as_str(),
+            | MemoryDeclaration::Buffer { name, .. }
+            | MemoryDeclaration::Array { name, .. }
+            | MemoryDeclaration::Repeat { name, .. } => name.as_str(),
         })
         .collect();
     let mut label_names = HashSet::new();
@@ -1854,6 +2024,10 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                 ));
             }
         }
+    }
+
+    for declaration in memory {
+        validate_memory_address_targets(declaration, &global_symbols)?;
     }
 
     for label in labels {

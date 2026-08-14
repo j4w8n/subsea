@@ -1,7 +1,7 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, MathOp,
-    MemoryDeclaration, MemoryWidth, Operand, PrintPart, ReadSource, StringInitializer,
+    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, ReadSource, StringInitializer,
     StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
@@ -1372,6 +1372,206 @@ fn parses_memory_scalar_declaration() {
             width: MemoryWidth::U16,
             value: 3,
         }
+    );
+}
+
+#[test]
+fn parses_memory_array_declaration() {
+    let program = parse(vec![
+        Token::Mem,
+        tid("values"),
+        Token::Colon,
+        tid("u16"),
+        Token::Equals,
+        Token::LBracket,
+        tnum("1"),
+        Token::Comma,
+        tnum("2"),
+        Token::Comma,
+        tnum("3"),
+        Token::RBracket,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.memory[0],
+        MemoryDeclaration::Array {
+            name: s("values"),
+            width: MemoryWidth::U16,
+            values: vec![
+                MemoryValue::Integer(1),
+                MemoryValue::Integer(2),
+                MemoryValue::Integer(3),
+            ],
+        }
+    );
+}
+
+#[test]
+fn parses_memory_string_bytes_declaration() {
+    let program = parse(vec![
+        Token::Mem,
+        tid("greeting"),
+        Token::Colon,
+        tid("u8"),
+        Token::Equals,
+        text("hi\n"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.memory[0],
+        MemoryDeclaration::Array {
+            name: s("greeting"),
+            width: MemoryWidth::U8,
+            values: vec![
+                MemoryValue::Integer(b'h' as i128),
+                MemoryValue::Integer(b'i' as i128),
+                MemoryValue::Integer(b'\n' as i128),
+            ],
+        }
+    );
+}
+
+#[test]
+fn parses_memory_repeat_declaration() {
+    let program = parse(vec![
+        Token::Mem,
+        tid("fill"),
+        Token::Colon,
+        tid("u8"),
+        Token::Equals,
+        Token::Repeat,
+        tnum("4"),
+        Token::Comma,
+        tnum("255"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.memory[0],
+        MemoryDeclaration::Repeat {
+            name: s("fill"),
+            width: MemoryWidth::U8,
+            count: 4,
+            value: MemoryValue::Integer(255),
+        }
+    );
+}
+
+#[test]
+fn parses_memory_pointer_address_array() {
+    let program = parse(vec![
+        Token::Mem,
+        tid("table"),
+        Token::Colon,
+        tid("ptr"),
+        Token::Equals,
+        Token::LBracket,
+        Token::Addr,
+        tid("main"),
+        Token::Comma,
+        Token::Addr,
+        tid("helper"),
+        Token::RBracket,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+        tid("helper"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(
+        program.memory[0],
+        MemoryDeclaration::Array {
+            name: s("table"),
+            width: MemoryWidth::Ptr,
+            values: vec![
+                MemoryValue::Addr { target: s("main") },
+                MemoryValue::Addr {
+                    target: s("helper")
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn rejects_string_initializer_for_non_u8_memory() {
+    let error = parse(vec![
+        Token::Mem,
+        tid("greeting"),
+        Token::Colon,
+        tid("u16"),
+        Token::Equals,
+        text("hi"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap_err();
+
+    assert_eq!(error, "String memory initializers require u8 memory width");
+}
+
+#[test]
+fn rejects_integer_initializer_for_ptr_memory() {
+    let error = parse(vec![
+        Token::Mem,
+        tid("callback"),
+        Token::Colon,
+        tid("ptr"),
+        Token::Equals,
+        tnum("0"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap_err();
+
+    assert_eq!(error, "ptr memory initializers require addr <symbol>");
+}
+
+#[test]
+fn rejects_unknown_memory_address_target() {
+    let program = parse(vec![
+        Token::Mem,
+        tid("callback"),
+        Token::Colon,
+        tid("ptr"),
+        Token::Equals,
+        Token::Addr,
+        tid("missing"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    let error = validate_program_symbols(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Unknown address target \"missing\" in memory declaration \"callback\""
     );
 }
 

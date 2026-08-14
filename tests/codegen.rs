@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, Label,
-    MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
+    MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource,
     StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
@@ -2039,6 +2039,66 @@ fn emits_memory_scalars_and_buffers() {
 
     assert!(asm.contains(".section .data\ncount:\n  .word 3\n\n"));
     assert!(asm.contains(".section .bss\nbuf:\n  .zero 128\n\n"));
+}
+
+#[test]
+fn emits_initialized_memory_arrays_strings_repeats_and_addresses() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![
+            MemoryDeclaration::Array {
+                name: s("values"),
+                width: MemoryWidth::U16,
+                values: vec![
+                    MemoryValue::Integer(1),
+                    MemoryValue::Integer(2),
+                    MemoryValue::Integer(3),
+                ],
+            },
+            MemoryDeclaration::Array {
+                name: s("message"),
+                width: MemoryWidth::U8,
+                values: vec![MemoryValue::Integer(104), MemoryValue::Integer(105)],
+            },
+            MemoryDeclaration::Repeat {
+                name: s("fill"),
+                width: MemoryWidth::U8,
+                count: 4,
+                value: MemoryValue::Integer(255),
+            },
+            MemoryDeclaration::Array {
+                name: s("callbacks"),
+                width: MemoryWidth::Ptr,
+                values: vec![
+                    MemoryValue::Addr { target: s("main") },
+                    MemoryValue::Addr {
+                        target: s("handler"),
+                    },
+                ],
+            },
+        ],
+        labels: vec![
+            Label {
+                name: s("main"),
+                instructions: vec![Instruction::Exit { code: 0 }],
+            },
+            Label {
+                name: s("handler"),
+                instructions: vec![Instruction::Ret],
+            },
+        ],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("values:\n  .word 1\n  .word 2\n  .word 3\n"));
+    assert!(asm.contains("message:\n  .byte 104\n  .byte 105\n"));
+    assert!(asm.contains("fill:\n  .byte 255\n  .byte 255\n  .byte 255\n  .byte 255\n"));
+    assert!(asm.contains("callbacks:\n  .quad main\n  .quad handler\n"));
+    assert_assembles(&asm);
 }
 
 #[test]

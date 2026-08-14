@@ -94,6 +94,7 @@ pub enum Token {
     Read,
     Register(String),
     Ret,
+    Repeat,
     Slice,
     Stack,
     Stdin,
