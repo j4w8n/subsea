@@ -68,6 +68,87 @@ fn reads_stack_string_properties() {
 }
 
 #[test]
+fn imports_exported_function() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/imports/use_qemu_debug.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = String::from_utf8_lossy(&output.stdout);
+    assert!(asm.contains("  call debug_write\n"));
+    assert!(asm.contains("debug_write:\n"));
+    assert!(asm.contains("__import_0_debug_write_byte:\n"));
+    assert!(!asm.contains("\ndebug_write_byte:\n"));
+}
+
+#[test]
+fn rejects_importing_private_function() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "tests/fixtures/imports/import_private_helper.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("is not exported"));
+}
+
+#[test]
+fn deduplicates_multiple_imports_from_same_module() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "tests/fixtures/imports/import_same_module_twice.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(asm.matches("__import_0_helper:\n").count(), 1);
+    assert_eq!(asm.matches("first:\n").count(), 1);
+    assert_eq!(asm.matches("second:\n").count(), 1);
+}
+
+#[test]
+fn rewrites_imported_private_symbols_in_conditions() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "tests/fixtures/imports/use_condition_private_symbol.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = String::from_utf8_lossy(&output.stdout);
+
+    assert!(asm.contains("__import_0_flag:\n"));
+    assert!(asm.contains("  cmp qword ptr [__import_0_flag], 0\n"));
+    assert!(!asm.contains("  cmp qword ptr [flag], 0\n"));
+}
+
+#[test]
 fn stack_string_initialization_preserves_r10() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

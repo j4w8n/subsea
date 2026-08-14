@@ -68,6 +68,57 @@ fn finish_label(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 #[test]
+fn parses_import_declaration() {
+    let program = parse(vec![
+        Token::Import,
+        tid("debug_write"),
+        Token::Comma,
+        tid("panic_halt"),
+        Token::From,
+        text("debug.ss"),
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(program.imports.len(), 1);
+    assert_eq!(
+        program.imports[0].names,
+        vec![s("debug_write"), s("panic_halt")]
+    );
+    assert_eq!(program.imports[0].path, s("debug.ss"));
+}
+
+#[test]
+fn parses_exported_function() {
+    let program = parse(vec![
+        Token::Export,
+        tid("debug_write"),
+        Token::Colon,
+        Token::LBrace,
+        Token::Ret,
+        Token::RBrace,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(program.exports, vec![s("debug_write")]);
+    assert_eq!(program.labels[0].name, s("debug_write"));
+}
+
+#[test]
+fn rejects_exported_bare_label() {
+    let error = parse(vec![Token::Export, tid("debug_write"), Token::Colon]).unwrap_err();
+
+    assert_eq!(error, "Exported function \"debug_write\" must have a block");
+}
+
+#[test]
 fn parses_data_block() {
     let program = parse(vec![
         Token::Data,

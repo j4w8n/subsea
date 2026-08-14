@@ -1,9 +1,17 @@
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub entry: String,
+    pub imports: Vec<ImportDeclaration>,
+    pub exports: Vec<String>,
     pub data: Vec<DataDeclaration>,
     pub memory: Vec<MemoryDeclaration>,
     pub labels: Vec<Label>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ImportDeclaration {
+    pub names: Vec<String>,
+    pub path: String,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -108,58 +116,121 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    pub fn operands(&self) -> Vec<&Operand> {
-        let mut operands = Vec::new();
-
+    pub fn visit_operands(&self, mut visit: impl FnMut(&Operand)) {
         match self {
             Instruction::Assign { dst, value } | Instruction::AssignIf { dst, value, .. } => {
                 if let AssignmentTarget::Operand(operand) = dst {
-                    operands.push(operand);
+                    visit(operand);
                 }
 
-                match value {
-                    AssignmentValue::Operand(operand) => operands.push(operand),
-                    AssignmentValue::BitwiseUnary { operand, .. } => operands.push(operand),
-                    AssignmentValue::Binary { lhs, rhs, .. }
-                    | AssignmentValue::Condition(ConditionExpr::Compare(Condition {
-                        lhs,
-                        rhs,
-                        ..
-                    }))
-                    | AssignmentValue::Condition(ConditionExpr::BitwiseAndZero {
-                        lhs, rhs, ..
-                    })
-                    | AssignmentValue::FloatBinary { lhs, rhs, .. }
-                    | AssignmentValue::WideMultiply { lhs, rhs, .. }
-                    | AssignmentValue::WideDivide { lhs, rhs, .. } => operands.extend([lhs, rhs]),
-                }
+                visit_assignment_value_operands(value, &mut visit);
 
                 if let Instruction::AssignIf { condition, .. } = self {
-                    operands.extend(condition.operands());
+                    condition.visit_operands(&mut visit);
                 }
             }
             Instruction::Jmp {
                 condition: Some(condition),
                 ..
-            } => operands.extend(condition.operands()),
+            } => condition.visit_operands(&mut visit),
             Instruction::Print { parts } => {
-                operands.extend(parts.iter().filter_map(|part| match part {
-                    PrintPart::Operand(operand) => Some(operand),
-                    PrintPart::Binding(_) | PrintPart::Literal(_) => None,
-                }));
+                for part in parts {
+                    if let PrintPart::Operand(operand) = part {
+                        visit(operand);
+                    }
+                }
             }
-            Instruction::Pop { dst } => operands.push(dst),
-            Instruction::Push { src } => operands.push(src),
-            Instruction::Read { dst, len, .. } => operands.extend([dst, len]),
-            Instruction::Stack { value, .. } => operands.push(value),
+            Instruction::Pop { dst } => visit(dst),
+            Instruction::Push { src } => visit(src),
+            Instruction::Read { dst, len, .. } => {
+                visit(dst);
+                visit(len);
+            }
+            Instruction::Stack { value, .. } => visit(value),
             Instruction::StackString {
                 value: StringInitializer::Slice { ptr, len },
                 ..
-            } => operands.extend([ptr, len]),
+            } => {
+                visit(ptr);
+                visit(len);
+            }
             _ => {}
         }
+    }
 
-        operands
+    pub fn visit_operands_mut(&mut self, mut visit: impl FnMut(&mut Operand)) {
+        match self {
+            Instruction::Assign { dst, value } | Instruction::AssignIf { dst, value, .. } => {
+                if let AssignmentTarget::Operand(operand) = dst {
+                    visit(operand);
+                }
+
+                visit_assignment_value_operands_mut(value, &mut visit);
+
+                if let Instruction::AssignIf { condition, .. } = self {
+                    condition.visit_operands_mut(&mut visit);
+                }
+            }
+            Instruction::Jmp {
+                condition: Some(condition),
+                ..
+            } => condition.visit_operands_mut(&mut visit),
+            Instruction::Print { parts } => {
+                for part in parts {
+                    if let PrintPart::Operand(operand) = part {
+                        visit(operand);
+                    }
+                }
+            }
+            Instruction::Pop { dst } => visit(dst),
+            Instruction::Push { src } => visit(src),
+            Instruction::Read { dst, len, .. } => {
+                visit(dst);
+                visit(len);
+            }
+            Instruction::Stack { value, .. } => visit(value),
+            Instruction::StackString {
+                value: StringInitializer::Slice { ptr, len },
+                ..
+            } => {
+                visit(ptr);
+                visit(len);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnMut(&Operand)) {
+    match value {
+        AssignmentValue::Operand(operand) => visit(operand),
+        AssignmentValue::BitwiseUnary { operand, .. } => visit(operand),
+        AssignmentValue::Binary { lhs, rhs, .. }
+        | AssignmentValue::FloatBinary { lhs, rhs, .. }
+        | AssignmentValue::WideMultiply { lhs, rhs, .. }
+        | AssignmentValue::WideDivide { lhs, rhs, .. } => {
+            visit(lhs);
+            visit(rhs);
+        }
+        AssignmentValue::Condition(condition) => condition.visit_operands(visit),
+    }
+}
+
+fn visit_assignment_value_operands_mut(
+    value: &mut AssignmentValue,
+    visit: &mut impl FnMut(&mut Operand),
+) {
+    match value {
+        AssignmentValue::Operand(operand) => visit(operand),
+        AssignmentValue::BitwiseUnary { operand, .. } => visit(operand),
+        AssignmentValue::Binary { lhs, rhs, .. }
+        | AssignmentValue::FloatBinary { lhs, rhs, .. }
+        | AssignmentValue::WideMultiply { lhs, rhs, .. }
+        | AssignmentValue::WideDivide { lhs, rhs, .. } => {
+            visit(lhs);
+            visit(rhs);
+        }
+        AssignmentValue::Condition(condition) => condition.visit_operands_mut(visit),
     }
 }
 
@@ -201,10 +272,29 @@ pub enum ConditionExpr {
 }
 
 impl ConditionExpr {
-    pub fn operands(&self) -> Vec<&Operand> {
+    pub fn visit_operands(&self, visit: &mut impl FnMut(&Operand)) {
         match self {
-            Self::Compare(condition) => vec![&condition.lhs, &condition.rhs],
-            Self::BitwiseAndZero { lhs, rhs, .. } => vec![lhs, rhs],
+            Self::Compare(condition) => {
+                visit(&condition.lhs);
+                visit(&condition.rhs);
+            }
+            Self::BitwiseAndZero { lhs, rhs, .. } => {
+                visit(lhs);
+                visit(rhs);
+            }
+        }
+    }
+
+    pub fn visit_operands_mut(&mut self, visit: &mut impl FnMut(&mut Operand)) {
+        match self {
+            Self::Compare(condition) => {
+                visit(&mut condition.lhs);
+                visit(&mut condition.rhs);
+            }
+            Self::BitwiseAndZero { lhs, rhs, .. } => {
+                visit(lhs);
+                visit(rhs);
+            }
         }
     }
 }

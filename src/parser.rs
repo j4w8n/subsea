@@ -1,8 +1,8 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, Instruction,
-    Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program, ReadSource,
-    StringInitializer, StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, FloatMathOp, ImportDeclaration,
+    Instruction, Label, MathOp, MemoryDeclaration, MemoryWidth, Operand, PrintPart, Program,
+    ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -21,15 +21,31 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        self.parse_program_with_options(true)
+    }
+
+    pub fn parse_library(&mut self) -> Result<Program, String> {
+        self.parse_program_with_options(false)
+    }
+
+    fn parse_program_with_options(&mut self, require_main: bool) -> Result<Program, String> {
+        let mut imports = Vec::new();
+        let mut exports = Vec::new();
         let mut data = Vec::new();
         let mut memory = Vec::new();
         let mut labels = Vec::new();
 
         while !self.is_at_end() {
-            if matches!(self.peek(), Some(Token::Data)) {
+            if matches!(self.peek(), Some(Token::Import)) {
+                imports.push(self.parse_import_declaration()?);
+            } else if matches!(self.peek(), Some(Token::Data)) {
                 data.push(self.parse_data_declaration()?);
             } else if matches!(self.peek(), Some(Token::Mem)) {
                 memory.push(self.parse_memory_declaration()?);
+            } else if matches!(self.peek(), Some(Token::Export)) {
+                let label = self.parse_exported_top_level_label()?;
+                exports.push(label.name.clone());
+                labels.push(label);
             } else {
                 labels.push(self.parse_top_level_label()?);
             }
@@ -38,14 +54,57 @@ impl Parser {
         validate_data_names(&data)?;
         validate_memory_names(&memory)?;
         validate_label_storage_names(&data, &memory, &labels)?;
-        validate_main_label(&labels)?;
+        if require_main {
+            validate_main_label(&labels)?;
+        }
 
         Ok(Program {
             entry: String::from("main"),
+            imports,
+            exports,
             data,
             memory,
             labels,
         })
+    }
+
+    fn parse_import_declaration(&mut self) -> Result<ImportDeclaration, String> {
+        self.expect(Token::Import, "Expected import declaration")?;
+
+        let mut names = Vec::new();
+        loop {
+            names.push(self.expect_ident("imported function name")?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.advance();
+                }
+                Some(Token::From) => break,
+                Some(token) => {
+                    return Err(format!(
+                        "Expected ',' or from after imported function name, found {token:?}"
+                    ));
+                }
+                None => {
+                    return Err(String::from(
+                        "Expected ',' or from after imported function name, found end of input",
+                    ));
+                }
+            }
+        }
+
+        self.expect(Token::From, "Expected from after imported function names")?;
+        let path = match self.advance() {
+            Some(Token::Text(path)) => path,
+            Some(token) => return Err(format!("Expected import path string, found {token:?}")),
+            None => {
+                return Err(String::from(
+                    "Expected import path string, found end of input",
+                ));
+            }
+        };
+
+        Ok(ImportDeclaration { names, path })
     }
 
     fn parse_data_declaration(&mut self) -> Result<DataDeclaration, String> {
@@ -209,6 +268,48 @@ impl Parser {
         }
 
         self.expect(Token::RBrace, "Expected '}' after label block")?;
+
+        Ok(Label { name, instructions })
+    }
+
+    fn parse_exported_top_level_label(&mut self) -> Result<Label, String> {
+        self.expect(Token::Export, "Expected export")?;
+
+        let name = match self.advance() {
+            Some(Token::Ident(name)) => name,
+            Some(Token::LocalIdent(name)) => {
+                return Err(format!(
+                    "Local label .{name} cannot be exported at the top level"
+                ));
+            }
+            Some(token) => return Err(format!("Expected exported function name, found {token:?}")),
+            None => {
+                return Err(String::from(
+                    "Expected exported function name, found end of input",
+                ));
+            }
+        };
+
+        self.expect(Token::Colon, "Expected ':' after exported function name")?;
+        if !matches!(self.peek(), Some(Token::LBrace)) {
+            return Err(format!("Exported function {name:?} must have a block"));
+        }
+
+        self.expect(
+            Token::LBrace,
+            "Expected '{' to start exported function block",
+        )?;
+
+        let mut instructions = Vec::new();
+        while !matches!(self.peek(), Some(Token::RBrace)) {
+            if self.is_at_end() {
+                return Err(format!("Expected '}}' to close exported function '{name}'"));
+            }
+
+            instructions.push(self.parse_instruction(&name)?);
+        }
+
+        self.expect(Token::RBrace, "Expected '}' after exported function block")?;
 
         Ok(Label { name, instructions })
     }
@@ -1752,8 +1853,13 @@ fn validate_instruction_symbols(
         _ => {}
     }
 
-    for operand in instruction.operands() {
-        validate_operand_symbol(
+    let mut result = Ok(());
+    instruction.visit_operands(|operand| {
+        if result.is_err() {
+            return;
+        }
+
+        result = validate_operand_symbol(
             operand,
             bindings,
             operand_bindings,
@@ -1761,9 +1867,10 @@ fn validate_instruction_symbols(
             memory,
             labels,
             current_label,
-        )?;
-    }
-    Ok(())
+        );
+    });
+
+    result
 }
 
 fn is_local_label_name(name: &str) -> bool {

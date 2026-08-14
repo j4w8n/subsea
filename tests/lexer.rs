@@ -145,8 +145,10 @@ fn lexes_float_comparison_operators() {
 fn lexes_storage_and_cleanup_keywords() {
     for (source, token) in [
         ("const", Token::Const),
+        ("from", Token::From),
         ("hlt", Token::Halt),
         ("in", Token::In),
+        ("import", Token::Import),
         ("out", Token::Out),
         ("read", Token::Read),
         ("slice", Token::Slice),

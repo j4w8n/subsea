@@ -166,8 +166,10 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     .or_else(|| Some(Token::Ident(s))),
                 "f64" => prefixed_float_operator(chars, MemoryWidthTokens::F64)
                     .or_else(|| Some(Token::Ident(s))),
+                "from" => Some(Token::From),
                 "hlt" => Some(Token::Halt),
                 "in" => Some(Token::In),
+                "import" => Some(Token::Import),
                 "jmp" => Some(Token::Jmp),
                 "keep" => Some(Token::Keep),
                 "mem" => Some(Token::Mem),

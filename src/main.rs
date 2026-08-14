@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     path::PathBuf,
     process,
     time::{Duration, Instant},
@@ -10,9 +10,8 @@ use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
     build_freestanding_executable, build_object, run_executable,
 };
-use subsea::grammar::Token;
-use subsea::lexer::get_next_token;
-use subsea::parser::{Parser, validate_program_symbols};
+use subsea::imports;
+use subsea::parser::validate_program_symbols;
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
@@ -559,22 +558,14 @@ fn compile_to_asm_with_timings(
     entry_symbol: Option<&str>,
 ) -> Result<CompilationOutput, String> {
     let read_started = Instant::now();
-    let source = fs::read_to_string(source_path)
-        .map_err(|error| format!("Failed to read {source_path:?}: {error}"))?;
+    let source_path = PathBuf::from(source_path);
     let read_source = read_started.elapsed();
 
     let lex_started = Instant::now();
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut chars = source.chars().peekable();
-
-    while let Some(next_token) = get_next_token(&mut chars)? {
-        tokens.push(next_token);
-    }
     let lex = lex_started.elapsed();
 
     let parse_started = Instant::now();
-    let mut parser = Parser::new(tokens);
-    let program = parser.parse_program()?;
+    let program = imports::load_program(&source_path)?;
     validate_program_symbols(&program)?;
     let parse_ast = parse_started.elapsed();
 

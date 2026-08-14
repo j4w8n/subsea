@@ -1520,7 +1520,12 @@ fn validate_instruction_does_not_use_rbp(
         ));
     }
 
-    if instruction.operands().into_iter().any(operand_uses_rbp) {
+    let mut uses_rbp = false;
+    instruction.visit_operands(|operand| {
+        uses_rbp |= operand_uses_rbp(operand);
+    });
+
+    if uses_rbp {
         return Err(format!(
             "Label {label_name:?} declares stack variables, so rbp is reserved"
         ));
