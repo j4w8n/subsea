@@ -162,6 +162,7 @@ These are top-level entities that execute instructions within their code block. 
 
 - `ret` emits generated stack-frame cleanup automatically - unless the stack is manually changed via `push` or `pop`.
 - `linux.exit` does not need cleanup because the process terminates. Value must be between `0` and `255`
+- `nop` emits a no-operation instruction. It is useful for padding, patch space, and low-level debugging.
 - `x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
 
 ```ss
@@ -434,7 +435,7 @@ Floating-point literals are valid in typed `const` and top-level `mem` scalar in
 
 ## Memory And Pointers
 
-Top-level `mem` declarations allocate writable memory for the lifetime of the program. Subsea uses `[]` for dereference and `&` for address-of labels.
+Top-level `mem` declarations allocate writable memory for the lifetime of the program. Bracketed memory operands load from or store through memory, while `&` computes an address without reading memory.
 
 ```ss
 mem count:u16 = 3
@@ -466,7 +467,23 @@ main: {
 }
 ```
 
-The inferred width is the access width; address arithmetic remains byte-based. `mem nums:u64(8)` makes `[nums + 8]` a `u64` access to the second element.
+The inferred width is the access width; address arithmetic remains byte-based. `mem nums:u64(8)` makes `nums[8]` a `u64` access to the second element.
+
+Use `&` to pass the address of `mem` storage:
+
+```ss
+mem buf:u8(128)
+rsi = &buf
+```
+
+Invalid address-of forms:
+
+```ss
+rax = &5
+rax = &rax
+```
+
+`&[...]` is valid and computes a raw address expression without loading memory. See [Memory Arithmetic](#memory-arithmetic).
 
 ### Static Data Blocks
 
@@ -492,6 +509,8 @@ Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`,
 - `align` must be a non-zero power of two.
 - `export` makes the data block symbol global.
 - On x86-64 ELF, `keep` emits a retained section using the GNU `R` section flag. Linker scripts can still use `KEEP(*(.section_name))` for compatibility with linkers that do not honor retained sections.
+
+## Floating Point
 
 Scalar floating-point arithmetic uses explicit width-prefixed operators:
 
@@ -575,21 +594,6 @@ These are not yet supported:
 
 - Runtime float printing
 
-Use `&` to pass the address of `mem` storage:
-
-```ss
-mem buf:u8(128)
-rsi = &buf
-```
-
-Invalid address-of forms:
-
-```ss
-rax = &5
-rax = &rax
-rax = &[rax]
-```
-
 ## Memory Arithmetic
 
 Declared memory can be indexed with byte offsets. The access width is inferred from the `mem` declaration unless you add an explicit width:
@@ -613,6 +617,13 @@ rsi = &bytes[rax]
 stack text:str = slice &bytes[10], 20
 ```
 
+The difference is whether the expression reads memory:
+
+```ss
+al = bytes[rax]   // load one byte from bytes + rax
+rsi = &bytes[rax] // compute bytes + rax; do not load memory
+```
+
 Index expressions can use scaled registers, with scale values of 1, 2, 4, and 8:
 
 ```ss
@@ -628,12 +639,19 @@ rcx = [rbp - 16]
 rdx = [rax + rbx + 8]
 ```
 
-Scaled index addressing is also supported in raw memory operands:
+Scaled index addressing is also supported in raw memory operands. Brackets without `&` mean load from the computed address:
 
 ```ss
 rbx = [rax + rcx * 1]
 rbx = [rax + rcx * 2]
 rbx = [rax + rcx * 4 + 8]
+```
+
+Use `&[...]` to compute a raw register-based address expression without reading memory. On x86-64 this lowers to `lea`:
+
+```ss
+rbx = [rax + rcx * 4 + 8]  // load from memory at rax + rcx * 4 + 8
+rbx = &[rax + rcx * 4 + 8] // compute rax + rcx * 4 + 8; do not load memory
 ```
 
 Nested dereferences and address-of inside memory operands are not supported:
