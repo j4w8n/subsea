@@ -207,7 +207,7 @@ Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers
 
 ## Printing
 
-`linux.print "..."` prints literal text directly. `linux.print rax` prints a runtime integer operand as unsigned decimal text. Printing does not add a newline automatically:
+`linux.print "..."` prints literal text directly. `linux.print rax` prints a runtime integer operand as signed decimal text. Printing does not add a newline automatically:
 
 ```ss
 linux.print "Printed directly!\n"
@@ -227,14 +227,39 @@ linux.print "Hello, {}\n", name
 
 - Each `{}` consumes one following identifier argument.
 - The number of placeholders must match the number of arguments.
-- Format specifiers like `{x}` or `{i64}` are not supported yet.
+- `{}` infers formatting for compile-time bindings, stack variables, and memory operands with known widths. Raw registers do not carry signedness, so use an explicit placeholder for registers.
+- Runtime integer operands use typed placeholders: `{i8}`, `{i16}`, `{i32}`, `{i64}`, `{u8}`, `{u16}`, `{u32}`, `{u64}`, `{x}`, `{b}`, and `{ptr}`.
+- Signed placeholders sign-extend their operand before printing; unsigned placeholders zero-extend their operand before printing. The placeholder width must match the operand width, except integer immediates.
+- `{x}` and `{ptr}` print lowercase hexadecimal with a `0x` prefix. `{b}` prints binary with a `0b` prefix.
 
-Runtime integer printing is intentionally simple for now. It accepts registers and integer immediates, emits unsigned decimal digits, and does not support signed decimal formatting yet:
+Runtime integer formatting accepts integer immediates, integer `const` values, integer registers, stack variables, and memory operands with matching widths:
 
 ```ss
-rax = 42
-linux.print rax
-linux.print "\n"
+rax = -42
+rbx = 42
+stack signed:i64 = -7
+stack unsigned:u64 = 7
+
+linux.print "inferred signed = {}\n", signed
+linux.print "inferred unsigned = {}\n", unsigned
+linux.print "signed = {i64}\n", rax
+linux.print "unsigned = {u64}\n", rax
+linux.print "hex = {x}\n", rbx
+linux.print "binary = {b}\n", rbx
+linux.print "pointer = {ptr}\n", rbx
+
+al = -1
+bl = -1
+linux.print "signed byte = {i8}\n", al
+linux.print "unsigned byte = {u8}\n", bl
+```
+
+For registers, use an explicit format because the same 64 bits can be interpreted multiple ways:
+
+```ss
+linux.print "{}\n", rax    // invalid; cannot infer register signedness
+linux.print "{i64}\n", rax // signed decimal
+linux.print "{u64}\n", rax // unsigned decimal
 ```
 
 Supported string escapes:
@@ -248,14 +273,14 @@ Supported string escapes:
 
 Print clobbers:
 
-`linux.print` lowers to the Linux x86-64 `write` syscall. Runtime integer printing also uses `rax` and `rdx` for decimal conversion. Preserve values yourself with `push` and `pop` if you need them after printing:
+`linux.print` lowers to the Linux x86-64 `write` syscall. Runtime integer formatting uses scratch registers internally, but preserves general-purpose registers across each print part.
 
 ```text
-// linux.print may clobber these registers
-rax rdi rsi rdx rcx r11
+// linux.print preserves general-purpose registers
+rax rbx rcx rdx rdi rsi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15
 ```
 
-The current convention is that `linux.print` preserves `rbx`, `rbp`, `rsp`, and all registers not listed above. This convention applies to both literal and runtime-integer printing; it may be expanded with explicit save/restore instructions as the runtime grows.
+Floating-point runtime formatting is not supported yet.
 
 ## Reading Input
 
