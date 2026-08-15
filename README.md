@@ -71,6 +71,42 @@ rdx:rax = r10 u/ 10
 
 Arithmetic expression lowering may also use `r10` or `r11` as scratch registers. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on `r10` or `r11` being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
 
+## Compile-time Bindings
+
+Integer constants can be inlined as operands. Any constant used by `linux.print` is emitted as bytes in `.rodata` and referenced by generated print code.
+
+```ss
+const count = 3   // inlined
+rax = count
+
+const message = "Hello World!\n"  // referenced
+linux.print message
+```
+
+String bindings can't be used for register or memory assignment:
+
+```ss
+const message = "Hello World!\n"
+rax = message  // invalid
+```
+
+Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
+
+```ss
+const base:u8 = 10
+const offset:i16 = -8
+```
+
+Floating-point bindings must be given an explicit `f32` or `f64` width, and are supported as compile-time text bindings:
+
+```ss
+const ratio:f32 = 1.5
+const pi:f64 = 3.14159
+linux.print pi  // valid
+```
+
+Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers. They can also be used as runtime operands when a floating-point width is supplied by context, such as `xmm0 = xmm0 f64+ 1.5`; assignments like `rax = 1.5` are rejected.
+
 ## Bitwise Operations
 
 Subsea supports common integer bitwise operations with assignment syntax:
@@ -94,6 +130,47 @@ rax = rax << rcx // invalid; use cl
 ```
 
 Bitwise operations are integer-only. They do not support XMM registers or floating-point memory operands.
+
+## Comparison Operators
+
+Integer comparisons require explicit signedness. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons.
+
+`==` and `!=` do not depend on signedness.
+
+Plain `<`, `<=`, `>`, and `>=` are allowed for floating-point comparisons only when a `f32` or `f64` width can be inferred from an operand. Otherwise, use width-prefixed float operators such as `f64<`.
+
+## Condition Results And Conditional Assignment
+
+Conditions can be used in more places than jumps. Assigning a condition stores `1` when the condition is true and `0` when it is false:
+
+```ss
+rax = rdi i< rsi
+al = rbx == 0
+```
+
+Conditions can also guard an assignment. The destination is changed only when the condition is true:
+
+```ss
+rax = rbx if rcx == 0
+count = count + 1 if count u< 10
+```
+
+Use bitwise-and conditions to test whether masked bits are clear or set. The number after `&` is a mask: an immediate integer literal used to choose which bits to inspect.
+
+```ss
+rax = 5
+
+jmp .has_bit if rax & 4 != 0
+al = rax & 4 != 0
+rbx = 99 if rax & 4 != 0
+
+// true when the low 4 bits are all zero, which means rax is 16-byte aligned
+jmp .aligned if rax & 15 == 0
+```
+
+The comparison applies to the result of `lhs & mask`. For example, `rax & 15 == 0` means `(rax & 15) == 0`, not `15 == 0`.
+
+Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers these conditions to x86-64 `test` internally.
 
 ## Comments
 
@@ -157,6 +234,26 @@ rax rdi rsi rdx rcx r11
 ```
 
 The current convention is that `linux.print` preserves `rbx`, `rbp`, `rsp`, and all registers not listed above. This convention applies to both literal and runtime-integer printing; it may be expanded with explicit save/restore instructions as the runtime grows.
+
+## Reading Input
+
+`linux.read(stdin, <destination>, <buffer_size>)` reads bytes from stdin into writable memory.
+
+- The destination must be address-of top-level memory or a 64-bit register containing an address.
+- The buffer size must be an integer immediate, integer `const`, 64-bit register, or 64-bit stack variable.
+- `read` leaves the number of bytes read in `rax`
+- Negative return values in `rax` are syscall errors.
+
+```ss
+mem buf:u8(1024)
+
+main: {
+  linux.read(stdin, &buf, 1024)
+  stack input:str = slice(&buf, rax)
+  linux.print input
+  linux.exit 0
+}
+```
 
 ## Functions
 
@@ -242,57 +339,6 @@ export debug_write: {
 
 Imports are intentionally narrow: only explicitly listed exported functions can be imported. Memory, data blocks, constants, and private helper functions are not importable API surface yet.
 
-## Freestanding And Raw X86
-
-`x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
-
-Freestanding halt loop:
-
-```ss
-main: {
-.hang:
-  x86 "hlt"
-  jmp .hang
-}
-```
-
-Port I/O can be written as raw x86 assembly. The examples below use byte-sized `in`/`out`: `al` is the data register, and the port must be an immediate `0..255` or `dx`.
-
-```ss
-main: {
-  al = 72
-  x86 "out 0x80, al"
-
-  x86 "in al, dx"
-
-.hang:
-  x86 "hlt"
-  jmp .hang
-}
-```
-
-Port I/O is mainly useful in freestanding code for hardware interaction, such as serial output after UART initialization.
-
-For simple QEMU smoke tests, the debug console can be connected to port `0xe9`. The `examples/lib/qemu_debug.ss` helper uses a local calling convention: the caller passes the string pointer in `rsi` and the byte length in `rdx`; `debug_write` then loops over the bytes and emits each one with raw x86 port I/O.
-
-```ss
-import debug_write from "../lib/qemu_debug.ss"
-
-main: {
-  const message = "Subsea\n"
-
-  rsi = message.ptr
-  rdx = message.len
-  call debug_write
-
-.hang:
-  x86 "hlt"
-  jmp .hang
-}
-```
-
-This keeps the hardware boundary explicit while avoiding manual ASCII byte assignments for every character.
-
 ## Local Labels
 
 These are named positions that code execution can jump to at any time; like a bookmark. They don't start a nested block or own the instructions after them, which is why it's best practice to not indent the label name.
@@ -361,116 +407,9 @@ other: {
 
 You cannot `jmp` from one function's labels to another function's labels.
 
-## Comparison Operators
-
-Integer comparisons require explicit signedness. Use `i<`, `i<=`, `i>`, and `i>=` for signed comparisons. Use `u<`, `u<=`, `u>`, and `u>=` for unsigned comparisons.
-
-`==` and `!=` do not depend on signedness.
-
-Plain `<`, `<=`, `>`, and `>=` are allowed for floating-point comparisons only when a `f32` or `f64` width can be inferred from an operand. Otherwise, use width-prefixed float operators such as `f64<`.
-
-## Condition Results And Conditional Assignment
-
-Conditions can be used in more places than jumps. Assigning a condition stores `1` when the condition is true and `0` when it is false:
-
-```ss
-rax = rdi i< rsi
-al = rbx == 0
-```
-
-Conditions can also guard an assignment. The destination is changed only when the condition is true:
-
-```ss
-rax = rbx if rcx == 0
-count = count + 1 if count u< 10
-```
-
-Use bitwise-and conditions to test whether masked bits are clear or set. The number after `&` is a mask: an immediate integer literal used to choose which bits to inspect.
-
-```ss
-rax = 5
-
-jmp .has_bit if rax & 4 != 0
-al = rax & 4 != 0
-rbx = 99 if rax & 4 != 0
-
-// true when the low 4 bits are all zero, which means rax is 16-byte aligned
-jmp .aligned if rax & 15 == 0
-```
-
-The comparison applies to the result of `lhs & mask`. For example, `rax & 15 == 0` means `(rax & 15) == 0`, not `15 == 0`.
-
-Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers these conditions to x86-64 `test` internally.
-
-## Compile-time Bindings
-
-Integer constants can be inlined as operands. Any constant used by `linux.print` is emitted as bytes in `.rodata` and referenced by generated print code.
-
-```ss
-const count = 3   // inlined
-rax = count
-
-const message = "Hello World!\n"  // referenced
-linux.print message
-```
-
-String bindings can't be used for register or memory assignment:
-
-```ss
-const message = "Hello World!\n"
-rax = message  // invalid
-```
-
-Integer bindings can optionally include a width annotation. Width annotations use the same names as memory widths and are checked when the binding is parsed:
-
-```ss
-const base:u8 = 10
-const offset:i16 = -8
-```
-
-Floating-point bindings must be given an explicit `f32` or `f64` width, and are supported as compile-time text bindings:
-
-```ss
-const ratio:f32 = 1.5
-const pi:f64 = 3.14159
-linux.print pi  // valid
-```
-
-Floating-point literals are valid in typed `const` and top-level `mem` scalar initializers. They can also be used as runtime operands when a floating-point width is supplied by context, such as `xmm0 = xmm0 f64+ 1.5`; assignments like `rax = 1.5` are rejected.
-
 ## Memory And Pointers
 
 Top-level `mem` declarations allocate writable memory for the lifetime of the program. Bracketed memory operands load from or store through memory, while `&` computes an address without reading memory.
-
-```ss
-mem count:u16 = 3
-mem ratio:f64 = 1.5
-mem buf:u8(128)
-mem greeting:u8 = "hello\n"   // stored as bytes
-mem values:u16 = [1, 2, 3]    // array initialization
-mem fill:u8 = repeat 4, 0xff
-mem callback:ptr = addr main  / store's `main`'s address
-
-main: {
-  linux.exit 0
-}
-```
-
-- `mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`
-- `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
-- `mem ratio:f64 = 1.5` allocates one writable `f64` memory cell initialized to `1.5`
-- `mem greeting:u8 = "hello\n"` allocates writable bytes initialized from the string literal. String memory initializers require `u8` width and do not add an implicit NUL terminator.
-- `mem values:u16 = [1, 2, 3]` allocates initialized writable arrays. Each value is range-checked against the declared width.
-- `mem fill:u8 = repeat 4, 0xff` emits four initialized `u8` values. The `repeat` form uses `repeat <count>, <value>`.
-- `mem callback:ptr = addr main` allocates one pointer-sized address constant. On x86-64, `ptr` is 8 bytes and emits `.quad` data.
-
-Pointer-sized arrays are useful for static dispatch tables and address lists:
-
-```ss
-mem handlers:ptr = [addr init, addr update, addr shutdown]
-```
-
-`ptr` memory initializers currently require `addr <symbol>` values; integer pointer literals are intentionally not accepted yet.
 
 Memory operands rooted at declared `mem` storage infer the declaration width:
 
@@ -506,6 +445,56 @@ rax = &rax
 
 `&[...]` is valid and computes a raw address expression without loading memory. See [Memory Arithmetic](#memory-arithmetic).
 
+```ss
+mem count:u16 = 3
+mem ratio:f64 = 1.5
+mem buf:u8(128)
+mem greeting:u8 = "hello\n"   // stored as bytes
+mem values:u16 = [1, 2, 3]    // array initialization
+mem fill:u8 = repeat(4, 0xff)
+mem callback:ptr = addr main  / store's `main`'s address
+
+main: {
+  linux.exit 0
+}
+```
+
+- `mem count:u16 = 3` allocates one writable `u16` memory cell initialized to `3`
+- `mem buf:u8(128)` allocates 128 zero-initialized writable `u8` cells.
+- `mem ratio:f64 = 1.5` allocates one writable `f64` memory cell initialized to `1.5`
+- `mem greeting:u8 = "hello\n"` allocates writable bytes initialized from the string literal. String memory initializers require `u8` width and do not add an implicit NUL terminator.
+- `mem values:u16 = [1, 2, 3]` allocates initialized writable arrays. Each value is range-checked against the declared width.
+- `mem fill:u8 = repeat(4, 0xff)` emits four initialized `u8` values. The `repeat` form uses `repeat(<count>, <value>)`.
+- `mem callback:ptr = addr main` allocates one pointer-sized address constant. On x86-64, `ptr` is 8 bytes and emits `.quad` data.
+
+Pointer-sized arrays are useful for static dispatch tables and address lists:
+
+```ss
+mem handlers:ptr = [addr init, addr update, addr shutdown]
+```
+
+`ptr` memory initializers currently require `addr <symbol>` values; integer pointer literals are intentionally not accepted yet.
+
+## Slices
+
+Use `slice(<ptr>, <len>)` to create a string view over bytes that already exist in memory. It does not copy or allocate.
+
+```ss
+mem buf:u8(1024)
+
+main: {
+  rax = 0
+  rdi = 0
+  rsi = &buf
+  rdx = 1024
+  linux.syscall
+
+  stack input:str = slice(&buf, rax)
+  linux.print input
+  linux.exit 0
+}
+```
+
 ## Memory Arithmetic
 
 Declared memory can be indexed with byte offsets. The access width is inferred from the `mem` declaration unless you add an explicit width:
@@ -526,7 +515,7 @@ Use `&name[offset]` to compute the address of indexed memory without loading or 
 
 ```ss
 rsi = &bytes[rax]
-stack text:str = slice &bytes[10], 20
+stack text:str = slice(&bytes[10], 20)
 ```
 
 The difference is whether the expression reads memory:
@@ -572,31 +561,6 @@ Nested dereferences and address-of inside memory operands are not supported:
 rbx = [[rax]]
 rbx = [&buf]
 ```
-
-## Static Data Blocks
-
-Use top-level `data` blocks for explicit static metadata layout in named object sections. This is useful for freestanding metadata, firmware tables, linker-collected registries, and boot protocol records:
-
-```ss
-data request section ".requests" align 8 export keep {
-  u64 0xc7b1dd30df4c8b88
-  u64 0x0a82e883a194f07b
-  u64 0
-  u64 0
-  addr response
-  zero 16
-
-response:
-  u64 0
-}
-```
-
-Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`), `addr <symbol>` for an address-sized symbol reference, `zero <bytes>` for zero-filled bytes, and labels inside the block. On x86-64, `addr` emits an 8-byte relocation.
-
-- `section` selects the exact output section name.
-- `align` must be a non-zero power of two.
-- `export` makes the data block symbol global.
-- On x86-64 ELF, `keep` emits a retained section using the GNU `R` section flag. Linker scripts can still use `KEEP(*(.section_name))` for compatibility with linkers that do not honor retained sections.
 
 ## Floating Point
 
@@ -702,26 +666,6 @@ These are not yet supported:
 
 - Runtime float printing
 
-## Slices
-
-Use `slice <ptr>, <len>` to create a string view over bytes that already exist in memory. It does not copy or allocate.
-
-```ss
-mem buf:u8(1024)
-
-main: {
-  rax = 0
-  rdi = 0
-  rsi = &buf
-  rdx = 1024
-  linux.syscall
-
-  stack input:str = slice &buf, rax
-  linux.print input
-  linux.exit 0
-}
-```
-
 ## Stack Variables
 
 Use `stack` to declare label-local mutable storage in the current label's stack frame:
@@ -809,25 +753,99 @@ helper: {
 }
 ```
 
-## Reading Input
+## Typed Intrinsic Calls
 
-`linux.read stdin, <destination>, <buffer_size>` reads bytes from stdin into writable memory.
-
-- The destination must be address-of top-level memory or a 64-bit register containing an address.
-- The buffer size must be an integer immediate, integer `const`, 64-bit register, or 64-bit stack variable.
-- `read` leaves the number of bytes read in `rax`
-- Negative return values in `rax` are syscall errors.
+Typed intrinsic calls use call-style syntax with an explicit result type. They are whole right-hand-side assignment values; they are not expression terms yet.
 
 ```ss
-mem buf:u8(1024)
+rax = min(rbx, rcx):i64
+rax = max(rbx, 10):u64
+xmm0 = sqrt(xmm1):f64
+xmm1 = min(xmm1, 0.0):f32
+```
 
+- Supported typed intrinsics are `min`, `max`, and `sqrt`.
+- `min` and `max` support scalar integer widths `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, and `u64` with signedness taken from the width.
+- Integer `min` and `max` destinations must be integer registers. `i8` and `u8` are lowered with branches because x86-64 does not have 8-bit conditional moves.
+- `min`, `max`, and `sqrt` support scalar floating widths `f32` and `f64`; floating-point destinations must be XMM registers.
+- Integer `sqrt` is not implemented yet; `sqrt(...):i64` and other integer widths are rejected.
+- Floating-point intrinsic operands can be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the intrinsic width.
+
+## Freestanding And Raw X86
+
+`x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
+
+Freestanding halt loop:
+
+```ss
 main: {
-  linux.read stdin, &buf, 1024
-  stack input:str = slice &buf, rax
-  linux.print input
-  linux.exit 0
+.hang:
+  x86 "hlt"
+  jmp .hang
 }
 ```
+
+Port I/O can be written as raw x86 assembly. The examples below use byte-sized `in`/`out`: `al` is the data register, and the port must be an immediate `0..255` or `dx`.
+
+```ss
+main: {
+  al = 72
+  x86 "out 0x80, al"
+
+  x86 "in al, dx"
+
+.hang:
+  x86 "hlt"
+  jmp .hang
+}
+```
+
+Port I/O is mainly useful in freestanding code for hardware interaction, such as serial output after UART initialization.
+
+For simple QEMU smoke tests, the debug console can be connected to port `0xe9`. The `examples/lib/qemu_debug.ss` helper uses a local calling convention: the caller passes the string pointer in `rsi` and the byte length in `rdx`; `debug_write` then loops over the bytes and emits each one with raw x86 port I/O.
+
+```ss
+import debug_write from "../lib/qemu_debug.ss"
+
+main: {
+  const message = "Subsea\n"
+
+  rsi = message.ptr
+  rdx = message.len
+  call debug_write
+
+.hang:
+  x86 "hlt"
+  jmp .hang
+}
+```
+
+This keeps the hardware boundary explicit while avoiding manual ASCII byte assignments for every character.
+
+## Static Data Blocks
+
+Use top-level `data` blocks for explicit static metadata layout in named object sections. This is useful for freestanding metadata, firmware tables, linker-collected registries, and boot protocol records:
+
+```ss
+data request section ".requests" align 8 export keep {
+  u64 0xc7b1dd30df4c8b88
+  u64 0x0a82e883a194f07b
+  u64 0
+  u64 0
+  addr response
+  zero 16
+
+response:
+  u64 0
+}
+```
+
+Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`), `addr <symbol>` for an address-sized symbol reference, `zero <bytes>` for zero-filled bytes, and labels inside the block. On x86-64, `addr` emits an 8-byte relocation.
+
+- `section` selects the exact output section name.
+- `align` must be a non-zero power of two.
+- `export` makes the data block symbol global.
+- On x86-64 ELF, `keep` emits a retained section using the GNU `R` section flag. Linker scripts can still use `KEEP(*(.section_name))` for compatibility with linkers that do not honor retained sections.
 
 ## Registers
 
@@ -1026,7 +1044,7 @@ subsea emit-asm main.ss   // Compile to x86-64 assembly and print it
 
 ### targets
 
-The default target is `x86_64`, which means x86-64 Linux userland. This target supports Linux helpers such as `linux.print`, `linux.read stdin`, and `linux.exit`.
+The default target is `x86_64`, which means x86-64 Linux userland. This target supports Linux helpers such as `linux.print`, `linux.read(stdin, ...)`, and `linux.exit`.
 
 Use `x86_64-free` for freestanding x86-64 assembly. This target still emits x86-64 instructions, but it rejects Linux-only helpers because there may be no Linux process, stdout, stdin, or process exit:
 
