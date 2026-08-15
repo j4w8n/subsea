@@ -2506,6 +2506,61 @@ fn emits_float_typed_intrinsic_calls() {
 }
 
 #[test]
+fn emits_float_rounding_typed_intrinsic_calls() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: s("ratio"),
+            value: BindingValue::Float {
+                value: s("2.5"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Round,
+                width: MemoryWidth::F64,
+                args: vec![ident("ratio")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm1")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Floor,
+                width: MemoryWidth::F32,
+                args: vec![float("1.75")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm2")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Ceil,
+                width: MemoryWidth::F64,
+                args: vec![reg("xmm3")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm4")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Trunc,
+                width: MemoryWidth::F32,
+                args: vec![reg("xmm5")],
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloatval_main_ratio:\n  .double 2.5\n"));
+    assert!(asm.contains(".Lfloatlit_main_2:\n  .float 1.75\n"));
+    assert!(asm.contains("  roundsd xmm0, qword ptr [rip + .Lfloatval_main_ratio], 0\n"));
+    assert!(asm.contains("  roundss xmm1, dword ptr [rip + .Lfloatlit_main_2], 1\n"));
+    assert!(asm.contains("  roundsd xmm2, xmm3, 2\n"));
+    assert!(asm.contains("  roundss xmm4, xmm5, 3\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn emits_integer_typed_intrinsic_calls() {
     let program = main_program(vec![
         Instruction::Assign {
@@ -2555,6 +2610,25 @@ fn rejects_integer_sqrt_typed_intrinsic_call() {
     assert_eq!(
         error,
         "sqrt only supports f32 or f64; integer sqrt is not implemented"
+    );
+}
+
+#[test]
+fn rejects_integer_rounding_typed_intrinsic_call() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::IntrinsicCall {
+            op: IntrinsicOp::Round,
+            width: MemoryWidth::I64,
+            args: vec![reg("rbx")],
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "round only supports f32 or f64; integer rounding is not implemented"
     );
 }
 

@@ -1740,9 +1740,13 @@ fn assignment_value(op: AssignmentOp, lhs: Operand, rhs: Operand) -> AssignmentV
 
 fn parse_intrinsic_op(name: &str) -> Result<IntrinsicOp, String> {
     match name {
+        "ceil" => Ok(IntrinsicOp::Ceil),
+        "floor" => Ok(IntrinsicOp::Floor),
         "max" => Ok(IntrinsicOp::Max),
         "min" => Ok(IntrinsicOp::Min),
+        "round" => Ok(IntrinsicOp::Round),
         "sqrt" => Ok(IntrinsicOp::Sqrt),
+        "trunc" => Ok(IntrinsicOp::Trunc),
         _ => Err(format!("Unknown typed intrinsic call {name:?}")),
     }
 }
@@ -1750,7 +1754,11 @@ fn parse_intrinsic_op(name: &str) -> Result<IntrinsicOp, String> {
 fn validate_intrinsic_arity(op: IntrinsicOp, count: usize) -> Result<(), String> {
     let expected = match op {
         IntrinsicOp::Max | IntrinsicOp::Min => 2,
-        IntrinsicOp::Sqrt => 1,
+        IntrinsicOp::Ceil
+        | IntrinsicOp::Floor
+        | IntrinsicOp::Round
+        | IntrinsicOp::Sqrt
+        | IntrinsicOp::Trunc => 1,
     };
 
     if count == expected {
@@ -1765,9 +1773,13 @@ fn validate_intrinsic_arity(op: IntrinsicOp, count: usize) -> Result<(), String>
 
 fn intrinsic_op_name(op: IntrinsicOp) -> &'static str {
     match op {
+        IntrinsicOp::Ceil => "ceil",
+        IntrinsicOp::Floor => "floor",
         IntrinsicOp::Max => "max",
         IntrinsicOp::Min => "min",
+        IntrinsicOp::Round => "round",
         IntrinsicOp::Sqrt => "sqrt",
+        IntrinsicOp::Trunc => "trunc",
     }
 }
 

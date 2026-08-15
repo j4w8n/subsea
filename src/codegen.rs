@@ -3030,6 +3030,18 @@ fn emit_intrinsic_call_assignment(
     let dst = assignment_operand_target(dst)?;
 
     match (op, width) {
+        (
+            IntrinsicOp::Ceil | IntrinsicOp::Floor | IntrinsicOp::Round | IntrinsicOp::Trunc,
+            MemoryWidth::F32 | MemoryWidth::F64,
+        ) => {
+            emit_float_rounding_intrinsic(asm, dst, op, width, &args[0], strings, label_name, stack)
+        }
+        (IntrinsicOp::Ceil | IntrinsicOp::Floor | IntrinsicOp::Round | IntrinsicOp::Trunc, _) => {
+            Err(format!(
+                "{} only supports f32 or f64; integer rounding is not implemented",
+                intrinsic_op_name(op)
+            ))
+        }
         (IntrinsicOp::Sqrt, MemoryWidth::F32 | MemoryWidth::F64) => {
             emit_float_sqrt_intrinsic(asm, dst, width, &args[0], strings, label_name, stack)
         }
@@ -3069,6 +3081,39 @@ fn emit_float_sqrt_intrinsic(
     asm.push_str(&format!(
         "  {} {dst_register}, {src}\n",
         float_sqrt_opcode(width)
+    ));
+
+    Ok(())
+}
+
+fn emit_float_rounding_intrinsic(
+    asm: &mut String,
+    dst: &Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_intrinsic_destination(intrinsic_op_name(op), dst)?;
+    validate_float_math_operand(
+        &format!("{} operand", intrinsic_op_name(op)),
+        src,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    let Operand::Register(dst_register) = dst else {
+        unreachable!()
+    };
+    let src = emit_float_operand(src, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {src}, {}\n",
+        float_rounding_opcode(width),
+        float_rounding_mode(op)
     ));
 
     Ok(())
@@ -3320,6 +3365,24 @@ fn float_sqrt_opcode(width: MemoryWidth) -> &'static str {
     }
 }
 
+fn float_rounding_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "roundss",
+        MemoryWidth::F64 => "roundsd",
+        _ => unreachable!(),
+    }
+}
+
+fn float_rounding_mode(op: IntrinsicOp) -> u8 {
+    match op {
+        IntrinsicOp::Round => 0,
+        IntrinsicOp::Floor => 1,
+        IntrinsicOp::Ceil => 2,
+        IntrinsicOp::Trunc => 3,
+        _ => unreachable!(),
+    }
+}
+
 fn float_min_max_opcode(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
     match (op, width) {
         (IntrinsicOp::Min, MemoryWidth::F32) => "minss",
@@ -3332,9 +3395,13 @@ fn float_min_max_opcode(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
 
 fn intrinsic_op_name(op: IntrinsicOp) -> &'static str {
     match op {
+        IntrinsicOp::Ceil => "ceil",
+        IntrinsicOp::Floor => "floor",
         IntrinsicOp::Max => "max",
         IntrinsicOp::Min => "min",
+        IntrinsicOp::Round => "round",
         IntrinsicOp::Sqrt => "sqrt",
+        IntrinsicOp::Trunc => "trunc",
     }
 }
 

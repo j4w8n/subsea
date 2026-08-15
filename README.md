@@ -762,13 +762,19 @@ rax = min(rbx, rcx):i64
 rax = max(rbx, 10):u64
 xmm0 = sqrt(xmm1):f64
 xmm1 = min(xmm1, 0.0):f32
+xmm2 = round(xmm2):f64
+xmm3 = floor(1.75):f32
+xmm4 = ceil(xmm5):f64
+xmm6 = trunc(xmm7):f32
 ```
 
-- Supported typed intrinsics are `min`, `max`, and `sqrt`.
+- Supported typed intrinsics are `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc`.
 - `min` and `max` support scalar integer widths `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, and `u64` with signedness taken from the width.
 - Integer `min` and `max` destinations must be integer registers. `i8` and `u8` are lowered with branches because x86-64 does not have 8-bit conditional moves.
-- `min`, `max`, and `sqrt` support scalar floating widths `f32` and `f64`; floating-point destinations must be XMM registers.
+- `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc` support scalar floating widths `f32` and `f64`; floating-point destinations must be XMM registers.
 - Integer `sqrt` is not implemented yet; `sqrt(...):i64` and other integer widths are rejected.
+- Integer result rounding is not implemented yet; `round(...):i64` and other integer widths are rejected.
+- Floating-point rounding emits SSE4.1 `roundss` or `roundsd`: `round` uses nearest, `floor` rounds down, `ceil` rounds up, and `trunc` rounds toward zero.
 - Floating-point intrinsic operands can be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the intrinsic width.
 
 ## Freestanding And Raw X86

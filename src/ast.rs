@@ -399,9 +399,13 @@ pub enum AssignmentValue {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IntrinsicOp {
+    Ceil,
+    Floor,
     Max,
     Min,
+    Round,
     Sqrt,
+    Trunc,
 }
 
 #[derive(Debug, PartialEq, Clone)]

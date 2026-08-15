@@ -1806,6 +1806,85 @@ fn parses_typed_intrinsic_calls() {
 }
 
 #[test]
+fn parses_rounding_typed_intrinsic_calls() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("xmm0"),
+        Token::Equals,
+        tid("round"),
+        Token::LParen,
+        treg("xmm1"),
+        Token::RParen,
+        Token::Colon,
+        tid("f64"),
+        treg("xmm2"),
+        Token::Equals,
+        tid("floor"),
+        Token::LParen,
+        treg("xmm3"),
+        Token::RParen,
+        Token::Colon,
+        tid("f32"),
+        treg("xmm4"),
+        Token::Equals,
+        tid("ceil"),
+        Token::LParen,
+        treg("xmm5"),
+        Token::RParen,
+        Token::Colon,
+        tid("f64"),
+        treg("xmm6"),
+        Token::Equals,
+        tid("trunc"),
+        Token::LParen,
+        treg("xmm7"),
+        Token::RParen,
+        Token::Colon,
+        tid("f32"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("xmm0")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Round,
+                    width: MemoryWidth::F64,
+                    args: vec![reg("xmm1")],
+                },
+            },
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("xmm2")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Floor,
+                    width: MemoryWidth::F32,
+                    args: vec![reg("xmm3")],
+                },
+            },
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("xmm4")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Ceil,
+                    width: MemoryWidth::F64,
+                    args: vec![reg("xmm5")],
+                },
+            },
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("xmm6")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Trunc,
+                    width: MemoryWidth::F32,
+                    args: vec![reg("xmm7")],
+                },
+            },
+        ]
+    );
+}
+
+#[test]
 fn rejects_unknown_typed_intrinsic_call() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
