@@ -163,9 +163,44 @@ Integer comparisons require explicit signedness. Use `i<`, `i<=`, `i>`, and `i>=
 
 Plain `<`, `<=`, `>`, and `>=` are allowed for floating-point comparisons only when a `f32` or `f64` width can be inferred from an operand. Otherwise, use width-prefixed float operators such as `f64<`.
 
+Valid integer comparisons:
+
+```ss
+rax = rdi i< rsi   // signed less-than result: 1 or 0
+rax = rdi u< rsi   // unsigned less-than result: 1 or 0
+jmp .done if rcx == 0
+jmp .more if r8 u>= 10
+jmp .neg if r9 i< 0
+```
+
+Invalid integer comparisons:
+
+```ss
+rax = rdi < rsi    // invalid: integer ordering needs signedness
+jmp .done if rcx >= 10 // invalid: use i>= or u>=
+```
+
+Valid floating-point comparisons:
+
+```ss
+mem left:f64 = 1.5
+mem right:f64 = 2.25
+
+jmp .less if xmm0 < [right]    // valid: width inferred from f64 memory
+jmp .less if xmm0 f64< xmm1    // valid: explicit f64 comparison
+jmp .same if xmm0 f32== 0.0    // valid: explicit f32 comparison
+```
+
+Invalid floating-point comparisons:
+
+```ss
+jmp .less if xmm0 < xmm1 // invalid: XMM registers do not imply f32 or f64
+jmp .less if xmm0 < 1.0  // invalid: use f32< or f64<
+```
+
 ## Condition Results And Conditional Assignment
 
-Conditions can be used in more places than jumps. Assigning a condition stores `1` when the condition is true and `0` when it is false:
+Assigning a condition stores `1` when the condition is true and `0` when it is false:
 
 ```ss
 rax = rdi i< rsi
@@ -259,7 +294,7 @@ linux.print "unsigned byte = {u8}\n", bl
 For registers, use an explicit format because the same 64 bits can be interpreted multiple ways:
 
 ```ss
-linux.print "{}\n", rax    // invalid; cannot infer register signedness
+linux.print "{}\n", rax    // invalid - cannot infer register signedness
 linux.print "{i64}\n", rax // signed decimal
 linux.print "{u64}\n", rax // unsigned decimal
 ```
@@ -330,7 +365,10 @@ Helping!
 Done
 ```
 
-Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
+Functions use a mixed caller/callee preservation convention.
+- A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning.
+- Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning. 
+- Callers must save those registers themselves if they need their values after `call`.
 
 ```ss
 main: {
@@ -503,7 +541,7 @@ An indirect `jmp` transfers control to an unknown destination, so the manual pus
 
 ## Memory And Pointers
 
-Top-level `mem` declarations allocate writable memory for the lifetime of the program. Bracketed memory operands load from or store through memory, while `&` computes an address without reading memory.
+Top-level `mem` declarations allocate static writable memory for the lifetime of the program, similar to Assembly `.data` or `.bss` storage, not heap allocation. Bracketed memory operands load from or store through memory, while `&` computes an address without reading memory.
 
 Memory operands rooted at declared `mem` storage infer the declaration width:
 
@@ -546,7 +584,7 @@ mem buf:u8(128)
 mem greeting:u8 = "hello\n"   // stored as bytes
 mem values:u16 = [1, 2, 3]    // array initialization
 mem fill:u8 = repeat(4, 0xff)
-mem callback:ptr = addr main  / store's `main`'s address
+mem callback:ptr = addr main  // store's `main`'s address
 
 main: {
   linux.exit 0
@@ -599,10 +637,10 @@ mem bytes:u8(128)
 
 values[0] = 10
 values[8] = 20
-rax = values[8]       // u64 load
+rax = values[8]   // u64 load
 
-bytes[rax] = 72       // u8 store
-al = bytes[rax]       // u8 load
+bytes[rax] = 72   // u8 store
+al = bytes[rax]   // u8 load
 ```
 
 Use `&name[offset]` to compute the address of indexed memory without loading or storing through it:
@@ -654,6 +692,93 @@ Nested dereferences and address-of inside memory operands are not supported:
 ```ss
 rbx = [[rax]]
 rbx = [&buf]
+```
+
+## Stack Variables
+
+Use `stack` to declare label-local mutable storage in the current label's stack frame:
+
+```ss
+main: {
+  const limit = 5
+  stack count:u64 = 0
+
+.loop:
+  jmp .done if count u>= limit
+
+  linux.print count
+  linux.print "\n"
+
+  count = count + 1
+  jmp .loop
+
+.done:
+  linux.exit 0
+}
+```
+
+Scalar stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A scalar stack variable loads when used as an operand and stores when assigned:
+
+```ss
+stack count:u64 = 8
+count = 5    // store to stack slot
+rax = count  // load from stack slot
+```
+
+Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
+
+If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a label that uses `stack`.
+
+Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
+
+```ss
+stack message:str = "Hello\n"
+linux.print message
+```
+
+Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
+
+```ss
+stack message:str = "Hello\n"
+rsi = message.ptr
+rdx = message.len
+```
+
+## Manual Stack Operations
+
+- `push <operand>` stores a value on the stack and moves `rsp` down.
+- `pop <operand>` loads a value from the stack and moves `rsp` up.
+
+On x86-64, stack operations are pointer-width operations. `push` accepts immediate values, 64-bit registers, and explicitly 64-bit memory operands. `pop` accepts 64-bit registers and explicitly 64-bit memory operands:
+
+```ss
+push rax          // valid
+push [addr]:u64   // valid
+pop rbx           // valid
+pop [addr]:u64    // valid
+
+push eax          // invalid: not 64-bit
+pop [addr]        // invalid: memory width is ambiguous
+pop 10            // invalid: destination cannot be immediate
+```
+
+## Stack Cleanup
+
+- Using `push` or `pop` requires you to keep the stack in balance across function control flow.
+  - Every reachable `ret` must have no unmatched manual `push` instructions. A function path that reaches the end of the block without `ret`, `linux.exit`, or an unconditional local `jmp` is also invalid; if that path has unmatched pushes, subsea reports it as unbalanced stack depth first.
+  - Local labels must be reached with one consistent stack depth from every path.
+
+```ss
+main: {
+  push rax
+  call helper
+  pop rax   // must pop here, or you'll get a stack balance error
+  linux.exit 0
+}
+
+helper: {
+  ret
+}
 ```
 
 ## Floating Point
@@ -756,96 +881,7 @@ jmp .less if xmm0 f64< 2.0
 
 Supported floating-point comparison operators are `f32==`, `f32!=`, `f32<`, `f32<=`, `f32>`, `f32>=`, and the corresponding `f64` forms.
 
-These are not yet supported:
-
-- Runtime float printing
-
-## Stack Variables
-
-Use `stack` to declare label-local mutable storage in the current label's stack frame:
-
-```ss
-main: {
-  const limit = 5
-  stack count:u64 = 0
-
-.loop:
-  jmp .done if count u>= limit
-
-  linux.print count
-  linux.print "\n"
-
-  count = count + 1
-  jmp .loop
-
-.done:
-  linux.exit 0
-}
-```
-
-Scalar stack variables require an explicit width and initializer. Initializers must be integer immediates or integer `const` bindings. A scalar stack variable loads when used as an operand and stores when assigned:
-
-```ss
-stack count:u64 = 8
-count = 5    // store to stack slot
-rax = count  // load from stack slot
-```
-
-Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
-
-If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a label that uses `stack`.
-
-Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
-
-```ss
-stack message:str = "Hello\n"
-linux.print message
-```
-
-Access `.ptr` and `.len` to load a stack string's address and byte length as 64-bit operands:
-
-```ss
-stack message:str = "Hello\n"
-rsi = message.ptr
-rdx = message.len
-```
-
-## Manual Stack Operations
-
-- `push <operand>` stores a value on the stack and moves `rsp` down.
-- `pop <operand>` loads a value from the stack and moves `rsp` up.
-
-On x86-64, stack operations are pointer-width operations. `push` accepts immediate values, 64-bit registers, and explicitly 64-bit memory operands. `pop` accepts 64-bit registers and explicitly 64-bit memory operands:
-
-```ss
-push rax          // valid
-push [addr]:u64   // valid
-pop rbx           // valid
-pop [addr]:u64    // valid
-
-push eax          // invalid: not 64-bit
-pop [addr]        // invalid: memory width is ambiguous
-pop 10            // invalid: destination cannot be immediate
-```
-
-## Stack Cleanup
-
-- Using `push` or `pop` requires you to keep the stack in balance across function control flow.
-  - Every reachable `ret` must have no unmatched manual `push` instructions. A function path that reaches the end of the block without `ret`, `linux.exit`, or an unconditional local `jmp` is also invalid; if that path has unmatched pushes, subsea reports it as unbalanced stack depth first.
-  - Local labels must be reached with one consistent stack depth from every path.
-
-```ss
-main: {
-  push rax
-  call helper
-  pop rax   // must pop here, or you'll get a stack balance error
-  linux.exit 0
-}
-
-helper: {
-  ret
-}
-```
+Runtime float printing is not yet supported.
 
 ## Typed Intrinsic Calls
 
