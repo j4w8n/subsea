@@ -350,9 +350,7 @@ main: {
   rax = linux.reserve(4096)
   jmp .error if rax i< 0
 
-  [rax]:u8 = 72
-  [rax + 1]:u8 = 105
-  [rax + 2]:u8 = 10
+  [rax] = "Hi\n"
 
   stack message:str = slice(rax, 3)
   linux.print message
@@ -671,6 +669,28 @@ rax = values[8]   // u64 load
 
 bytes[rax] = 72   // u8 store
 al = bytes[rax]   // u8 load
+```
+
+String literals can be assigned to memory operands to copy their bytes into writable memory. String byte assignment does not add an implicit NUL terminator, and empty string assignments are rejected:
+
+```ss
+mem buf:u8(16)
+
+main: {
+  [buf] = "Hi\n"
+  buf[3] = "Bye\n"
+
+  linux.exit 0
+}
+```
+
+String byte assignment is memory-only. Use a memory destination without an explicit width because the string literal determines the number of bytes written:
+
+```ss
+[rax] = "Hi\n"     // valid
+buf[0] = "Hi\n"   // valid
+rax = "Hi\n"      // invalid: destination is not memory
+[rax]:u8 = "Hi\n" // invalid: string writes multiple bytes
 ```
 
 Use `&name[offset]` to compute the address of indexed memory without loading or storing through it:
