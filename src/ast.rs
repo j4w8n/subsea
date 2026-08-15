@@ -86,7 +86,7 @@ pub enum Instruction {
         condition: ConditionExpr,
     },
     Call {
-        target: String,
+        target: ControlTarget,
     },
     Exit {
         code: u8,
@@ -95,7 +95,7 @@ pub enum Instruction {
         text: String,
     },
     Jmp {
-        target: String,
+        target: ControlTarget,
         condition: Option<ConditionExpr>,
     },
     Label {
@@ -147,10 +147,18 @@ impl Instruction {
                     condition.visit_operands(&mut visit);
                 }
             }
-            Instruction::Jmp {
-                condition: Some(condition),
-                ..
-            } => condition.visit_operands(&mut visit),
+            Instruction::Call {
+                target: ControlTarget::Operand(operand),
+            } => visit(operand),
+            Instruction::Jmp { target, condition } => {
+                if let ControlTarget::Operand(operand) = target {
+                    visit(operand);
+                }
+
+                if let Some(condition) = condition {
+                    condition.visit_operands(&mut visit);
+                }
+            }
             Instruction::Print { parts } => {
                 for part in parts {
                     if let PrintPart::Operand(operand) = part {
@@ -189,10 +197,18 @@ impl Instruction {
                     condition.visit_operands_mut(&mut visit);
                 }
             }
-            Instruction::Jmp {
-                condition: Some(condition),
-                ..
-            } => condition.visit_operands_mut(&mut visit),
+            Instruction::Call {
+                target: ControlTarget::Operand(operand),
+            } => visit(operand),
+            Instruction::Jmp { target, condition } => {
+                if let ControlTarget::Operand(operand) = target {
+                    visit(operand);
+                }
+
+                if let Some(condition) = condition {
+                    condition.visit_operands_mut(&mut visit);
+                }
+            }
             Instruction::Print { parts } => {
                 for part in parts {
                     if let PrintPart::Operand(operand) = part {
@@ -217,6 +233,12 @@ impl Instruction {
             _ => {}
         }
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ControlTarget {
+    Label(String),
+    Operand(Operand),
 }
 
 fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnMut(&Operand)) {

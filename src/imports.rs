@@ -1,6 +1,6 @@
 use crate::ast::{
-    AddressTerm, DataItem, ImportDeclaration, Instruction, MemoryDeclaration, MemoryValue, Operand,
-    Program,
+    AddressTerm, ControlTarget, DataItem, ImportDeclaration, Instruction, MemoryDeclaration,
+    MemoryValue, Operand, Program,
 };
 use crate::grammar::Token;
 use crate::lexer::get_next_token;
@@ -275,9 +275,13 @@ fn rewrite_instruction_symbols(
     symbol_map: &HashMap<String, String>,
 ) {
     match instruction {
-        Instruction::Call { target } | Instruction::Jmp { target, .. } => {
-            *target = rewrite_symbol_name(target, symbol_map);
+        Instruction::Call {
+            target: ControlTarget::Label(target),
         }
+        | Instruction::Jmp {
+            target: ControlTarget::Label(target),
+            ..
+        } => *target = rewrite_symbol_name(target, symbol_map),
         Instruction::Label { name } => {
             *name = rewrite_symbol_name(name, symbol_map);
         }

@@ -1,7 +1,7 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
+    BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem,
+    ExprOp, Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
     MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
     StringProperty, WidthConversion,
 };
@@ -73,8 +73,8 @@ pub fn emit_x86_64_asm_with_entry_symbol(
     };
 
     asm.push_str(".intel_syntax noprefix\n");
-    emit_static_data(&mut asm, &program.data);
-    emit_data(&mut asm, &program.memory);
+    emit_static_data(&mut asm, &program.data, &labels);
+    emit_data(&mut asm, &program.memory, &labels);
     emit_bss(&mut asm, &program.memory);
     emit_rodata(&mut asm, &strings.all, &strings.floats);
     asm.push_str(".section .text\n");
@@ -129,7 +129,14 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                     asm.push_str(&format!("{skip_label}:\n"));
                 }
                 Instruction::Call { target } => {
-                    asm.push_str(&format!("  call {}\n", labels.emit_label(target)));
+                    emit_call_instruction(
+                        &mut asm,
+                        target,
+                        &labels,
+                        &strings,
+                        &label.name,
+                        &stack,
+                    )?;
                 }
                 Instruction::Exit { code } => {
                     if target.is_freestanding() {
@@ -146,20 +153,17 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                     asm.push_str(&format!("  {text}\n"));
                 }
                 Instruction::Jmp { target, condition } => {
-                    if let Some(condition) = condition {
-                        conditional_jump_index += 1;
-                        emit_conditional_jump(
-                            &mut asm,
-                            &labels.emit_label(target),
-                            condition,
-                            &strings,
-                            &label.name,
-                            &stack,
-                            conditional_jump_index,
-                        )?;
-                    } else {
-                        asm.push_str(&format!("  jmp {}\n", labels.emit_label(target)));
-                    }
+                    conditional_jump_index += usize::from(condition.is_some());
+                    emit_jmp_instruction(
+                        &mut asm,
+                        target,
+                        condition.as_ref(),
+                        &labels,
+                        &strings,
+                        &label.name,
+                        &stack,
+                        conditional_jump_index,
+                    )?;
                 }
                 Instruction::Label { name } => {
                     asm.push_str(&format!("{name}:\n"));
@@ -323,6 +327,83 @@ fn emit_condition_jump(
             label_name,
             stack,
         ),
+    }
+}
+
+fn emit_call_instruction(
+    asm: &mut String,
+    target: &ControlTarget,
+    labels: &LabelSymbols,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match target {
+        ControlTarget::Label(target) => {
+            asm.push_str(&format!("  call {}\n", labels.emit_label(target)));
+            Ok(())
+        }
+        ControlTarget::Operand(operand) => {
+            validate_indirect_control_target("call", operand, strings, label_name, stack)?;
+            let operand = emit_operand(operand, strings, label_name, stack)?;
+            asm.push_str(&format!("  call {operand}\n"));
+            Ok(())
+        }
+    }
+}
+
+fn emit_jmp_instruction(
+    asm: &mut String,
+    target: &ControlTarget,
+    condition: Option<&ConditionExpr>,
+    labels: &LabelSymbols,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
+    match target {
+        ControlTarget::Label(target) => {
+            if let Some(condition) = condition {
+                emit_conditional_jump(
+                    asm,
+                    &labels.emit_label(target),
+                    condition,
+                    strings,
+                    label_name,
+                    stack,
+                    index,
+                )?;
+            } else {
+                asm.push_str(&format!("  jmp {}\n", labels.emit_label(target)));
+            }
+
+            Ok(())
+        }
+        ControlTarget::Operand(operand) => {
+            validate_indirect_control_target("jmp", operand, strings, label_name, stack)?;
+            let operand = emit_operand(operand, strings, label_name, stack)?;
+
+            if let Some(condition) = condition {
+                let skip_label = format!(".L.__subsea.{label_name}.indirect_jmp_{index}_skip");
+                emit_condition_jump(
+                    asm,
+                    &skip_label,
+                    condition,
+                    false,
+                    strings,
+                    label_name,
+                    stack,
+                    index,
+                )?;
+                asm.push_str(&format!("  jmp {operand}\n"));
+                asm.push_str(&format!("{skip_label}:\n"));
+            } else {
+                asm.push_str(&format!("  jmp {operand}\n"));
+            }
+
+            Ok(())
+        }
     }
 }
 
@@ -1450,7 +1531,9 @@ fn validate_label_control_flow(
 
         match instruction {
             Instruction::Call { target } => {
-                if !top_level_labels.contains(target.as_str()) {
+                if let ControlTarget::Label(target) = target
+                    && !top_level_labels.contains(target.as_str())
+                {
                     return Err(format!(
                         "call target {target:?} in function {:?} must be a top-level function",
                         label.name
@@ -1470,20 +1553,35 @@ fn validate_label_control_flow(
             Instruction::Syscall
                 if previous_instructions_set_exit_syscall(&label.instructions, index) => {}
             Instruction::Jmp { target, condition } => {
-                if !is_local_label_target(target) || top_level_labels.contains(target.as_str()) {
-                    return Err(format!(
-                        "jmp target {target:?} in function {:?} must be a local label",
-                        label.name
-                    ));
-                }
+                match target {
+                    ControlTarget::Label(target) => {
+                        if !is_local_label_target(target)
+                            || top_level_labels.contains(target.as_str())
+                        {
+                            return Err(format!(
+                                "jmp target {target:?} in function {:?} must be a local label",
+                                label.name
+                            ));
+                        }
 
-                let target_index = *label_positions.get(target.as_str()).ok_or_else(|| {
-                    format!(
-                        "Unknown local jump target {target:?} in label {:?}",
-                        label.name
-                    )
-                })?;
-                pending.push_back((target_index, depth));
+                        let target_index =
+                            *label_positions.get(target.as_str()).ok_or_else(|| {
+                                format!(
+                                    "Unknown local jump target {target:?} in label {:?}",
+                                    label.name
+                                )
+                            })?;
+                        pending.push_back((target_index, depth));
+                    }
+                    ControlTarget::Operand(_) => {
+                        if depth != 0 {
+                            return Err(format!(
+                                "Function {:?} cannot indirect jmp with unbalanced manual stack depth {depth}. Pop pushed values before the jump.",
+                                label.name
+                            ));
+                        }
+                    }
+                }
                 if condition.is_some() {
                     pending.push_back((index + 1, depth));
                 }
@@ -1579,6 +1677,47 @@ fn is_local_label_target(target: &str) -> bool {
     target.starts_with(".L.")
 }
 
+fn validate_indirect_control_target(
+    instruction: &str,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(
+        operand,
+        Operand::Immediate(_)
+            | Operand::Pointer(_)
+            | Operand::AddressOf(_)
+            | Operand::StringProperty { .. }
+            | Operand::Converted { .. }
+            | Operand::Cast { .. }
+            | Operand::FloatLiteral(_)
+    ) || matches!(operand, Operand::Ident(name) if stack_scalar_slot(stack, name).is_none())
+    {
+        return Err(format!(
+            "indirect {instruction} target must be a 64-bit register or memory operand"
+        ));
+    }
+
+    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, strings, stack)? {
+        return Err(format!(
+            "indirect {instruction} target must be a 64-bit integer register or memory operand"
+        ));
+    }
+
+    match operand_width(operand, strings, label_name, stack)? {
+        Some(Width::Bits64) => Ok(()),
+        Some(width) => Err(format!(
+            "indirect {instruction} target must be 64-bit, found {}-bit operand",
+            width.bits()
+        )),
+        None => Err(format!(
+            "indirect {instruction} target must have a known 64-bit width"
+        )),
+    }
+}
+
 fn align_to(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
 }
@@ -1638,7 +1777,7 @@ fn resolve_print_part<'a>(
     }
 }
 
-fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
+fn emit_data(asm: &mut String, memory: &[MemoryDeclaration], labels: &LabelSymbols) {
     if memory
         .iter()
         .all(|declaration| matches!(declaration, MemoryDeclaration::Buffer { .. }))
@@ -1668,7 +1807,7 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
                 values,
             } => {
                 asm.push_str(&format!("{name}:\n"));
-                emit_memory_values(asm, *width, values);
+                emit_memory_values(asm, *width, values, labels);
             }
             MemoryDeclaration::Repeat {
                 name,
@@ -1678,7 +1817,7 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
             } => {
                 asm.push_str(&format!("{name}:\n"));
                 for _ in 0..*count {
-                    emit_memory_value(asm, *width, value);
+                    emit_memory_value(asm, *width, value, labels);
                 }
             }
             MemoryDeclaration::Buffer { .. } => {}
@@ -1688,13 +1827,23 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration]) {
     asm.push('\n');
 }
 
-fn emit_memory_values(asm: &mut String, width: MemoryWidth, values: &[MemoryValue]) {
+fn emit_memory_values(
+    asm: &mut String,
+    width: MemoryWidth,
+    values: &[MemoryValue],
+    labels: &LabelSymbols,
+) {
     for value in values {
-        emit_memory_value(asm, width, value);
+        emit_memory_value(asm, width, value, labels);
     }
 }
 
-fn emit_memory_value(asm: &mut String, width: MemoryWidth, value: &MemoryValue) {
+fn emit_memory_value(
+    asm: &mut String,
+    width: MemoryWidth,
+    value: &MemoryValue,
+    labels: &LabelSymbols,
+) {
     match value {
         MemoryValue::Integer(value) => {
             asm.push_str(&format!(
@@ -1704,12 +1853,12 @@ fn emit_memory_value(asm: &mut String, width: MemoryWidth, value: &MemoryValue) 
             ));
         }
         MemoryValue::Addr { target } => {
-            asm.push_str(&format!("  .quad {target}\n"));
+            asm.push_str(&format!("  .quad {}\n", labels.emit_label(target)));
         }
     }
 }
 
-fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
+fn emit_static_data(asm: &mut String, data: &[DataDeclaration], labels: &LabelSymbols) {
     for declaration in data {
         let flags = if declaration.keep { "aR" } else { "a" };
         asm.push_str(&format!(
@@ -1737,7 +1886,7 @@ fn emit_static_data(asm: &mut String, data: &[DataDeclaration]) {
                     ));
                 }
                 DataItem::Addr { target } => {
-                    asm.push_str(&format!("  .quad {target}\n"));
+                    asm.push_str(&format!("  .quad {}\n", labels.emit_label(target)));
                 }
                 DataItem::Zero { count } => {
                     asm.push_str(&format!("  .zero {count}\n"));

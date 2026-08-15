@@ -1,9 +1,9 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression,
-    FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
-    MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
+    Expression, FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp,
+    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -598,11 +598,11 @@ impl Parser {
     fn parse_instruction(&mut self, current_label: &str) -> Result<Instruction, String> {
         match self.advance() {
             Some(Token::Call) => {
-                let target = self.parse_label_target("call", current_label)?;
+                let target = self.parse_control_target("call", current_label)?;
                 Ok(Instruction::Call { target })
             }
             Some(Token::Jmp) => {
-                let target = self.parse_label_target("jump", current_label)?;
+                let target = self.parse_control_target("jump", current_label)?;
                 let condition = self.parse_optional_jump_condition()?;
                 Ok(Instruction::Jmp { target, condition })
             }
@@ -748,19 +748,40 @@ impl Parser {
         }
     }
 
-    fn parse_label_target(
+    fn parse_control_target(
         &mut self,
         instruction: &str,
         current_label: &str,
-    ) -> Result<String, String> {
+    ) -> Result<ControlTarget, String> {
         match self.advance() {
-            Some(Token::Ident(target)) => Ok(target),
-            Some(Token::LocalIdent(target)) => Ok(mangle_local_label(current_label, &target)),
+            Some(Token::Ident(target)) if matches!(self.peek(), Some(Token::LBracket)) => {
+                let address = self.parse_indexed_address(target)?;
+                let width = self.parse_optional_memory_width()?;
+                Ok(ControlTarget::Operand(Operand::Dereference {
+                    address,
+                    width,
+                }))
+            }
+            Some(Token::Ident(target)) => Ok(ControlTarget::Label(target)),
+            Some(Token::LocalIdent(target)) => Ok(ControlTarget::Label(mangle_local_label(
+                current_label,
+                &target,
+            ))),
+            Some(Token::LBracket) => {
+                let address = self.parse_address()?;
+                self.expect(Token::RBracket, "Expected ']' after memory operand")?;
+                let width = self.parse_optional_memory_width()?;
+                Ok(ControlTarget::Operand(Operand::Dereference {
+                    address,
+                    width,
+                }))
+            }
+            Some(Token::Register(target)) => Ok(ControlTarget::Operand(Operand::Register(target))),
             Some(token) => Err(format!(
-                "Expected {instruction} target label, found {token:?}"
+                "Expected {instruction} target label, register, or memory operand, found {token:?}"
             )),
             None => Err(format!(
-                "Expected {instruction} target label, found end of input"
+                "Expected {instruction} target label, register, or memory operand, found end of input"
             )),
         }
     }
@@ -2251,24 +2272,28 @@ fn validate_instruction_symbols(
 ) -> Result<(), String> {
     match instruction {
         Instruction::Call { target } => {
-            if !top_level_labels.contains(target.as_str()) {
+            if let ControlTarget::Label(target) = target
+                && !top_level_labels.contains(target.as_str())
+            {
                 return Err(format!(
                     "call target {target:?} in label {current_label:?} must be a top-level function"
                 ));
             }
         }
         Instruction::Jmp { target, .. } => {
-            if !labels.contains(target.as_str()) {
-                return Err(format!(
-                    "Unknown label {target:?} in label {current_label:?}"
-                ));
-            }
+            if let ControlTarget::Label(target) = target {
+                if !labels.contains(target.as_str()) {
+                    return Err(format!(
+                        "Unknown label {target:?} in label {current_label:?}"
+                    ));
+                }
 
-            // keep top_level_labels check for defensive AST invariants
-            if !is_local_label_name(target) || top_level_labels.contains(target.as_str()) {
-                return Err(format!(
-                    "jmp target {target:?} in label {current_label:?} must be a local label"
-                ));
+                // keep top_level_labels check for defensive AST invariants
+                if !is_local_label_name(target) || top_level_labels.contains(target.as_str()) {
+                    return Err(format!(
+                        "jmp target {target:?} in label {current_label:?} must be a local label"
+                    ));
+                }
             }
         }
         Instruction::Print { parts } => {

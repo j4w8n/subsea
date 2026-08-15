@@ -2,9 +2,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
-    IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart,
-    Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
+    Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand,
+    PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -433,7 +433,7 @@ fn rejects_cross_label_jump_from_stack_label() {
             value: Operand::Immediate(1),
         },
         Instruction::Jmp {
-            target: s("other"),
+            target: ControlTarget::Label(s("other")),
             condition: None,
         },
     ]);
@@ -458,7 +458,7 @@ fn rejects_cross_function_jump_without_stack_frame() {
             Label {
                 name: s("main"),
                 instructions: vec![Instruction::Jmp {
-                    target: s("other"),
+                    target: ControlTarget::Label(s("other")),
                     condition: None,
                 }],
             },
@@ -484,7 +484,7 @@ fn rejects_call_to_local_label() {
             name: s(".L.main.helper"),
         },
         Instruction::Call {
-            target: s(".L.main.helper"),
+            target: ControlTarget::Label(s(".L.main.helper")),
         },
         Instruction::Ret,
     ]);
@@ -1068,7 +1068,7 @@ fn emits_conditional_assignment_with_jump_around() {
 fn emits_bitwise_and_zero_jump_as_test() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: s(".L.main.set"),
+            target: ControlTarget::Label(s(".L.main.set")),
             condition: Some(ConditionExpr::BitwiseAndZero {
                 lhs: reg("rax"),
                 rhs: Operand::Immediate(8),
@@ -1547,7 +1547,7 @@ fn emits_call_and_ret() {
                 name: s("main"),
                 instructions: vec![
                     Instruction::Call {
-                        target: s("helper"),
+                        target: ControlTarget::Label(s("helper")),
                     },
                     Instruction::Ret,
                 ],
@@ -1563,6 +1563,68 @@ fn emits_call_and_ret() {
 
     assert!(asm.contains("  call helper\n"));
     assert!(asm.contains("  ret\n"));
+}
+
+#[test]
+fn emits_indirect_call_register() {
+    let program = main_program(vec![Instruction::Call {
+        target: ControlTarget::Operand(reg("rax")),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  call rax\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_indirect_jump_memory_operand() {
+    let program = main_program(vec![Instruction::Jmp {
+        target: ControlTarget::Operand(Operand::Dereference {
+            address: addr_ident("handler"),
+            width: Some(MemoryWidth::Ptr),
+        }),
+        condition: None,
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  jmp qword ptr [handler]\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_conditional_indirect_jump() {
+    let program = main_program(vec![Instruction::Jmp {
+        target: ControlTarget::Operand(reg("rax")),
+        condition: Some(cmp(Condition {
+            lhs: reg("rcx"),
+            op: CompareOp::Equal,
+            rhs: Operand::Immediate(0),
+        })),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cmp rcx, 0\n"));
+    assert!(asm.contains("  jne .L.__subsea.main.indirect_jmp_1_skip\n"));
+    assert!(asm.contains("  jmp rax\n"));
+    assert!(asm.contains(".L.__subsea.main.indirect_jmp_1_skip:\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_narrow_indirect_call_target() {
+    let program = main_program(vec![Instruction::Call {
+        target: ControlTarget::Operand(reg("eax")),
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "indirect call target must be 64-bit, found 32-bit operand"
+    );
 }
 
 #[test]
@@ -1651,7 +1713,7 @@ fn rejects_ret_with_unbalanced_manual_stack() {
 fn rejects_local_label_with_conflicting_manual_stack_depths() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: s(".L.main.join"),
+            target: ControlTarget::Label(s(".L.main.join")),
             condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Equal,
@@ -1680,7 +1742,7 @@ fn emits_inline_label() {
             name: s(".L.main.loop"),
         },
         Instruction::Jmp {
-            target: s(".L.main.loop"),
+            target: ControlTarget::Label(s(".L.main.loop")),
             condition: None,
         },
     ]);
@@ -1717,7 +1779,9 @@ fn rewrites_entry_label_references_to_start_symbol() {
             Label {
                 name: s("again"),
                 instructions: vec![
-                    Instruction::Call { target: s("main") },
+                    Instruction::Call {
+                        target: ControlTarget::Label(s("main")),
+                    },
                     Instruction::Exit { code: 0 },
                 ],
             },
@@ -1745,7 +1809,7 @@ fn emits_custom_entry_symbol() {
                 },
                 Instruction::InlineAsm { text: s("hlt") },
                 Instruction::Jmp {
-                    target: s(".L.main.hang"),
+                    target: ControlTarget::Label(s(".L.main.hang")),
                     condition: None,
                 },
             ],
@@ -1814,7 +1878,7 @@ fn emits_custom_data_blocks() {
 fn emits_signed_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: s(".L.main.done"),
+            target: ControlTarget::Label(s(".L.main.done")),
             condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::SignedLess,
@@ -1838,7 +1902,7 @@ fn emits_unsigned_conditional_jump() {
             name: s(".L.main.loop"),
         },
         Instruction::Jmp {
-            target: s(".L.main.loop"),
+            target: ControlTarget::Label(s(".L.main.loop")),
             condition: Some(cmp(Condition {
                 lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
@@ -2097,7 +2161,7 @@ fn emits_initialized_memory_arrays_strings_repeats_and_addresses() {
     assert!(asm.contains("values:\n  .word 1\n  .word 2\n  .word 3\n"));
     assert!(asm.contains("message:\n  .byte 104\n  .byte 105\n"));
     assert!(asm.contains("fill:\n  .byte 255\n  .byte 255\n  .byte 255\n  .byte 255\n"));
-    assert!(asm.contains("callbacks:\n  .quad main\n  .quad handler\n"));
+    assert!(asm.contains("callbacks:\n  .quad _start\n  .quad handler\n"));
     assert_assembles(&asm);
 }
 
@@ -2835,7 +2899,7 @@ fn emits_stack_float_load_store_and_initializer() {
 fn emits_ordered_float_conditional_jump() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: s(".L.main.done"),
+            target: ControlTarget::Label(s(".L.main.done")),
             condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
@@ -2867,7 +2931,7 @@ fn infers_plain_float_comparison_width_from_const() {
             },
         },
         Instruction::Jmp {
-            target: s(".L.main.done"),
+            target: ControlTarget::Label(s(".L.main.done")),
             condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::Less,
@@ -2902,7 +2966,7 @@ fn infers_plain_float_comparison_width_from_memory() {
             name: s("main"),
             instructions: vec![
                 Instruction::Jmp {
-                    target: s(".L.main.done"),
+                    target: ControlTarget::Label(s(".L.main.done")),
                     condition: Some(cmp(Condition {
                         lhs: reg("xmm0"),
                         op: CompareOp::LessEqual,
@@ -2928,7 +2992,7 @@ fn infers_plain_float_comparison_width_from_memory() {
 fn rejects_plain_integer_ordered_comparison_without_signedness() {
     let program = main_program(vec![
         Instruction::Jmp {
-            target: s(".L.main.done"),
+            target: ControlTarget::Label(s(".L.main.done")),
             condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Less,

@@ -33,6 +33,22 @@ fn compiles_and_runs_runtime_string_program() {
 }
 
 #[test]
+fn compiles_and_runs_indirect_control_flow() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/indirect_control.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "called\njumped\n");
+}
+
+#[test]
 fn reads_stdin_into_runtime_string() {
     let _guard = CLI_LOCK.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_subsea"))

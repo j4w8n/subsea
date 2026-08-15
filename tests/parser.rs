@@ -1,8 +1,8 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
-    DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, IntrinsicOp, MathOp,
-    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
+    IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart,
+    ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -976,7 +976,7 @@ fn parses_bitwise_and_zero_condition() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Jmp {
-            target: s(".L.main.set"),
+            target: ControlTarget::Label(s(".L.main.set")),
             condition: Some(ConditionExpr::BitwiseAndZero {
                 lhs: reg("rax"),
                 rhs: Operand::Immediate(8),
@@ -1059,10 +1059,63 @@ fn parses_call_and_ret() {
         program.labels[0].instructions,
         vec![
             Instruction::Call {
-                target: s("helper"),
+                target: ControlTarget::Label(s("helper")),
             },
             Instruction::Ret,
         ]
+    );
+}
+
+#[test]
+fn parses_indirect_call_register() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([Token::Call, treg("rax")]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Call {
+            target: ControlTarget::Operand(reg("rax")),
+        }]
+    );
+}
+
+#[test]
+fn parses_indirect_jump_memory_operand() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Jmp,
+        tid("handlers"),
+        Token::LBracket,
+        treg("rax"),
+        Token::Star,
+        tnum("8"),
+        Token::RBracket,
+        Token::Colon,
+        tid("ptr"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Jmp {
+            target: ControlTarget::Operand(Operand::Dereference {
+                address: subsea::ast::Address {
+                    first: subsea::ast::AddressTerm::Ident(s("handlers")),
+                    rest: vec![(
+                        subsea::ast::AddressOperator::Add,
+                        subsea::ast::AddressTerm::ScaledRegister {
+                            register: s("rax"),
+                            scale: 8,
+                        }
+                    ),],
+                },
+                width: Some(MemoryWidth::Ptr),
+            }),
+            condition: None,
+        }]
     );
 }
 
@@ -1216,7 +1269,7 @@ fn parses_nested_label_marker() {
                 name: s(".L.main.loop"),
             },
             Instruction::Jmp {
-                target: s(".L.main.loop"),
+                target: ControlTarget::Label(s(".L.main.loop")),
                 condition: None,
             },
         ]
@@ -1240,7 +1293,7 @@ fn parses_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: s("done"),
+            target: ControlTarget::Label(s("done")),
             condition: Some(cmp(Condition {
                 lhs: reg("rcx"),
                 op: CompareOp::UnsignedLess,
@@ -1267,7 +1320,7 @@ fn parses_signed_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: s("negative"),
+            target: ControlTarget::Label(s("negative")),
             condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::SignedLess,
@@ -1294,7 +1347,7 @@ fn parses_conditional_jump_without_resolved_signedness() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: s("done"),
+            target: ControlTarget::Label(s("done")),
             condition: Some(cmp(Condition {
                 lhs: reg("rax"),
                 op: CompareOp::Less,
@@ -1689,7 +1742,7 @@ fn parses_float_conditional_jump() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Jmp {
-            target: s("done"),
+            target: ControlTarget::Label(s("done")),
             condition: Some(cmp(Condition {
                 lhs: reg("xmm0"),
                 op: CompareOp::FloatLess(MemoryWidth::F64),
