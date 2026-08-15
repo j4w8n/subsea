@@ -283,8 +283,6 @@ Done
 
 Functions use a mixed caller/callee preservation convention. A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. Callers must save those registers themselves if they need their values after `call`. Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning.
 
-The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
-
 ```ss
 main: {
   rdi = 2
@@ -300,6 +298,26 @@ add: {
   ret
 }
 ```
+
+The stack must also remain balanced across function calls. A callee may move `rsp` while using the stack, but before `ret`, it must undo its own stack changes so `rsp` points at the return address. After `ret`, the caller should see the stack in the same state as before it made the call. Since `rbp` is callee-preserved, any function that uses it as a frame pointer must restore the caller's original `rbp` before returning.
+
+Calls may also target a 64-bit register or memory operand containing a function address (more on `mem` in [Memory And Pointers](#memory-and-pointers)):
+
+```ss
+mem callback:ptr = addr handler
+
+main: {
+  rax = [callback]
+  call rax
+  linux.exit 0
+}
+
+handler: {
+  ret
+}
+```
+
+Indirect call targets must be 64-bit integer registers or memory operands. They use the same calling convention as symbolic calls.
 
 ## Imports
 
@@ -405,7 +423,34 @@ other: {
 }
 ```
 
-You cannot `jmp` from one function's labels to another function's labels.
+Symbolic `jmp .<label>` cannot jump from one function's local labels to another function's local labels.
+
+Jumps may also target a 64-bit register or memory operand containing an address (more on `mem` in the next section). So, it's possible to jump to another function. This is useful for dispatch tables and low-level runtimes:
+
+```ss
+mem handlers:ptr = [addr state_zero, addr state_one]
+
+main: {
+  rax = 1
+  jmp handlers[rax * 8]:ptr
+}
+
+state_zero: {
+  linux.exit 0
+}
+
+state_one: {
+  linux.exit 1
+}
+```
+
+Conditional indirect jumps are supported and lower to a normal conditional branch around an indirect `jmp`:
+
+```ss
+jmp rax if rcx == 0
+```
+
+An indirect `jmp` transfers control to an unknown destination, so the manual push/pop stack depth must be balanced at the jump site (see [Stack Cleanup](#stack-cleanup)).
 
 ## Memory And Pointers
 
