@@ -339,6 +339,36 @@ main: {
 }
 ```
 
+## Linux Virtual Memory
+
+`linux.reserve(size)` asks Linux for a readable/writable anonymous virtual memory range. It must be used on the right side of an assignment and leaves the Linux result in the destination. On success, the result is the starting address. On failure, the result is a negative errno value.
+
+`linux.release(ptr, size)` returns a previously reserved virtual memory range to Linux. It leaves the Linux result in `rax`: `0` on success, or a negative errno value on failure.
+
+```ss
+main: {
+  rax = linux.reserve(4096)
+  jmp .error if rax i< 0
+
+  [rax]:u8 = 72
+  [rax + 1]:u8 = 105
+  [rax + 2]:u8 = 10
+
+  stack message:str = slice(rax, 3)
+  linux.print message
+
+  linux.release(rax, 4096)
+  jmp .error if rax i< 0
+
+  linux.exit 0
+
+.error:
+  linux.exit 1
+}
+```
+
+This is OS virtual memory, not a heap allocator. You must keep track of the pointer and size you reserve so the same range can be released later.
+
 ## Functions
 
 These are top-level entities that execute instructions within their code block. Use `call <function>` to call another function, and `ret` to return from a called function. The `main` function is automatically called when a program starts. Other than that, all other functions must be explicitly called in order for their code to run; execution does not "fall through" to the next function, as labels do. Because of this, functions must end with explicit control flow. For example, use `ret`, `linux.exit`, or an equivalent `linux.syscall`.
