@@ -4,8 +4,8 @@ use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
     Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand,
-    PairBinaryOp, PrintPart, Program, ReadSource, RegisterPair, StringInitializer, StringProperty,
-    WidthConversion,
+    PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource, RegisterPair, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -126,7 +126,10 @@ fn prints_integer_binding() {
 #[test]
 fn emits_runtime_integer_print() {
     let program = main_program(vec![Instruction::Print {
-        parts: vec![PrintPart::Operand(reg("rax"))],
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+            operand: reg("rax"),
+        }],
     }]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
@@ -135,6 +138,193 @@ fn emits_runtime_integer_print() {
     assert!(asm.contains(".L.__subsea.main.print_1_loop:\n"));
     assert!(asm.contains("  div rbx\n"));
     assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn emits_runtime_unsigned_decimal_print() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::UnsignedDecimal(MemoryWidth::U64),
+            operand: reg("rax"),
+        }],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rbx, 10\n"));
+    assert!(!asm.contains("  jl .L.__subsea.main.print_1_negative\n"));
+}
+
+#[test]
+fn emits_runtime_signed_narrow_print() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![
+            PrintPart::FormattedOperand {
+                format: PrintFormat::SignedDecimal(MemoryWidth::I8),
+                operand: reg("al"),
+            },
+            PrintPart::FormattedOperand {
+                format: PrintFormat::SignedDecimal(MemoryWidth::I32),
+                operand: reg("ecx"),
+            },
+        ],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movsx rax, al\n"));
+    assert!(asm.contains("  movsxd rax, ecx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_runtime_unsigned_narrow_print() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![
+            PrintPart::FormattedOperand {
+                format: PrintFormat::UnsignedDecimal(MemoryWidth::U8),
+                operand: reg("al"),
+            },
+            PrintPart::FormattedOperand {
+                format: PrintFormat::UnsignedDecimal(MemoryWidth::U32),
+                operand: reg("ecx"),
+            },
+        ],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  movzx rax, al\n"));
+    assert!(asm.contains("  mov eax, ecx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_runtime_hex_print_with_prefix() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::Hex,
+            operand: reg("rax"),
+        }],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rbx, 16\n"));
+    assert!(asm.contains("  mov byte ptr [rsi], 120\n"));
+    assert!(asm.contains("  mov byte ptr [rsi], 48\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_runtime_binary_print_with_prefix() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::Binary,
+            operand: reg("rax"),
+        }],
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rbx, 2\n"));
+    assert!(asm.contains("  mov byte ptr [rsi], 98\n"));
+    assert!(asm.contains("  mov byte ptr [rsi], 48\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_narrow_runtime_print_format_operand() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+            operand: reg("eax"),
+        }],
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "i64 print operand must be 64-bit, found 32-bit operand"
+    );
+}
+
+#[test]
+fn infers_stack_integer_print_formats() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: s("signed"),
+            width: MemoryWidth::I64,
+            value: Operand::Immediate(-1),
+        },
+        Instruction::Stack {
+            name: s("unsigned"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(1),
+        },
+        Instruction::Print {
+            parts: vec![
+                PrintPart::Binding(s("signed")),
+                PrintPart::Binding(s("unsigned")),
+            ],
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  jl .L.__subsea.main.print_1_negative\n"));
+    assert!(!asm.contains("  jl .L.__subsea.main.print_2_negative\n"));
+}
+
+#[test]
+fn infers_pointer_memory_print_format() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("address"),
+            width: MemoryWidth::Ptr,
+            value: 42,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Print {
+                    parts: vec![PrintPart::FormattedOperand {
+                        format: PrintFormat::Infer,
+                        operand: deref_ident("address", None),
+                    }],
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rbx, 16\n"));
+    assert!(asm.contains("  mov byte ptr [rsi], 120\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_inferred_register_print_format() {
+    let program = main_program(vec![Instruction::Print {
+        parts: vec![PrintPart::FormattedOperand {
+            format: PrintFormat::Infer,
+            operand: reg("rax"),
+        }],
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Cannot infer print format for register rax; use {i64}, {u64}, {x}, {b}, or {ptr}"
+    );
 }
 
 #[test]

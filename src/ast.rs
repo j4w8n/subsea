@@ -161,7 +161,9 @@ impl Instruction {
             }
             Instruction::Print { parts } => {
                 for part in parts {
-                    if let PrintPart::Operand(operand) = part {
+                    if let PrintPart::Operand(operand)
+                    | PrintPart::FormattedOperand { operand, .. } = part
+                    {
                         visit(operand);
                     }
                 }
@@ -211,7 +213,9 @@ impl Instruction {
             }
             Instruction::Print { parts } => {
                 for part in parts {
-                    if let PrintPart::Operand(operand) = part {
+                    if let PrintPart::Operand(operand)
+                    | PrintPart::FormattedOperand { operand, .. } = part
+                    {
                         visit(operand);
                     }
                 }
@@ -532,8 +536,22 @@ pub enum BindingValue {
 #[derive(Debug, PartialEq, Clone)]
 pub enum PrintPart {
     Binding(String),
+    FormattedOperand {
+        format: PrintFormat,
+        operand: Operand,
+    },
     Literal(String),
     Operand(Operand),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PrintFormat {
+    Infer,
+    SignedDecimal(MemoryWidth),
+    UnsignedDecimal(MemoryWidth),
+    Hex,
+    Binary,
+    Pointer,
 }
 
 #[derive(Debug, PartialEq, Clone)]

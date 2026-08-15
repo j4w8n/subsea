@@ -2,7 +2,8 @@ use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
     IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp,
-    PrintPart, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
+    PrintFormat, PrintPart, ReadSource, RegisterPair, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -1265,7 +1266,116 @@ fn parses_print_register() {
     assert_eq!(
         program.labels[0].instructions,
         vec![Instruction::Print {
-            parts: vec![PrintPart::Operand(reg("rax"))],
+            parts: vec![PrintPart::FormattedOperand {
+                format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                operand: reg("rax"),
+            }],
+        }]
+    );
+}
+
+#[test]
+fn parses_typed_runtime_print_format() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend(linux("print"));
+    tokens.extend([
+        text("{i64} {u64} {x} {b} {ptr}\n"),
+        Token::Comma,
+        treg("rax"),
+    ]);
+    tokens.extend([Token::Comma, treg("rbx")]);
+    tokens.extend([Token::Comma, treg("rcx")]);
+    tokens.extend([Token::Comma, treg("rdx")]);
+    tokens.extend([Token::Comma, tid("address")]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Print {
+            parts: vec![
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                    operand: reg("rax"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::UnsignedDecimal(MemoryWidth::U64),
+                    operand: reg("rbx"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::Hex,
+                    operand: reg("rcx"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::Binary,
+                    operand: reg("rdx"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::Pointer,
+                    operand: Operand::Ident(s("address")),
+                },
+                PrintPart::Literal(s("\n")),
+            ],
+        }]
+    );
+}
+
+#[test]
+fn parses_narrow_runtime_print_format() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend(linux("print"));
+    tokens.extend([text("{i8} {u16} {i32}\n"), Token::Comma, treg("al")]);
+    tokens.extend([Token::Comma, treg("bx")]);
+    tokens.extend([Token::Comma, treg("ecx")]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Print {
+            parts: vec![
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::SignedDecimal(MemoryWidth::I8),
+                    operand: reg("al"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::UnsignedDecimal(MemoryWidth::U16),
+                    operand: reg("bx"),
+                },
+                PrintPart::Literal(s(" ")),
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::SignedDecimal(MemoryWidth::I32),
+                    operand: reg("ecx"),
+                },
+                PrintPart::Literal(s("\n")),
+            ],
+        }]
+    );
+}
+
+#[test]
+fn parses_inferred_runtime_print_format() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend(linux("print"));
+    tokens.extend([text("{}\n"), Token::Comma, treg("rax")]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Print {
+            parts: vec![
+                PrintPart::FormattedOperand {
+                    format: PrintFormat::Infer,
+                    operand: reg("rax"),
+                },
+                PrintPart::Literal(s("\n")),
+            ],
         }]
     );
 }

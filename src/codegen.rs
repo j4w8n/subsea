@@ -2,8 +2,8 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem,
     ExprOp, Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
-    MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintPart, Program, ReadSource, RegisterPair,
-    StringInitializer, StringProperty, WidthConversion,
+    MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource,
+    RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -193,10 +193,12 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                                 if let Some(slot) = stack.slots.get(name) {
                                     runtime_print_index += 1;
                                     match slot {
-                                        StackSlot::Scalar { .. } => {
+                                        StackSlot::Scalar { width, .. } => {
+                                            let format = infer_print_format_for_width(*width);
                                             emit_print_operand_instruction(
                                                 &mut asm,
                                                 &Operand::Ident(name.clone()),
+                                                format,
                                                 &strings,
                                                 &label.name,
                                                 &stack,
@@ -235,6 +237,19 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                                 emit_print_operand_instruction(
                                     &mut asm,
                                     operand,
+                                    PrintFormat::SignedDecimal(MemoryWidth::I64),
+                                    &strings,
+                                    &label.name,
+                                    &stack,
+                                    runtime_print_index,
+                                )?;
+                            }
+                            PrintPart::FormattedOperand { format, operand } => {
+                                runtime_print_index += 1;
+                                emit_print_operand_instruction(
+                                    &mut asm,
+                                    operand,
+                                    *format,
                                     &strings,
                                     &label.name,
                                     &stack,
@@ -1012,6 +1027,7 @@ fn stack_string_property_slot(
 #[derive(Clone, Copy)]
 struct IntegerBinding {
     value: i128,
+    width: Option<MemoryWidth>,
 }
 
 #[derive(Clone)]
@@ -1060,8 +1076,14 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                         BindingValue::String(value) => {
                             (format!(".Lstr_{}_{}", label.name, name), value.clone())
                         }
-                        BindingValue::Integer { value, .. } => {
-                            integers.insert(key.clone(), IntegerBinding { value: *value });
+                        BindingValue::Integer { value, width } => {
+                            integers.insert(
+                                key.clone(),
+                                IntegerBinding {
+                                    value: *value,
+                                    width: *width,
+                                },
+                            );
                             (format!(".Lint_{}_{}", label.name, name), value.to_string())
                         }
                         BindingValue::Float { value, width } => {
@@ -1789,7 +1811,9 @@ fn resolve_print_part<'a>(
                 .get(&(label_name.to_string(), *index))
                 .ok_or_else(|| String::from("Internal error: missing print literal"))
         }
-        PrintPart::Operand(_) => Err(String::from("Internal error: operand print is runtime")),
+        PrintPart::Operand(_) | PrintPart::FormattedOperand { .. } => {
+            Err(String::from("Internal error: operand print is runtime"))
+        }
     }
 }
 
@@ -1991,21 +2015,44 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
 }
 
 fn emit_print_string_instruction(asm: &mut String, string: &StringBinding) {
+    emit_print_volatile_pushes(asm);
     asm.push_str("  mov rax, 1\n");
     asm.push_str("  mov rdi, 1\n");
     asm.push_str(&format!("  lea rsi, [rip + {}]\n", string.asm_label));
     asm.push_str(&format!("  mov rdx, {}\n", string.value.len()));
     asm.push_str("  syscall\n");
+    emit_print_volatile_pops(asm);
+}
+
+fn emit_print_volatile_pushes(asm: &mut String) {
+    asm.push_str("  push rax\n");
+    asm.push_str("  push rcx\n");
+    asm.push_str("  push rdi\n");
+    asm.push_str("  push rsi\n");
+    asm.push_str("  push rdx\n");
+    asm.push_str("  push r11\n");
+}
+
+fn emit_print_volatile_pops(asm: &mut String) {
+    asm.push_str("  pop r11\n");
+    asm.push_str("  pop rdx\n");
+    asm.push_str("  pop rsi\n");
+    asm.push_str("  pop rdi\n");
+    asm.push_str("  pop rcx\n");
+    asm.push_str("  pop rax\n");
 }
 
 fn emit_print_operand_instruction(
     asm: &mut String,
     operand: &Operand,
+    format: PrintFormat,
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
+    let format = resolve_print_format(format, operand, strings, label_name, stack)?;
+
     if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, strings, stack)? {
         return Err(String::from(
             "print operand does not support floating-point values yet",
@@ -2024,33 +2071,244 @@ fn emit_print_operand_instruction(
         ));
     }
 
-    load_print_operand(asm, operand, strings, label_name, stack)?;
+    validate_print_format_operand(format, operand, strings, label_name, stack)?;
+
+    emit_print_volatile_pushes(asm);
+    load_print_operand(asm, operand, format, strings, label_name, stack)?;
 
     let loop_label = format!(".L.__subsea.{label_name}.print_{index}_loop");
-    let done_label = format!(".L.__subsea.{label_name}.print_{index}_done");
+    let negative_label = format!(".L.__subsea.{label_name}.print_{index}_negative");
+    let digits_label = format!(".L.__subsea.{label_name}.print_{index}_digits");
+    let prefix_done_label = format!(".L.__subsea.{label_name}.print_{index}_prefix_done");
+    let digit_decimal_label = format!(".L.__subsea.{label_name}.print_{index}_digit_decimal");
 
     asm.push_str("  push rbx\n");
-    asm.push_str("  sub rsp, 40\n");
-    asm.push_str("  lea rsi, [rsp + 40]\n");
-    asm.push_str("  mov rbx, 10\n");
+    asm.push_str("  sub rsp, 80\n");
+    asm.push_str("  lea rsi, [rsp + 80]\n");
+    match format {
+        PrintFormat::Infer => unreachable!(),
+        PrintFormat::SignedDecimal(_) => {
+            asm.push_str("  mov rbx, 10\n");
+            asm.push_str("  mov byte ptr [rsp], 0\n");
+            asm.push_str("  cmp rax, 0\n");
+            asm.push_str(&format!("  jl {negative_label}\n"));
+            asm.push_str(&format!("  jmp {digits_label}\n"));
+            asm.push_str(&format!("{negative_label}:\n"));
+            asm.push_str("  neg rax\n");
+            asm.push_str("  mov byte ptr [rsp], 45\n");
+        }
+        PrintFormat::UnsignedDecimal(_) => {
+            asm.push_str("  mov rbx, 10\n");
+        }
+        PrintFormat::Hex | PrintFormat::Pointer => {
+            asm.push_str("  mov rbx, 16\n");
+            asm.push_str("  mov byte ptr [rsp], 48\n");
+            asm.push_str("  mov byte ptr [rsp + 1], 120\n");
+        }
+        PrintFormat::Binary => {
+            asm.push_str("  mov rbx, 2\n");
+            asm.push_str("  mov byte ptr [rsp], 48\n");
+            asm.push_str("  mov byte ptr [rsp + 1], 98\n");
+        }
+    }
+    asm.push_str(&format!("{digits_label}:\n"));
     asm.push_str(&format!("{loop_label}:\n"));
     asm.push_str("  xor rdx, rdx\n");
     asm.push_str("  div rbx\n");
-    asm.push_str("  add dl, 48\n");
+    if matches!(format, PrintFormat::Hex | PrintFormat::Pointer) {
+        asm.push_str("  cmp dl, 9\n");
+        asm.push_str(&format!("  jbe {digit_decimal_label}\n"));
+        asm.push_str("  add dl, 87\n");
+        asm.push_str(&format!("  jmp {prefix_done_label}\n"));
+        asm.push_str(&format!("{digit_decimal_label}:\n"));
+        asm.push_str("  add dl, 48\n");
+        asm.push_str(&format!("{prefix_done_label}:\n"));
+    } else {
+        asm.push_str("  add dl, 48\n");
+    }
     asm.push_str("  sub rsi, 1\n");
     asm.push_str("  mov byte ptr [rsi], dl\n");
     asm.push_str("  cmp rax, 0\n");
     asm.push_str(&format!("  jne {loop_label}\n"));
-    asm.push_str(&format!("{done_label}:\n"));
-    asm.push_str("  lea rdx, [rsp + 40]\n");
+    match format {
+        PrintFormat::Infer => unreachable!(),
+        PrintFormat::SignedDecimal(_) => {
+            asm.push_str("  cmp byte ptr [rsp], 45\n");
+            asm.push_str(&format!("  jne {prefix_done_label}\n"));
+            asm.push_str("  sub rsi, 1\n");
+            asm.push_str("  mov byte ptr [rsi], 45\n");
+            asm.push_str(&format!("{prefix_done_label}:\n"));
+        }
+        PrintFormat::Hex | PrintFormat::Pointer | PrintFormat::Binary => {
+            let marker = match format {
+                PrintFormat::Infer => unreachable!(),
+                PrintFormat::Binary => 98,
+                _ => 120,
+            };
+            asm.push_str("  sub rsi, 1\n");
+            asm.push_str(&format!("  mov byte ptr [rsi], {marker}\n"));
+            asm.push_str("  sub rsi, 1\n");
+            asm.push_str("  mov byte ptr [rsi], 48\n");
+        }
+        PrintFormat::UnsignedDecimal(_) => {}
+    }
+    asm.push_str("  lea rdx, [rsp + 80]\n");
     asm.push_str("  sub rdx, rsi\n");
     asm.push_str("  mov rax, 1\n");
     asm.push_str("  mov rdi, 1\n");
     asm.push_str("  syscall\n");
-    asm.push_str("  add rsp, 40\n");
+    asm.push_str("  add rsp, 80\n");
     asm.push_str("  pop rbx\n");
+    emit_print_volatile_pops(asm);
 
     Ok(())
+}
+
+fn validate_print_format_operand(
+    format: PrintFormat,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(operand, Operand::Immediate(_)) {
+        return Ok(());
+    }
+
+    if let Some(expected) = print_format_operand_width(format) {
+        return match operand_width(operand, strings, label_name, stack)? {
+            Some(width) if width == memory_width_bits(expected) => Ok(()),
+            Some(width) => Err(format!(
+                "{} print operand must be {}-bit, found {}-bit operand",
+                print_format_name(format),
+                memory_width_bits(expected).bits(),
+                width.bits()
+            )),
+            None => Err(format!(
+                "{} print operand must have a known {}-bit width",
+                print_format_name(format),
+                memory_width_bits(expected).bits()
+            )),
+        };
+    }
+
+    match operand_width(operand, strings, label_name, stack)? {
+        Some(Width::Bits64) => Ok(()),
+        Some(width) => Err(format!(
+            "{} print operand must be 64-bit, found {}-bit operand",
+            print_format_name(format),
+            width.bits()
+        )),
+        None => Err(format!(
+            "{} print operand must be an integer immediate, const, 64-bit register, or 64-bit memory operand",
+            print_format_name(format)
+        )),
+    }
+}
+
+fn print_format_operand_width(format: PrintFormat) -> Option<MemoryWidth> {
+    match format {
+        PrintFormat::SignedDecimal(width) | PrintFormat::UnsignedDecimal(width) => Some(width),
+        PrintFormat::Pointer => Some(MemoryWidth::Ptr),
+        PrintFormat::Hex | PrintFormat::Binary | PrintFormat::Infer => None,
+    }
+}
+
+fn resolve_print_format(
+    format: PrintFormat,
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<PrintFormat, String> {
+    if format != PrintFormat::Infer {
+        return Ok(format);
+    }
+
+    match operand {
+        Operand::Immediate(_) => Ok(PrintFormat::SignedDecimal(MemoryWidth::I64)),
+        Operand::Ident(name) => {
+            if let Some((_, width)) = stack_scalar_slot(stack, name) {
+                return Ok(infer_print_format_for_width(width));
+            }
+
+            if stack_string_slot(stack, name).is_some() {
+                return Err(format!(
+                    "String stack variable {name:?} uses string formatting; pass it to {{}} by name"
+                ));
+            }
+
+            if let Some(binding) = strings
+                .integers
+                .get(&(label_name.to_string(), name.clone()))
+            {
+                return Ok(binding
+                    .width
+                    .map(infer_print_format_for_width)
+                    .unwrap_or(PrintFormat::SignedDecimal(MemoryWidth::I64)));
+            }
+
+            Err(format!(
+                "Cannot infer print format for {name:?}; use {{i64}}, {{u64}}, {{x}}, {{b}}, or {{ptr}}"
+            ))
+        }
+        Operand::Dereference { address, width } => {
+            let Some(width) = resolve_memory_width(address, *width, strings)? else {
+                return Err(String::from(
+                    "Cannot infer print format for memory operand without a known width; use {i64}, {u64}, {x}, {b}, or {ptr}",
+                ));
+            };
+
+            if width.is_float() {
+                return Err(String::from(
+                    "print operand does not support floating-point values yet",
+                ));
+            }
+
+            Ok(infer_print_format_for_width(width))
+        }
+        Operand::StringProperty { property, .. } => match property {
+            StringProperty::Len => Ok(PrintFormat::UnsignedDecimal(MemoryWidth::U64)),
+            StringProperty::Ptr => Ok(PrintFormat::Pointer),
+        },
+        Operand::Register(register) => Err(format!(
+            "Cannot infer print format for register {register}; use {{i64}}, {{u64}}, {{x}}, {{b}}, or {{ptr}}"
+        )),
+        _ => Err(String::from(
+            "Cannot infer print format for this operand; use {i64}, {u64}, {x}, {b}, or {ptr}",
+        )),
+    }
+}
+
+fn infer_print_format_for_width(width: MemoryWidth) -> PrintFormat {
+    match width {
+        MemoryWidth::I8 | MemoryWidth::I16 | MemoryWidth::I32 | MemoryWidth::I64 => {
+            PrintFormat::SignedDecimal(width)
+        }
+        MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32 | MemoryWidth::U64 => {
+            PrintFormat::UnsignedDecimal(width)
+        }
+        MemoryWidth::Ptr => PrintFormat::Pointer,
+        MemoryWidth::F32 | MemoryWidth::F64 => PrintFormat::Infer,
+    }
+}
+
+fn print_format_name(format: PrintFormat) -> &'static str {
+    match format {
+        PrintFormat::Infer => "inferred",
+        PrintFormat::SignedDecimal(MemoryWidth::I8) => "i8",
+        PrintFormat::SignedDecimal(MemoryWidth::I16) => "i16",
+        PrintFormat::SignedDecimal(MemoryWidth::I32) => "i32",
+        PrintFormat::SignedDecimal(MemoryWidth::I64) => "i64",
+        PrintFormat::UnsignedDecimal(MemoryWidth::U8) => "u8",
+        PrintFormat::UnsignedDecimal(MemoryWidth::U16) => "u16",
+        PrintFormat::UnsignedDecimal(MemoryWidth::U32) => "u32",
+        PrintFormat::UnsignedDecimal(MemoryWidth::U64) => "u64",
+        PrintFormat::SignedDecimal(_) | PrintFormat::UnsignedDecimal(_) => "integer",
+        PrintFormat::Hex => "hex",
+        PrintFormat::Binary => "binary",
+        PrintFormat::Pointer => "pointer",
+    }
 }
 
 fn emit_print_stack_string_instruction(
@@ -2061,11 +2319,13 @@ fn emit_print_stack_string_instruction(
     let (ptr_offset, len_offset) = stack_string_slot(stack, name)
         .ok_or_else(|| format!("Unknown string stack variable {name:?}"))?;
 
+    emit_print_volatile_pushes(asm);
     asm.push_str("  mov rax, 1\n");
     asm.push_str("  mov rdi, 1\n");
     asm.push_str(&format!("  mov rsi, qword ptr [rbp - {ptr_offset}]\n"));
     asm.push_str(&format!("  mov rdx, qword ptr [rbp - {len_offset}]\n"));
     asm.push_str("  syscall\n");
+    emit_print_volatile_pops(asm);
 
     Ok(())
 }
@@ -2273,22 +2533,49 @@ fn emit_read_len_arg(
 fn load_print_operand(
     asm: &mut String,
     operand: &Operand,
+    format: PrintFormat,
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    match operand_width(operand, strings, label_name, stack)? {
-        Some(Width::Bits8 | Width::Bits16) => {
-            let operand = emit_operand(operand, strings, label_name, stack)?;
+    if matches!(operand, Operand::Immediate(_)) {
+        let operand = emit_operand(operand, strings, label_name, stack)?;
+        asm.push_str(&format!("  mov rax, {operand}\n"));
+        return Ok(());
+    }
+
+    let operand = emit_operand(operand, strings, label_name, stack)?;
+
+    match format {
+        PrintFormat::SignedDecimal(MemoryWidth::I8) => {
+            asm.push_str(&format!("  movsx rax, {operand}\n"));
+        }
+        PrintFormat::SignedDecimal(MemoryWidth::I16) => {
+            asm.push_str(&format!("  movsx rax, {operand}\n"));
+        }
+        PrintFormat::SignedDecimal(MemoryWidth::I32) => {
+            asm.push_str(&format!("  movsxd rax, {operand}\n"));
+        }
+        PrintFormat::SignedDecimal(MemoryWidth::I64) => {
+            asm.push_str(&format!("  mov rax, {operand}\n"));
+        }
+        PrintFormat::UnsignedDecimal(MemoryWidth::U8) => {
             asm.push_str(&format!("  movzx rax, {operand}\n"));
         }
-        Some(Width::Bits32) => {
-            let operand = emit_operand(operand, strings, label_name, stack)?;
+        PrintFormat::UnsignedDecimal(MemoryWidth::U16) => {
+            asm.push_str(&format!("  movzx rax, {operand}\n"));
+        }
+        PrintFormat::UnsignedDecimal(MemoryWidth::U32) => {
             asm.push_str(&format!("  mov eax, {operand}\n"));
         }
-        _ => {
-            let operand = emit_operand(operand, strings, label_name, stack)?;
+        PrintFormat::UnsignedDecimal(MemoryWidth::U64)
+        | PrintFormat::Hex
+        | PrintFormat::Binary
+        | PrintFormat::Pointer => {
             asm.push_str(&format!("  mov rax, {operand}\n"));
+        }
+        PrintFormat::Infer | PrintFormat::SignedDecimal(_) | PrintFormat::UnsignedDecimal(_) => {
+            unreachable!()
         }
     }
 

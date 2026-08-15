@@ -69,6 +69,32 @@ fn emits_pair_arithmetic_from_source() {
 }
 
 #[test]
+fn compiles_and_runs_runtime_formatting() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/runtime_formatting.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("inferred signed=-7\n"));
+    assert!(stdout.contains("inferred unsigned=7\n"));
+    assert!(stdout.contains("inferred ptr=0x"));
+    assert!(stdout.contains("signed=-42\n"));
+    assert!(stdout.contains("unsigned=18446744073709551615\n"));
+    assert!(stdout.contains("hex=0x2a\n"));
+    assert!(stdout.contains("binary=0b101\n"));
+    assert!(stdout.contains("ptr=0x2a\n"));
+    assert!(stdout.contains("narrow signed=-1 -2 -3\n"));
+    assert!(stdout.contains("narrow unsigned=255\n"));
+}
+
+#[test]
 fn reads_stdin_into_runtime_string() {
     let _guard = CLI_LOCK.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_subsea"))

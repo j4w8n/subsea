@@ -2,8 +2,8 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
     Expression, FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp,
-    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintPart, Program,
-    ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
+    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
+    Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -558,12 +558,18 @@ impl Parser {
                 })
             }
             Some(Token::Register(name)) => Ok(Instruction::Print {
-                parts: vec![PrintPart::Operand(Operand::Register(name))],
+                parts: vec![PrintPart::FormattedOperand {
+                    format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                    operand: Operand::Register(name),
+                }],
             }),
             Some(Token::NumberLiteral(value)) => value
                 .parse::<i128>()
                 .map(|value| Instruction::Print {
-                    parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                    parts: vec![PrintPart::FormattedOperand {
+                        format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                        operand: Operand::Immediate(value),
+                    }],
                 })
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
             Some(Token::FloatLiteral(value)) => Err(format!(
@@ -573,7 +579,10 @@ impl Parser {
                 Some(Token::NumberLiteral(value)) => parse_signed_integer(&value, true)
                     .map_err(|_| format!("Invalid integer literal -{value}"))
                     .map(|value| Instruction::Print {
-                        parts: vec![PrintPart::Operand(Operand::Immediate(value))],
+                        parts: vec![PrintPart::FormattedOperand {
+                            format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                            operand: Operand::Immediate(value),
+                        }],
                     }),
                 Some(Token::FloatLiteral(value)) => Err(format!(
                     "Float literal -{value} cannot be printed directly yet; bind it with const name:f32 or const name:f64 first"
@@ -1145,42 +1154,55 @@ impl Parser {
         while matches!(self.peek(), Some(Token::Comma)) {
             self.advance();
 
-            match self.advance() {
-                Some(Token::Ident(name)) => args.push(name),
-                Some(token) => {
-                    return Err(format!(
-                        "Expected binding name after print format comma, found {token:?}"
-                    ));
-                }
-                None => {
-                    return Err(String::from(
-                        "Expected binding name after print format comma, found end of input",
-                    ));
-                }
-            }
+            args.push(self.parse_print_arg()?);
         }
 
-        let literal_parts = split_format_literal(&value)?;
-        if literal_parts.len() != args.len() + 1 {
+        let segments = split_format_literal(&value)?;
+        let placeholder_count = segments
+            .iter()
+            .filter(|segment| matches!(segment, FormatSegment::Placeholder(_)))
+            .count();
+        if placeholder_count != args.len() {
             return Err(format!(
                 "Print format expected {} argument(s), found {}",
-                literal_parts.len().saturating_sub(1),
+                placeholder_count,
                 args.len()
             ));
         }
 
         let mut parts = Vec::new();
-        for (index, literal) in literal_parts.into_iter().enumerate() {
-            if !literal.is_empty() {
-                parts.push(PrintPart::Literal(literal));
-            }
-
-            if let Some(arg) = args.get(index) {
-                parts.push(PrintPart::Binding(arg.clone()));
+        let mut args = args.into_iter();
+        for segment in segments {
+            match segment {
+                FormatSegment::Literal(literal) => {
+                    if !literal.is_empty() {
+                        parts.push(PrintPart::Literal(literal));
+                    }
+                }
+                FormatSegment::Placeholder(format) => {
+                    let arg = args
+                        .next()
+                        .ok_or_else(|| String::from("Internal error: missing print argument"))?;
+                    parts.push(print_part_for_format_arg(format, arg));
+                }
             }
         }
 
         Ok(Instruction::Print { parts })
+    }
+
+    fn parse_print_arg(&mut self) -> Result<PrintArg, String> {
+        if let Some(Token::Ident(name)) = self.peek().cloned()
+            && !matches!(
+                self.tokens.get(self.position + 1),
+                Some(Token::LBracket | Token::LocalIdent(_))
+            )
+        {
+            self.advance();
+            return Ok(PrintArg::Ident(name));
+        }
+
+        self.parse_operand().map(PrintArg::Operand)
     }
 
     fn parse_optional_binding_width(&mut self) -> Result<Option<MemoryWidth>, String> {
@@ -2447,33 +2469,86 @@ fn validate_operand_symbol(
     }
 }
 
-fn split_format_literal(value: &str) -> Result<Vec<String>, String> {
-    let mut parts = Vec::new();
+enum FormatSegment {
+    Literal(String),
+    Placeholder(Option<PrintFormat>),
+}
+
+enum PrintArg {
+    Ident(String),
+    Operand(Operand),
+}
+
+fn print_part_for_format_arg(format: Option<PrintFormat>, arg: PrintArg) -> PrintPart {
+    match (format, arg) {
+        (None, PrintArg::Ident(name)) => PrintPart::Binding(name),
+        (None, PrintArg::Operand(operand)) => PrintPart::FormattedOperand {
+            format: PrintFormat::Infer,
+            operand,
+        },
+        (Some(format), PrintArg::Ident(name)) => PrintPart::FormattedOperand {
+            format,
+            operand: Operand::Ident(name),
+        },
+        (Some(format), PrintArg::Operand(operand)) => {
+            PrintPart::FormattedOperand { format, operand }
+        }
+    }
+}
+
+fn split_format_literal(value: &str) -> Result<Vec<FormatSegment>, String> {
+    let mut segments = Vec::new();
     let mut current = String::new();
     let mut chars = value.chars().peekable();
 
     while let Some(char) = chars.next() {
         match char {
-            '{' => match chars.peek() {
-                Some('}') => {
-                    chars.next();
-                    parts.push(current);
-                    current = String::new();
+            '{' => {
+                segments.push(FormatSegment::Literal(current));
+                current = String::new();
+
+                let mut specifier = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some('{') => {
+                            return Err(String::from("Nested '{' in print format placeholder"));
+                        }
+                        Some(char) => specifier.push(char),
+                        None => return Err(String::from("Unclosed '{' in print format string")),
+                    }
                 }
-                _ => {
-                    return Err(String::from(
-                        "Only '{}' print format placeholders are supported",
-                    ));
-                }
-            },
+
+                let format = match specifier.as_str() {
+                    "" => None,
+                    "i8" => Some(PrintFormat::SignedDecimal(MemoryWidth::I8)),
+                    "i16" => Some(PrintFormat::SignedDecimal(MemoryWidth::I16)),
+                    "i32" => Some(PrintFormat::SignedDecimal(MemoryWidth::I32)),
+                    "i64" => Some(PrintFormat::SignedDecimal(MemoryWidth::I64)),
+                    "u8" => Some(PrintFormat::UnsignedDecimal(MemoryWidth::U8)),
+                    "u16" => Some(PrintFormat::UnsignedDecimal(MemoryWidth::U16)),
+                    "u32" => Some(PrintFormat::UnsignedDecimal(MemoryWidth::U32)),
+                    "u64" => Some(PrintFormat::UnsignedDecimal(MemoryWidth::U64)),
+                    "x" => Some(PrintFormat::Hex),
+                    "b" => Some(PrintFormat::Binary),
+                    "ptr" => Some(PrintFormat::Pointer),
+                    _ => {
+                        return Err(format!(
+                            "Unknown print format {{{specifier}}}; expected {{}}, {{i8}}, {{i16}}, {{i32}}, {{i64}}, {{u8}}, {{u16}}, {{u32}}, {{u64}}, {{x}}, {{b}}, or {{ptr}}"
+                        ));
+                    }
+                };
+
+                segments.push(FormatSegment::Placeholder(format));
+            }
             '}' => return Err(String::from("Unmatched '}' in print format string")),
             _ => current.push(char),
         }
     }
 
-    parts.push(current);
+    segments.push(FormatSegment::Literal(current));
 
-    Ok(parts)
+    Ok(segments)
 }
 
 fn is_register_name(s: &str) -> bool {
