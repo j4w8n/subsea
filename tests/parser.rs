@@ -974,6 +974,82 @@ fn rejects_unknown_width_conversion() {
 }
 
 #[test]
+fn parses_string_bytes_assignment_to_raw_memory() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::LBracket,
+        treg("rax"),
+        Token::RBracket,
+        Token::Equals,
+        text("Hi\n"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Dereference {
+                address: subsea::ast::Address {
+                    first: subsea::ast::AddressTerm::Register(s("rax")),
+                    rest: Vec::new(),
+                },
+                width: None,
+            }),
+            value: AssignmentValue::StringBytes { value: s("Hi\n") },
+        }]
+    );
+}
+
+#[test]
+fn parses_string_bytes_assignment_to_declared_memory_index() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        tid("buf"),
+        Token::LBracket,
+        tnum("0"),
+        Token::RBracket,
+        Token::Equals,
+        text("Hi\n"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Dereference {
+                address: subsea::ast::Address {
+                    first: subsea::ast::AddressTerm::Ident(s("buf")),
+                    rest: vec![(
+                        subsea::ast::AddressOperator::Add,
+                        subsea::ast::AddressTerm::Immediate(0)
+                    )],
+                },
+                width: None,
+            }),
+            value: AssignmentValue::StringBytes { value: s("Hi\n") },
+        }]
+    );
+}
+
+#[test]
+fn rejects_empty_string_bytes_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::LBracket,
+        treg("rax"),
+        Token::RBracket,
+        Token::Equals,
+        text(""),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(error, "String byte assignment cannot be empty");
+}
+
+#[test]
 fn parses_boolean_comparison_assignment() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

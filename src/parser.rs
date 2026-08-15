@@ -903,6 +903,8 @@ impl Parser {
             self.parse_intrinsic_call_assignment_value()?
         } else if self.next_tokens_are_linux_reserve_call() {
             self.parse_linux_reserve_assignment_value()?
+        } else if matches!(self.peek(), Some(Token::Text(_))) {
+            self.parse_string_bytes_assignment_value()?
         } else {
             let expression = self.parse_expression(0)?;
             match self.peek() {
@@ -967,6 +969,18 @@ impl Parser {
         self.expect(Token::RParen, "Expected ')' after reserve size")?;
 
         Ok(AssignmentValue::LinuxReserve { len })
+    }
+
+    fn parse_string_bytes_assignment_value(&mut self) -> Result<AssignmentValue, String> {
+        let Some(Token::Text(value)) = self.advance() else {
+            unreachable!()
+        };
+
+        if value.is_empty() {
+            return Err(String::from("String byte assignment cannot be empty"));
+        }
+
+        Ok(AssignmentValue::StringBytes { value })
     }
 
     fn parse_intrinsic_call_assignment_value(&mut self) -> Result<AssignmentValue, String> {

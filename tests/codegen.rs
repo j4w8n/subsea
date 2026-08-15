@@ -1,11 +1,11 @@
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
-    Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
-    Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand,
-    PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource, RegisterPair, StringInitializer,
-    StringProperty, WidthConversion,
+    Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
+    CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
+    Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
+    MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource,
+    RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -640,6 +640,99 @@ fn emits_linux_release() {
     assert!(asm.contains("  mov rsi, 4096\n"));
     assert!(asm.contains("  mov rax, 11\n"));
     assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn emits_string_bytes_assignment_to_raw_memory() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(s("rax")),
+                rest: Vec::new(),
+            },
+            width: None,
+        }),
+        value: AssignmentValue::StringBytes { value: s("Hi\n") },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov byte ptr [rax], 72\n"));
+    assert!(asm.contains("  mov byte ptr [rax + 1], 105\n"));
+    assert!(asm.contains("  mov byte ptr [rax + 2], 10\n"));
+}
+
+#[test]
+fn emits_string_bytes_assignment_to_declared_memory_index() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("buf"),
+            width: MemoryWidth::U8,
+            count: 16,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(Operand::Dereference {
+                        address: Address {
+                            first: AddressTerm::Ident(s("buf")),
+                            rest: vec![(AddressOperator::Add, AddressTerm::Immediate(0))],
+                        },
+                        width: None,
+                    }),
+                    value: AssignmentValue::StringBytes { value: s("Hi\n") },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov byte ptr [buf + 0], 72\n"));
+    assert!(asm.contains("  mov byte ptr [buf + 0 + 1], 105\n"));
+    assert!(asm.contains("  mov byte ptr [buf + 0 + 2], 10\n"));
+}
+
+#[test]
+fn rejects_string_bytes_assignment_to_register() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::StringBytes { value: s("Hi\n") },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "String byte assignment destination must be a memory operand"
+    );
+}
+
+#[test]
+fn rejects_string_bytes_assignment_with_explicit_width() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(s("rax")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::U8),
+        }),
+        value: AssignmentValue::StringBytes { value: s("Hi\n") },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "String byte assignment destination cannot specify a memory width"
+    );
 }
 
 #[test]

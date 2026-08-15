@@ -1296,6 +1296,7 @@ fn collect_assignment_value_float_literals(
         | AssignmentValue::IntrinsicCall { .. }
         | AssignmentValue::LinuxReserve { .. }
         | AssignmentValue::PairBinary { .. }
+        | AssignmentValue::StringBytes { .. }
         | AssignmentValue::WideMultiply { .. }
         | AssignmentValue::WideDivide { .. } => {}
     }
@@ -2950,6 +2951,10 @@ fn emit_assignment(
             let dst = assignment_operand_target(dst)?;
             emit_linux_reserve_assignment(asm, dst, len, strings, label_name, stack)
         }
+        AssignmentValue::StringBytes { value } => {
+            let dst = assignment_operand_target(dst)?;
+            emit_string_bytes_assignment(asm, dst, value)
+        }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, false, lhs, rhs, strings, label_name, stack,
         ),
@@ -2964,6 +2969,36 @@ fn emit_assignment(
 
 fn assignment_value_uses_linux_reserve(value: &AssignmentValue) -> bool {
     matches!(value, AssignmentValue::LinuxReserve { .. })
+}
+
+fn emit_string_bytes_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    value: &str,
+) -> Result<(), String> {
+    let Operand::Dereference { address, width } = dst else {
+        return Err(String::from(
+            "String byte assignment destination must be a memory operand",
+        ));
+    };
+
+    if width.is_some() {
+        return Err(String::from(
+            "String byte assignment destination cannot specify a memory width",
+        ));
+    }
+
+    let base = emit_address(address);
+    for (index, byte) in value.bytes().enumerate() {
+        let address = if index == 0 {
+            base.clone()
+        } else {
+            format!("{base} + {index}")
+        };
+        asm.push_str(&format!("  mov byte ptr [{address}], {byte}\n"));
+    }
+
+    Ok(())
 }
 
 fn emit_expression_assignment(

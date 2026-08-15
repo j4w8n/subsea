@@ -2,9 +2,7 @@ main: {
   rax = linux.reserve(4096)
   jmp .error if rax i< 0
 
-  [rax]:u8 = 72
-  [rax + 1]:u8 = 105
-  [rax + 2]:u8 = 10
+  [rax] = "Hi\n"
 
   stack message:str = slice(rax, 3)
   linux.print message

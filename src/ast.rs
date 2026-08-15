@@ -276,7 +276,7 @@ fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnM
         }
         AssignmentValue::LinuxReserve { len } => visit(len),
         AssignmentValue::Condition(condition) => condition.visit_operands(visit),
-        AssignmentValue::PairBinary { .. } => {}
+        AssignmentValue::PairBinary { .. } | AssignmentValue::StringBytes { .. } => {}
     }
 }
 
@@ -308,7 +308,7 @@ fn visit_assignment_value_operands_mut(
         }
         AssignmentValue::LinuxReserve { len } => visit(len),
         AssignmentValue::Condition(condition) => condition.visit_operands_mut(visit),
-        AssignmentValue::PairBinary { .. } => {}
+        AssignmentValue::PairBinary { .. } | AssignmentValue::StringBytes { .. } => {}
     }
 }
 
@@ -450,6 +450,9 @@ pub enum AssignmentValue {
     },
     LinuxReserve {
         len: Operand,
+    },
+    StringBytes {
+        value: String,
     },
 }
 

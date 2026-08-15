@@ -134,6 +134,22 @@ fn reserves_and_releases_linux_memory() {
 }
 
 #[test]
+fn assigns_string_bytes_to_memory() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/string_byte_assignment.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hi\nBye\n");
+}
+
+#[test]
 fn reads_stack_string_properties() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
