@@ -677,7 +677,8 @@ String literals can be assigned to memory operands to copy their bytes into writ
 mem buf:u8(16)
 
 main: {
-  [buf] = "Hi\n"
+  const hi = "Hi\n"
+  [buf] = hi
   buf[3] = "Bye\n"
 
   linux.exit 0
@@ -689,6 +690,7 @@ String byte assignment is memory-only. Use a memory destination without an expli
 ```ss
 [rax] = "Hi\n"     // valid
 buf[0] = "Hi\n"   // valid
+[rax] = hi         // valid when hi is a string binding
 rax = "Hi\n"      // invalid: destination is not memory
 [rax]:u8 = "Hi\n" // invalid: string writes multiple bytes
 ```
