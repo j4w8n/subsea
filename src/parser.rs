@@ -514,6 +514,10 @@ impl Parser {
             }
             ("linux", "print") => self.parse_print_instruction(),
             ("linux", "read") => self.parse_read_instruction(),
+            ("linux", "release") => self.parse_release_instruction(),
+            ("linux", "reserve") => Err(String::from(
+                "linux.reserve(size) returns a pointer; assign it to a destination",
+            )),
             ("linux", "syscall") => Ok(Instruction::Syscall),
             ("x86", operation) => Err(format!(
                 "Unknown instruction \"x86.{operation}\"; use x86 \"{operation}\" for raw x86 assembly"
@@ -733,6 +737,16 @@ impl Parser {
         Ok(Instruction::Read { src, dst, len })
     }
 
+    fn parse_release_instruction(&mut self) -> Result<Instruction, String> {
+        self.expect(Token::LParen, "Expected '(' after linux.release")?;
+        let ptr = self.parse_operand()?;
+        self.expect(Token::Comma, "Expected ',' after release pointer")?;
+        let len = self.parse_operand()?;
+        self.expect(Token::RParen, "Expected ')' after release size")?;
+
+        Ok(Instruction::Release { ptr, len })
+    }
+
     fn parse_string_initializer(&mut self) -> Result<StringInitializer, String> {
         match self.advance() {
             Some(Token::Text(value)) => Ok(StringInitializer::Literal(value)),
@@ -887,6 +901,8 @@ impl Parser {
             }
         } else if self.next_tokens_are_intrinsic_call() {
             self.parse_intrinsic_call_assignment_value()?
+        } else if self.next_tokens_are_linux_reserve_call() {
+            self.parse_linux_reserve_assignment_value()?
         } else {
             let expression = self.parse_expression(0)?;
             match self.peek() {
@@ -936,6 +952,21 @@ impl Parser {
     fn next_tokens_are_intrinsic_call(&self) -> bool {
         matches!(self.peek(), Some(Token::Ident(_)))
             && matches!(self.tokens.get(self.position + 1), Some(Token::LParen))
+    }
+
+    fn next_tokens_are_linux_reserve_call(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(namespace)) if namespace == "linux")
+            && matches!(self.tokens.get(self.position + 1), Some(Token::LocalIdent(operation)) if operation == "reserve")
+    }
+
+    fn parse_linux_reserve_assignment_value(&mut self) -> Result<AssignmentValue, String> {
+        self.advance();
+        self.advance();
+        self.expect(Token::LParen, "Expected '(' after linux.reserve")?;
+        let len = self.parse_operand()?;
+        self.expect(Token::RParen, "Expected ')' after reserve size")?;
+
+        Ok(AssignmentValue::LinuxReserve { len })
     }
 
     fn parse_intrinsic_call_assignment_value(&mut self) -> Result<AssignmentValue, String> {

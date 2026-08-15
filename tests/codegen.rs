@@ -607,6 +607,42 @@ fn emits_read_from_stdin() {
 }
 
 #[test]
+fn emits_linux_reserve() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::LinuxReserve {
+            len: Operand::Immediate(4096),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rsi, 4096\n"));
+    assert!(asm.contains("  mov rax, 9\n"));
+    assert!(asm.contains("  mov rdi, 0\n"));
+    assert!(asm.contains("  mov rdx, 3\n"));
+    assert!(asm.contains("  mov r10, 34\n"));
+    assert!(asm.contains("  mov r8, -1\n"));
+    assert!(asm.contains("  mov r9, 0\n"));
+    assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
+fn emits_linux_release() {
+    let program = main_program(vec![Instruction::Release {
+        ptr: reg("rbx"),
+        len: Operand::Immediate(4096),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rdi, rbx\n"));
+    assert!(asm.contains("  mov rsi, 4096\n"));
+    assert!(asm.contains("  mov rax, 11\n"));
+    assert!(asm.contains("  syscall\n"));
+}
+
+#[test]
 fn emits_stack_cleanup_before_ret() {
     let program = main_program(vec![
         Instruction::Stack {
@@ -1976,6 +2012,20 @@ fn freestanding_rejects_print() {
     let error = emit_x86_64_asm(&program, Target::X86_64Free).unwrap_err();
 
     assert_eq!(error, "print is only supported for target x86_64");
+}
+
+#[test]
+fn freestanding_rejects_linux_reserve() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::LinuxReserve {
+            len: Operand::Immediate(4096),
+        },
+    }]);
+
+    let error = emit_x86_64_asm(&program, Target::X86_64Free).unwrap_err();
+
+    assert_eq!(error, "reserve is only supported for target x86_64");
 }
 
 #[test]

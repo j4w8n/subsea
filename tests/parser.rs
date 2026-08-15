@@ -556,6 +556,69 @@ fn parses_read_from_stdin() {
 }
 
 #[test]
+fn parses_linux_reserve_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tid("linux"),
+        tlocal("reserve"),
+        Token::LParen,
+        tnum("4096"),
+        Token::RParen,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::LinuxReserve {
+                len: Operand::Immediate(4096),
+            },
+        }]
+    );
+}
+
+#[test]
+fn parses_linux_release_instruction() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend(linux("release"));
+    tokens.extend([
+        Token::LParen,
+        treg("rax"),
+        Token::Comma,
+        tnum("4096"),
+        Token::RParen,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::Release {
+            ptr: reg("rax"),
+            len: Operand::Immediate(4096),
+        }]
+    );
+}
+
+#[test]
+fn rejects_linux_release_without_parentheses() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend(linux("release"));
+    tokens.extend([treg("rax"), Token::Comma, tnum("4096")]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Expected '(' after linux.release, found Register(\"rax\")"
+    );
+}
+
+#[test]
 fn parses_assignment_math() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

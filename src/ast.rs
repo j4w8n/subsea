@@ -120,6 +120,10 @@ pub enum Instruction {
         dst: Operand,
         len: Operand,
     },
+    Release {
+        ptr: Operand,
+        len: Operand,
+    },
     Ret,
     Stack {
         name: String,
@@ -174,6 +178,10 @@ impl Instruction {
                 visit(dst);
                 visit(len);
             }
+            Instruction::Release { ptr, len } => {
+                visit(ptr);
+                visit(len);
+            }
             Instruction::Stack { value, .. } => visit(value),
             Instruction::StackString {
                 value: StringInitializer::Slice { ptr, len },
@@ -226,6 +234,10 @@ impl Instruction {
                 visit(dst);
                 visit(len);
             }
+            Instruction::Release { ptr, len } => {
+                visit(ptr);
+                visit(len);
+            }
             Instruction::Stack { value, .. } => visit(value),
             Instruction::StackString {
                 value: StringInitializer::Slice { ptr, len },
@@ -262,6 +274,7 @@ fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnM
                 visit(arg);
             }
         }
+        AssignmentValue::LinuxReserve { len } => visit(len),
         AssignmentValue::Condition(condition) => condition.visit_operands(visit),
         AssignmentValue::PairBinary { .. } => {}
     }
@@ -293,6 +306,7 @@ fn visit_assignment_value_operands_mut(
                 visit(arg);
             }
         }
+        AssignmentValue::LinuxReserve { len } => visit(len),
         AssignmentValue::Condition(condition) => condition.visit_operands_mut(visit),
         AssignmentValue::PairBinary { .. } => {}
     }
@@ -433,6 +447,9 @@ pub enum AssignmentValue {
         op: IntrinsicOp,
         width: MemoryWidth,
         args: Vec<Operand>,
+    },
+    LinuxReserve {
+        len: Operand,
     },
 }
 

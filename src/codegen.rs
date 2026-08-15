@@ -103,6 +103,10 @@ pub fn emit_x86_64_asm_with_entry_symbol(
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Assign { dst, value } => {
+                    if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
+                        return Err(String::from("reserve is only supported for target x86_64"));
+                    }
+
                     emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
                 }
                 Instruction::AssignIf {
@@ -110,6 +114,10 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                     value,
                     condition,
                 } => {
+                    if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
+                        return Err(String::from("reserve is only supported for target x86_64"));
+                    }
+
                     conditional_jump_index += 1;
                     let skip_label = format!(
                         ".L.__subsea.{}.assign_if_{}_skip",
@@ -275,6 +283,13 @@ pub fn emit_x86_64_asm_with_entry_symbol(
                     }
 
                     emit_read_instruction(&mut asm, src, dst, len, &strings, &label.name, &stack)?;
+                }
+                Instruction::Release { ptr, len } => {
+                    if target.is_freestanding() {
+                        return Err(String::from("release is only supported for target x86_64"));
+                    }
+
+                    emit_release_instruction(&mut asm, ptr, len, &strings, &label.name, &stack)?;
                 }
                 Instruction::Ret => {
                     if stack.has_slots() {
@@ -1279,6 +1294,7 @@ fn collect_assignment_value_float_literals(
         AssignmentValue::Operand(_)
         | AssignmentValue::BitwiseUnary { .. }
         | AssignmentValue::IntrinsicCall { .. }
+        | AssignmentValue::LinuxReserve { .. }
         | AssignmentValue::PairBinary { .. }
         | AssignmentValue::WideMultiply { .. }
         | AssignmentValue::WideDivide { .. } => {}
@@ -2462,6 +2478,149 @@ fn emit_read_instruction(
     Ok(())
 }
 
+fn emit_linux_reserve_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_reserve_len_arg(asm, len, strings, label_name, stack)?;
+    asm.push_str("  mov rax, 9\n");
+    asm.push_str("  mov rdi, 0\n");
+    asm.push_str("  mov rdx, 3\n");
+    asm.push_str("  mov r10, 34\n");
+    asm.push_str("  mov r8, -1\n");
+    asm.push_str("  mov r9, 0\n");
+    asm.push_str("  syscall\n");
+
+    if dst != &Operand::Register(String::from("rax")) {
+        emit_copy_instruction(
+            asm,
+            &Operand::Register(String::from("rax")),
+            dst,
+            strings,
+            label_name,
+            stack,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn emit_release_instruction(
+    asm: &mut String,
+    ptr: &Operand,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_release_ptr_arg(asm, ptr, strings, label_name, stack)?;
+    emit_release_len_arg(asm, len, strings, label_name, stack)?;
+    asm.push_str("  mov rax, 11\n");
+    asm.push_str("  syscall\n");
+
+    Ok(())
+}
+
+fn emit_reserve_len_arg(
+    asm: &mut String,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_linux_memory_size_arg(asm, "rsi", "reserve size", len, strings, label_name, stack)
+}
+
+fn emit_release_ptr_arg(
+    asm: &mut String,
+    ptr: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_linux_memory_pointer_arg(asm, ptr, strings, label_name, stack)
+}
+
+fn emit_release_len_arg(
+    asm: &mut String,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if matches!(len, Operand::Register(register) if register == "rdi") {
+        return Err(String::from(
+            "release size cannot use rdi because release uses rdi for the pointer",
+        ));
+    }
+
+    emit_linux_memory_size_arg(asm, "rsi", "release size", len, strings, label_name, stack)
+}
+
+fn emit_linux_memory_pointer_arg(
+    asm: &mut String,
+    ptr: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match ptr {
+        Operand::Pointer(name) => {
+            asm.push_str(&format!("  lea rdi, [rip + {name}]\n"));
+            Ok(())
+        }
+        _ => match operand_width(ptr, strings, label_name, stack)? {
+            Some(Width::Bits64) => {
+                let ptr = emit_operand(ptr, strings, label_name, stack)?;
+                asm.push_str(&format!("  mov rdi, {ptr}\n"));
+                Ok(())
+            }
+            Some(width) => Err(format!(
+                "release pointer must be 64-bit, found {}-bit operand",
+                width.bits()
+            )),
+            None => Err(String::from(
+                "release pointer must be address-of memory, a 64-bit register, pointer memory, or a 64-bit stack variable",
+            )),
+        },
+    }
+}
+
+fn emit_linux_memory_size_arg(
+    asm: &mut String,
+    dst_register: &str,
+    description: &str,
+    len: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if let Some(value) = immediate_value(len, strings, label_name, stack) {
+        validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
+        asm.push_str(&format!("  mov {dst_register}, {value}\n"));
+        return Ok(());
+    }
+
+    match operand_width(len, strings, label_name, stack)? {
+        Some(Width::Bits64) => {
+            let len = emit_operand(len, strings, label_name, stack)?;
+            asm.push_str(&format!("  mov {dst_register}, {len}\n"));
+            Ok(())
+        }
+        Some(width) => Err(format!(
+            "{description} must be 64-bit, found {}-bit operand",
+            width.bits()
+        )),
+        None => Err(format!(
+            "{description} must be an integer immediate, const, 64-bit register, or 64-bit stack variable"
+        )),
+    }
+}
+
 fn emit_read_src_arg(asm: &mut String, src: &ReadSource) {
     match src {
         ReadSource::Stdin => asm.push_str("  mov rdi, 0\n"),
@@ -2787,6 +2946,10 @@ fn emit_assignment(
         AssignmentValue::IntrinsicCall { op, width, args } => {
             emit_intrinsic_call_assignment(asm, dst, *op, *width, args, strings, label_name, stack)
         }
+        AssignmentValue::LinuxReserve { len } => {
+            let dst = assignment_operand_target(dst)?;
+            emit_linux_reserve_assignment(asm, dst, len, strings, label_name, stack)
+        }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, false, lhs, rhs, strings, label_name, stack,
         ),
@@ -2797,6 +2960,10 @@ fn emit_assignment(
             emit_pair_binary_assignment(asm, dst, *op, lhs, rhs)
         }
     }
+}
+
+fn assignment_value_uses_linux_reserve(value: &AssignmentValue) -> bool {
+    matches!(value, AssignmentValue::LinuxReserve { .. })
 }
 
 fn emit_expression_assignment(

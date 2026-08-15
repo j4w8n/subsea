@@ -118,6 +118,22 @@ fn reads_stdin_into_runtime_string() {
 }
 
 #[test]
+fn reserves_and_releases_linux_memory() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/reserve_release.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hi\n");
+}
+
+#[test]
 fn reads_stack_string_properties() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
