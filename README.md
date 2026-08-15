@@ -69,6 +69,28 @@ rdx:rax = 100 u* count
 rdx:rax = r10 u/ 10
 ```
 
+Register pairs can also be used for 128-bit add-with-carry and subtract-with-borrow. Pair operands use `high:low` order, matching `rdx:rax`:
+
+```ss
+// add with carry
+rdx:rax = rdx:rax + rcx:rbx
+
+// subtract with borrow
+rdx:rax = rdx:rax - rcx:rbx
+```
+
+The low halves are added or subtracted first, then the high halves consume the carry or borrow:
+
+```asm
+add rax, rbx
+adc rdx, rcx
+
+sub rax, rbx
+sbb rdx, rcx
+```
+
+For now, pair add/sub requires 64-bit integer registers. The destination pair must match the left operand pair so every changed register is visible in the assignment. Destination high/low registers must be different, and the right high register cannot overlap the destination low register because the low operation runs first.
+
 Arithmetic expression lowering may also use `r10` or `r11` as scratch registers. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on `r10` or `r11` being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
 
 ## Compile-time Bindings
