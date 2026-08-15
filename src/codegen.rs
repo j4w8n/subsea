@@ -2,8 +2,8 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem,
     ExprOp, Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
-    MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
-    StringProperty, WidthConversion,
+    MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintPart, Program, ReadSource, RegisterPair,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1257,6 +1257,7 @@ fn collect_assignment_value_float_literals(
         AssignmentValue::Operand(_)
         | AssignmentValue::BitwiseUnary { .. }
         | AssignmentValue::IntrinsicCall { .. }
+        | AssignmentValue::PairBinary { .. }
         | AssignmentValue::WideMultiply { .. }
         | AssignmentValue::WideDivide { .. } => {}
     }
@@ -1638,10 +1639,21 @@ fn validate_instruction_does_not_use_rbp(
     label_name: &str,
 ) -> Result<(), String> {
     if let Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair { high, low },
+        dst: AssignmentTarget::RegisterPair(RegisterPair { high, low }),
         ..
     } = instruction
         && (is_rbp_register(high) || is_rbp_register(low))
+    {
+        return Err(format!(
+            "Label {label_name:?} declares stack variables, so rbp is reserved"
+        ));
+    }
+
+    if let Instruction::Assign {
+        value: AssignmentValue::PairBinary { lhs, rhs, .. },
+        ..
+    } = instruction
+        && (register_pair_uses_rbp(lhs) || register_pair_uses_rbp(rhs))
     {
         return Err(format!(
             "Label {label_name:?} declares stack variables, so rbp is reserved"
@@ -1724,6 +1736,10 @@ fn align_to(value: usize, alignment: usize) -> usize {
 
 fn is_rbp_register(name: &str) -> bool {
     matches!(name, "rbp" | "ebp" | "bp" | "bpl")
+}
+
+fn register_pair_uses_rbp(pair: &RegisterPair) -> bool {
+    is_rbp_register(&pair.high) || is_rbp_register(&pair.low)
 }
 
 fn operand_uses_rbp(operand: &Operand) -> bool {
@@ -2490,6 +2506,9 @@ fn emit_assignment(
         AssignmentValue::WideDivide { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, true, lhs, rhs, strings, label_name, stack,
         ),
+        AssignmentValue::PairBinary { op, lhs, rhs } => {
+            emit_pair_binary_assignment(asm, dst, *op, lhs, rhs)
+        }
     }
 }
 
@@ -3166,6 +3185,81 @@ fn emit_wide_math_assignment(
     Ok(())
 }
 
+fn emit_pair_binary_assignment(
+    asm: &mut String,
+    dst: &AssignmentTarget,
+    op: PairBinaryOp,
+    lhs: &RegisterPair,
+    rhs: &RegisterPair,
+) -> Result<(), String> {
+    let AssignmentTarget::RegisterPair(dst) = dst else {
+        return Err(String::from(
+            "Pair arithmetic destination must be a register pair",
+        ));
+    };
+
+    validate_pair_binary_assignment(dst, lhs, rhs)?;
+
+    let (low_opcode, high_opcode) = match op {
+        PairBinaryOp::Add => ("add", "adc"),
+        PairBinaryOp::Subtract => ("sub", "sbb"),
+    };
+
+    asm.push_str(&format!("  {low_opcode} {}, {}\n", dst.low, rhs.low));
+    asm.push_str(&format!("  {high_opcode} {}, {}\n", dst.high, rhs.high));
+
+    Ok(())
+}
+
+fn validate_pair_binary_assignment(
+    dst: &RegisterPair,
+    lhs: &RegisterPair,
+    rhs: &RegisterPair,
+) -> Result<(), String> {
+    if dst != lhs {
+        return Err(format!(
+            "Pair arithmetic left operand must match destination; found {}:{} = {}:{} ...",
+            dst.high, dst.low, lhs.high, lhs.low
+        ));
+    }
+
+    if same_register_family(&dst.high, &dst.low) {
+        return Err(format!(
+            "Pair arithmetic destination registers must be different, found {}:{}",
+            dst.high, dst.low
+        ));
+    }
+
+    if same_register_family(&rhs.high, &dst.low) {
+        return Err(format!(
+            "Pair arithmetic right high register {} cannot overlap destination low register {}",
+            rhs.high, dst.low
+        ));
+    }
+
+    validate_pair_binary_register("Pair arithmetic destination high register", &dst.high)?;
+    validate_pair_binary_register("Pair arithmetic destination low register", &dst.low)?;
+    validate_pair_binary_register("Pair arithmetic right high register", &rhs.high)?;
+    validate_pair_binary_register("Pair arithmetic right low register", &rhs.low)?;
+
+    Ok(())
+}
+
+fn validate_pair_binary_register(name: &str, register: &str) -> Result<(), String> {
+    if is_xmm_register(register) {
+        return Err(format!("{name} must be a 64-bit integer register"));
+    }
+
+    match register_width(register) {
+        Some(Width::Bits64) => Ok(()),
+        Some(width) => Err(format!(
+            "{name} must be 64-bit, found {}-bit register {register}",
+            width.bits()
+        )),
+        None => Err(format!("{name} must be a register, found {register}")),
+    }
+}
+
 fn emit_intrinsic_call_assignment(
     asm: &mut String,
     dst: &AssignmentTarget,
@@ -3797,7 +3891,7 @@ fn validate_shift_assignment_does_not_clobber_count(
 fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String> {
     match dst {
         AssignmentTarget::Operand(operand) => Ok(operand),
-        AssignmentTarget::RegisterPair { .. } => Err(String::from(
+        AssignmentTarget::RegisterPair(_) => Err(String::from(
             "Register-pair assignment requires a widened multiply right side",
         )),
     }
@@ -3805,8 +3899,12 @@ fn assignment_operand_target(dst: &AssignmentTarget) -> Result<&Operand, String>
 
 fn validate_wide_math_target(operation: &str, dst: &AssignmentTarget) -> Result<(), String> {
     match dst {
-        AssignmentTarget::RegisterPair { high, low } if high == "rdx" && low == "rax" => Ok(()),
-        AssignmentTarget::RegisterPair { high, low } => Err(format!(
+        AssignmentTarget::RegisterPair(RegisterPair { high, low })
+            if high == "rdx" && low == "rax" =>
+        {
+            Ok(())
+        }
+        AssignmentTarget::RegisterPair(RegisterPair { high, low }) => Err(format!(
             "{operation} destination must be rdx:rax, found {high}:{low}"
         )),
         AssignmentTarget::Operand(_) => Err(String::from(

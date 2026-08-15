@@ -49,6 +49,26 @@ fn compiles_and_runs_indirect_control_flow() {
 }
 
 #[test]
+fn emits_pair_arithmetic_from_source() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/pair_arithmetic.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = String::from_utf8_lossy(&output.stdout);
+    assert!(asm.contains("  add rax, rbx\n"));
+    assert!(asm.contains("  adc rdx, rcx\n"));
+    assert!(asm.contains("  sub rax, rbx\n"));
+    assert!(asm.contains("  sbb rdx, rcx\n"));
+}
+
+#[test]
 fn reads_stdin_into_runtime_string() {
     let _guard = CLI_LOCK.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_subsea"))

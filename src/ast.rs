@@ -259,7 +259,14 @@ fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnM
             }
         }
         AssignmentValue::Condition(condition) => condition.visit_operands(visit),
+        AssignmentValue::PairBinary { .. } => {}
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RegisterPair {
+    pub high: String,
+    pub low: String,
 }
 
 fn visit_assignment_value_operands_mut(
@@ -283,6 +290,7 @@ fn visit_assignment_value_operands_mut(
             }
         }
         AssignmentValue::Condition(condition) => condition.visit_operands_mut(visit),
+        AssignmentValue::PairBinary { .. } => {}
     }
 }
 
@@ -379,7 +387,7 @@ pub enum CompareOp {
 #[derive(Debug, PartialEq, Clone)]
 pub enum AssignmentTarget {
     Operand(Operand),
-    RegisterPair { high: String, low: String },
+    RegisterPair(RegisterPair),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -412,11 +420,22 @@ pub enum AssignmentValue {
         lhs: Operand,
         rhs: Operand,
     },
+    PairBinary {
+        op: PairBinaryOp,
+        lhs: RegisterPair,
+        rhs: RegisterPair,
+    },
     IntrinsicCall {
         op: IntrinsicOp,
         width: MemoryWidth,
         args: Vec<Operand>,
     },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PairBinaryOp {
+    Add,
+    Subtract,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

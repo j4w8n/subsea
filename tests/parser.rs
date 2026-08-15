@@ -1,8 +1,8 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
-    IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart,
-    ReadSource, StringInitializer, StringProperty, WidthConversion,
+    IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp,
+    PrintPart, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::grammar::Token;
 use subsea::parser::{Parser, validate_program_symbols};
@@ -57,6 +57,13 @@ fn ptr(value: &str) -> Operand {
 
 fn reg(value: &str) -> Operand {
     Operand::Register(s(value))
+}
+
+fn rpair(high: &str, low: &str) -> RegisterPair {
+    RegisterPair {
+        high: s(high),
+        low: s(low),
+    }
 }
 
 fn empty_main_prefix() -> Vec<Token> {
@@ -1004,10 +1011,7 @@ fn parses_widened_multiply_assignment() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::RegisterPair {
-                high: s("rdx"),
-                low: s("rax"),
-            },
+            dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
             value: AssignmentValue::WideMultiply {
                 signed: false,
                 lhs: reg("rbx"),
@@ -1035,14 +1039,75 @@ fn parses_widened_divide_assignment() {
     assert_eq!(
         program.labels[0].instructions[0],
         Instruction::Assign {
-            dst: AssignmentTarget::RegisterPair {
-                high: s("rdx"),
-                low: s("rax"),
-            },
+            dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
             value: AssignmentValue::WideDivide {
                 signed: true,
                 lhs: reg("rbx"),
                 rhs: reg("rcx"),
+            },
+        }
+    );
+}
+
+#[test]
+fn parses_pair_add_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rdx"),
+        Token::Colon,
+        treg("rax"),
+        Token::Equals,
+        treg("rdx"),
+        Token::Colon,
+        treg("rax"),
+        Token::Plus,
+        treg("rcx"),
+        Token::Colon,
+        treg("rbx"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+            value: AssignmentValue::PairBinary {
+                op: PairBinaryOp::Add,
+                lhs: rpair("rdx", "rax"),
+                rhs: rpair("rcx", "rbx"),
+            },
+        }
+    );
+}
+
+#[test]
+fn parses_pair_subtract_assignment() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rdx"),
+        Token::Colon,
+        treg("rax"),
+        Token::Equals,
+        treg("rdx"),
+        Token::Colon,
+        treg("rax"),
+        Token::Minus,
+        treg("rcx"),
+        Token::Colon,
+        treg("rbx"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+            value: AssignmentValue::PairBinary {
+                op: PairBinaryOp::Subtract,
+                lhs: rpair("rdx", "rax"),
+                rhs: rpair("rcx", "rbx"),
             },
         }
     );

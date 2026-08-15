@@ -2,8 +2,8 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
     Expression, FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp,
-    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource,
-    StringInitializer, StringProperty, WidthConversion,
+    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintPart, Program,
+    ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -856,16 +856,16 @@ impl Parser {
         self.advance();
         let low = self.expect_register("low register after register-pair ':'")?;
 
-        self.parse_assignment(AssignmentTarget::RegisterPair {
+        self.parse_assignment(AssignmentTarget::RegisterPair(RegisterPair {
             high: high_or_dst,
             low,
-        })
+        }))
     }
 
     fn parse_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
         self.expect(Token::Equals, "Expected '=' after assignment destination")?;
 
-        if matches!(dst, AssignmentTarget::RegisterPair { .. }) {
+        if matches!(dst, AssignmentTarget::RegisterPair(_)) {
             return self.parse_wide_assignment(dst);
         }
 
@@ -984,6 +984,38 @@ impl Parser {
     }
 
     fn parse_wide_assignment(&mut self, dst: AssignmentTarget) -> Result<Instruction, String> {
+        if matches!(self.peek(), Some(Token::Register(_)))
+            && matches!(self.tokens.get(self.position + 1), Some(Token::Colon))
+        {
+            let lhs = self.parse_register_pair_operand()?;
+            let op = match self.advance() {
+                Some(Token::Plus) => PairBinaryOp::Add,
+                Some(Token::Minus) => PairBinaryOp::Subtract,
+                Some(token) => {
+                    return Err(format!(
+                        "Register-pair assignment expected '+' or '-' after register-pair left operand, found {token:?}"
+                    ));
+                }
+                None => {
+                    return Err(String::from(
+                        "Register-pair assignment expected '+' or '-' after register-pair left operand, found end of input",
+                    ));
+                }
+            };
+            let rhs = self.parse_register_pair_operand()?;
+            let value = AssignmentValue::PairBinary { op, lhs, rhs };
+
+            if let Some(condition) = self.parse_optional_assignment_condition()? {
+                return Ok(Instruction::AssignIf {
+                    dst,
+                    value,
+                    condition,
+                });
+            }
+
+            return Ok(Instruction::Assign { dst, value });
+        }
+
         let lhs = self.parse_operand()?;
         let Some(op) = self.peek().and_then(assignment_op) else {
             return Err(String::from(
@@ -1010,6 +1042,14 @@ impl Parser {
         } else {
             Ok(Instruction::Assign { dst, value })
         }
+    }
+
+    fn parse_register_pair_operand(&mut self) -> Result<RegisterPair, String> {
+        let high = self.expect_register("high register in register-pair operand")?;
+        self.expect(Token::Colon, "Expected ':' in register-pair operand")?;
+        let low = self.expect_register("low register in register-pair operand")?;
+
+        Ok(RegisterPair { high, low })
     }
 
     fn parse_expression(&mut self, min_precedence: u8) -> Result<Expression, String> {

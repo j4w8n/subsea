@@ -4,7 +4,8 @@ use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
     ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
     Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand,
-    PrintPart, Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
+    PairBinaryOp, PrintPart, Program, ReadSource, RegisterPair, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -28,6 +29,13 @@ fn ptr(value: &str) -> Operand {
 
 fn reg(value: &str) -> Operand {
     Operand::Register(s(value))
+}
+
+fn rpair(high: &str, low: &str) -> RegisterPair {
+    RegisterPair {
+        high: s(high),
+        low: s(low),
+    }
 }
 
 fn float(value: &str) -> Operand {
@@ -1114,10 +1122,7 @@ fn rejects_binary_assignment_when_destination_is_used_in_rhs_address() {
 #[test]
 fn emits_unsigned_widened_multiply() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: reg("rbx"),
@@ -1163,10 +1168,7 @@ fn rejects_address_of_into_non_64_bit_register() {
 #[test]
 fn emits_signed_widened_multiply() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideMultiply {
             signed: true,
             lhs: reg("rbx"),
@@ -1178,6 +1180,144 @@ fn emits_signed_widened_multiply() {
 
     assert!(asm.contains("  mov rax, rbx\n"));
     assert!(asm.contains("  imul rcx\n"));
+}
+
+#[test]
+fn emits_pair_add_with_carry() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Add,
+            lhs: rpair("rdx", "rax"),
+            rhs: rpair("rcx", "rbx"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  add rax, rbx\n"));
+    assert!(asm.contains("  adc rdx, rcx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_pair_subtract_with_borrow() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Subtract,
+            lhs: rpair("rdx", "rax"),
+            rhs: rpair("rcx", "rbx"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  sub rax, rbx\n"));
+    assert!(asm.contains("  sbb rdx, rcx\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_pair_arithmetic_when_left_pair_differs_from_destination() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Add,
+            lhs: rpair("r8", "r9"),
+            rhs: rpair("rcx", "rbx"),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Pair arithmetic left operand must match destination; found rdx:rax = r8:r9 ..."
+    );
+}
+
+#[test]
+fn rejects_narrow_pair_arithmetic_register() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Add,
+            lhs: rpair("rdx", "rax"),
+            rhs: rpair("ecx", "rbx"),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Pair arithmetic right high register must be 64-bit, found 32-bit register ecx"
+    );
+}
+
+#[test]
+fn rejects_pair_arithmetic_rhs_high_overlapping_destination_low() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Add,
+            lhs: rpair("rdx", "rax"),
+            rhs: rpair("rax", "rbx"),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Pair arithmetic right high register rax cannot overlap destination low register rax"
+    );
+}
+
+#[test]
+fn rejects_pair_arithmetic_same_destination_register_family() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::RegisterPair(rpair("rax", "eax")),
+        value: AssignmentValue::PairBinary {
+            op: PairBinaryOp::Add,
+            lhs: rpair("rax", "eax"),
+            rhs: rpair("rcx", "rbx"),
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Pair arithmetic destination registers must be different, found rax:eax"
+    );
+}
+
+#[test]
+fn rejects_pair_arithmetic_rbp_use_in_stack_label() {
+    let program = main_program(vec![
+        Instruction::Stack {
+            name: s("value"),
+            width: MemoryWidth::U64,
+            value: Operand::Immediate(0),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
+            value: AssignmentValue::PairBinary {
+                op: PairBinaryOp::Add,
+                lhs: rpair("rdx", "rax"),
+                rhs: rpair("rbp", "rbx"),
+            },
+        },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Label \"main\" declares stack variables, so rbp is reserved"
+    );
 }
 
 #[test]
@@ -1342,10 +1482,7 @@ fn preserves_expression_rhs_when_it_uses_destination_register() {
 #[test]
 fn rejects_non_rdx_rax_widened_multiply_destination() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("r9"),
-            low: s("r8"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("r9", "r8")),
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: reg("rbx"),
@@ -1364,10 +1501,7 @@ fn rejects_non_rdx_rax_widened_multiply_destination() {
 #[test]
 fn rejects_non_rdx_rax_widened_divide_destination() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("r9"),
-            low: s("r8"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("r9", "r8")),
         value: AssignmentValue::WideDivide {
             signed: false,
             lhs: reg("rbx"),
@@ -1386,10 +1520,7 @@ fn rejects_non_rdx_rax_widened_divide_destination() {
 #[test]
 fn emits_immediate_widened_multiply_rhs() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: reg("rbx"),
@@ -1408,10 +1539,7 @@ fn emits_immediate_widened_multiply_rhs() {
 #[test]
 fn emits_immediate_widened_multiply_lhs() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: Operand::Immediate(10),
@@ -1429,10 +1557,7 @@ fn emits_immediate_widened_multiply_lhs() {
 #[test]
 fn materializes_widened_multiply_rhs_that_uses_rax() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideMultiply {
             signed: false,
             lhs: reg("rbx"),
@@ -1451,10 +1576,7 @@ fn materializes_widened_multiply_rhs_that_uses_rax() {
 #[test]
 fn emits_unsigned_widened_divide() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideDivide {
             signed: false,
             lhs: reg("rbx"),
@@ -1472,10 +1594,7 @@ fn emits_unsigned_widened_divide() {
 #[test]
 fn emits_signed_widened_divide() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideDivide {
             signed: true,
             lhs: reg("rbx"),
@@ -1493,10 +1612,7 @@ fn emits_signed_widened_divide() {
 #[test]
 fn emits_immediate_widened_divide_rhs() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideDivide {
             signed: false,
             lhs: reg("rbx"),
@@ -1515,10 +1631,7 @@ fn emits_immediate_widened_divide_rhs() {
 #[test]
 fn materializes_widened_divide_rhs_that_uses_rdx() {
     let program = main_program(vec![Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair {
-            high: s("rdx"),
-            low: s("rax"),
-        },
+        dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
         value: AssignmentValue::WideDivide {
             signed: false,
             lhs: reg("rbx"),
@@ -3100,10 +3213,7 @@ fn generated_edge_case_assembly_assembles() {
                     value: AssignmentValue::Operand(Operand::Immediate(i32::MAX as i128)),
                 },
                 Instruction::Assign {
-                    dst: AssignmentTarget::RegisterPair {
-                        high: s("rdx"),
-                        low: s("rax"),
-                    },
+                    dst: AssignmentTarget::RegisterPair(rpair("rdx", "rax")),
                     value: AssignmentValue::WideMultiply {
                         signed: false,
                         lhs: reg("rbx"),
