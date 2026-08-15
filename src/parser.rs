@@ -2432,6 +2432,10 @@ fn validate_instruction_symbols(
             return;
         }
 
+        if is_string_binding_memory_assignment_operand(instruction, operand, string_bindings) {
+            return;
+        }
+
         result = validate_operand_symbol(
             operand,
             bindings,
@@ -2444,6 +2448,29 @@ fn validate_instruction_symbols(
     });
 
     result
+}
+
+fn is_string_binding_memory_assignment_operand(
+    instruction: &Instruction,
+    operand: &Operand,
+    string_bindings: &HashSet<&str>,
+) -> bool {
+    let (dst, value) = match instruction {
+        Instruction::Assign { dst, value } | Instruction::AssignIf { dst, value, .. } => {
+            (dst, value)
+        }
+        _ => return false,
+    };
+
+    if !matches!(dst, AssignmentTarget::Operand(Operand::Dereference { .. })) {
+        return false;
+    }
+
+    let AssignmentValue::Operand(Operand::Ident(name)) = value else {
+        return false;
+    };
+
+    operand == &Operand::Ident(name.clone()) && string_bindings.contains(name.as_str())
 }
 
 fn is_local_label_name(name: &str) -> bool {

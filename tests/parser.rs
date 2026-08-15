@@ -286,6 +286,35 @@ fn rejects_string_binding_as_operand() {
 }
 
 #[test]
+fn allows_string_binding_as_memory_assignment_source() {
+    let mut tokens = vec![
+        Token::Mem,
+        tid("buf"),
+        Token::Colon,
+        tid("u8"),
+        Token::LParen,
+        tnum("8"),
+        Token::RParen,
+    ];
+    tokens.extend(empty_main_prefix());
+    tokens.extend([
+        Token::Const,
+        tid("message"),
+        Token::Equals,
+        text("hi"),
+        Token::LBracket,
+        tid("buf"),
+        Token::RBracket,
+        Token::Equals,
+        tid("message"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    validate_program_symbols(&program).unwrap();
+}
+
+#[test]
 fn rejects_integer_binding_string_property() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

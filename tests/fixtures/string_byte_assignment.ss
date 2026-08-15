@@ -1,14 +1,14 @@
 mem buf:u8(16)
 
 main: {
-  [buf] = "Hi\n"
+  const hi = "Hi\n"
+  [buf] = hi
   buf[3] = "Bye\n"
 
   stack first:str = slice(&buf, 3)
   linux.print first
 
-  rsi = &buf[3]
-  stack second:str = slice(rsi, 4)
+  stack second:str = slice(&buf[3], 4)
   linux.print second
 
   linux.exit 0

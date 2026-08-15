@@ -2400,6 +2400,14 @@ fn emit_stack_string_slice_pointer(
             emit_stack_string_address(asm, name, ptr_offset);
             Ok(())
         }
+        Operand::AddressOf(address) => {
+            asm.push_str("  push r10\n");
+            let address = emit_address(address);
+            asm.push_str(&format!("  lea r10, [{address}]\n"));
+            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], r10\n"));
+            asm.push_str("  pop r10\n");
+            Ok(())
+        }
         Operand::Register(name) => match register_width(name) {
             Some(Width::Bits64) => {
                 asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], {name}\n"));
@@ -2840,6 +2848,12 @@ fn emit_assignment(
     match value {
         AssignmentValue::Operand(src) => {
             let dst = assignment_operand_target(dst)?;
+            if matches!(dst, Operand::Dereference { .. })
+                && let Some(value) = string_bytes_assignment_source(src, strings, label_name)?
+            {
+                return emit_string_bytes_assignment(asm, dst, value);
+            }
+
             emit_copy_instruction(asm, src, dst, strings, label_name, stack)
         }
         AssignmentValue::BitwiseUnary { op, operand } => {
@@ -2969,6 +2983,31 @@ fn emit_assignment(
 
 fn assignment_value_uses_linux_reserve(value: &AssignmentValue) -> bool {
     matches!(value, AssignmentValue::LinuxReserve { .. })
+}
+
+fn string_bytes_assignment_source<'a>(
+    src: &Operand,
+    strings: &'a StringTable,
+    label_name: &str,
+) -> Result<Option<&'a str>, String> {
+    let Operand::Ident(name) = src else {
+        return Ok(None);
+    };
+
+    let key = (label_name.to_string(), name.to_string());
+    if strings.integers.contains_key(&key) || strings.float_bindings.contains_key(&key) {
+        return Ok(None);
+    }
+
+    let Some(binding) = strings.bindings.get(&key) else {
+        return Ok(None);
+    };
+
+    if binding.value.is_empty() {
+        return Err(String::from("String byte assignment cannot be empty"));
+    }
+
+    Ok(Some(&binding.value))
 }
 
 fn emit_string_bytes_assignment(

@@ -700,6 +700,56 @@ fn emits_string_bytes_assignment_to_declared_memory_index() {
 }
 
 #[test]
+fn emits_string_binding_assignment_to_memory() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: s("msg"),
+            value: BindingValue::String(s("Hi\n")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Dereference {
+                address: Address {
+                    first: AddressTerm::Register(s("rax")),
+                    rest: Vec::new(),
+                },
+                width: None,
+            }),
+            value: AssignmentValue::Operand(ident("msg")),
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov byte ptr [rax], 72\n"));
+    assert!(asm.contains("  mov byte ptr [rax + 1], 105\n"));
+    assert!(asm.contains("  mov byte ptr [rax + 2], 10\n"));
+}
+
+#[test]
+fn rejects_empty_string_binding_assignment_to_memory() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: s("msg"),
+            value: BindingValue::String(s("")),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(Operand::Dereference {
+                address: Address {
+                    first: AddressTerm::Register(s("rax")),
+                    rest: Vec::new(),
+                },
+                width: None,
+            }),
+            value: AssignmentValue::Operand(ident("msg")),
+        },
+    ]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(error, "String byte assignment cannot be empty");
+}
+
+#[test]
 fn rejects_string_bytes_assignment_to_register() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
