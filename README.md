@@ -2,6 +2,8 @@
 
 A readable, learnable alternative to Assembly, with the same power to directly work with CPU registers, memory, and more. The name is a play on words: subsea is "below C".
 
+Checkout our Subsea vs Assembly comparisons in the [examples](examples/x86-vs-subsea/README.md)
+
 Status: working, but early development. If you'd like to play with subsea, you'll need an x86-64 linux system with Rust and `binutils` installed.
 
 ## Quickstart
