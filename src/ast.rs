@@ -231,6 +231,11 @@ fn visit_assignment_value_operands(value: &AssignmentValue, visit: &mut impl FnM
             visit(lhs);
             visit(rhs);
         }
+        AssignmentValue::IntrinsicCall { args, .. } => {
+            for arg in args {
+                visit(arg);
+            }
+        }
         AssignmentValue::Condition(condition) => condition.visit_operands(visit),
     }
 }
@@ -249,6 +254,11 @@ fn visit_assignment_value_operands_mut(
         | AssignmentValue::WideDivide { lhs, rhs, .. } => {
             visit(lhs);
             visit(rhs);
+        }
+        AssignmentValue::IntrinsicCall { args, .. } => {
+            for arg in args {
+                visit(arg);
+            }
         }
         AssignmentValue::Condition(condition) => condition.visit_operands_mut(visit),
     }
@@ -380,6 +390,18 @@ pub enum AssignmentValue {
         lhs: Operand,
         rhs: Operand,
     },
+    IntrinsicCall {
+        op: IntrinsicOp,
+        width: MemoryWidth,
+        args: Vec<Operand>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum IntrinsicOp {
+    Max,
+    Min,
+    Sqrt,
 }
 
 #[derive(Debug, PartialEq, Clone)]

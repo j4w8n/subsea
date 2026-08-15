@@ -1,6 +1,6 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
-    DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, MathOp,
+    DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, IntrinsicOp, MathOp,
     MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, ReadSource, StringInitializer,
     StringProperty, WidthConversion,
 };
@@ -444,9 +444,11 @@ fn parses_stack_string_slice() {
         tid("str"),
         Token::Equals,
         Token::Slice,
+        Token::LParen,
         tptr("buf"),
         Token::Comma,
         treg("rax"),
+        Token::RParen,
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -524,11 +526,13 @@ fn parses_read_from_stdin() {
     let mut tokens = empty_main_prefix();
     tokens.extend(linux("read"));
     tokens.extend([
+        Token::LParen,
         Token::Stdin,
         Token::Comma,
         tptr("buf"),
         Token::Comma,
         tnum("1024"),
+        Token::RParen,
     ]);
 
     let program = parse(finish_label(tokens)).unwrap();
@@ -1475,9 +1479,11 @@ fn parses_memory_repeat_declaration() {
         tid("u8"),
         Token::Equals,
         Token::Repeat,
+        Token::LParen,
         tnum("4"),
         Token::Comma,
         tnum("255"),
+        Token::RParen,
         tid("main"),
         Token::Colon,
         Token::LBrace,
@@ -1747,6 +1753,96 @@ fn parses_float_arithmetic_assignment() {
                 rhs: reg("xmm2"),
             },
         }
+    );
+}
+
+#[test]
+fn parses_typed_intrinsic_calls() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tid("min"),
+        Token::LParen,
+        treg("rbx"),
+        Token::Comma,
+        treg("rcx"),
+        Token::RParen,
+        Token::Colon,
+        tid("u64"),
+        treg("xmm0"),
+        Token::Equals,
+        tid("sqrt"),
+        Token::LParen,
+        treg("xmm1"),
+        Token::RParen,
+        Token::Colon,
+        tid("f64"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("rax")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Min,
+                    width: MemoryWidth::U64,
+                    args: vec![reg("rbx"), reg("rcx")],
+                },
+            },
+            Instruction::Assign {
+                dst: AssignmentTarget::Operand(reg("xmm0")),
+                value: AssignmentValue::IntrinsicCall {
+                    op: IntrinsicOp::Sqrt,
+                    width: MemoryWidth::F64,
+                    args: vec![reg("xmm1")],
+                },
+            },
+        ]
+    );
+}
+
+#[test]
+fn rejects_unknown_typed_intrinsic_call() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tid("clamp"),
+        Token::LParen,
+        treg("rbx"),
+        Token::RParen,
+        Token::Colon,
+        tid("u64"),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(error, "Unknown typed intrinsic call \"clamp\"");
+}
+
+#[test]
+fn rejects_typed_intrinsic_call_arity_mismatch() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        treg("rax"),
+        Token::Equals,
+        tid("min"),
+        Token::LParen,
+        treg("rbx"),
+        Token::RParen,
+        Token::Colon,
+        tid("u64"),
+    ]);
+
+    let error = parse(finish_label(tokens)).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Typed intrinsic call min expects 2 argument(s), found 1"
     );
 }
 

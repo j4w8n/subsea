@@ -1,9 +1,9 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     BitwiseUnaryOp, CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, Instruction, Label, MathOp, MemoryDeclaration, MemoryValue,
-    MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
-    WidthConversion,
+    Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
+    MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1092,6 +1092,20 @@ fn collect_string_bindings(program: &Program) -> Result<StringTable, String> {
                     }
                 }
                 Instruction::Assign {
+                    value: AssignmentValue::IntrinsicCall { width, args, .. },
+                    ..
+                } if width.is_float() => {
+                    for arg in args {
+                        collect_float_literal_operand(
+                            &mut floats,
+                            &mut float_literals,
+                            &label.name,
+                            *width,
+                            arg,
+                        )?;
+                    }
+                }
+                Instruction::Assign {
                     value: AssignmentValue::Condition(condition),
                     ..
                 }
@@ -1144,6 +1158,11 @@ fn collect_assignment_value_float_literals(
             collect_float_literal_operand(floats, float_literals, label_name, *width, lhs)?;
             collect_float_literal_operand(floats, float_literals, label_name, *width, rhs)?;
         }
+        AssignmentValue::IntrinsicCall { width, args, .. } if width.is_float() => {
+            for arg in args {
+                collect_float_literal_operand(floats, float_literals, label_name, *width, arg)?;
+            }
+        }
         AssignmentValue::Binary { lhs, rhs, .. } => {
             for width in [MemoryWidth::F32, MemoryWidth::F64] {
                 collect_float_literal_operand(floats, float_literals, label_name, width, lhs)?;
@@ -1156,6 +1175,7 @@ fn collect_assignment_value_float_literals(
         AssignmentValue::Expression(_) => {}
         AssignmentValue::Operand(_)
         | AssignmentValue::BitwiseUnary { .. }
+        | AssignmentValue::IntrinsicCall { .. }
         | AssignmentValue::WideMultiply { .. }
         | AssignmentValue::WideDivide { .. } => {}
     }
@@ -2312,6 +2332,9 @@ fn emit_assignment(
         } => emit_float_binary_assignment(
             asm, dst, *width, *op, lhs, rhs, strings, label_name, stack,
         ),
+        AssignmentValue::IntrinsicCall { op, width, args } => {
+            emit_intrinsic_call_assignment(asm, dst, *op, *width, args, strings, label_name, stack)
+        }
         AssignmentValue::WideMultiply { signed, lhs, rhs } => emit_wide_math_assignment(
             asm, dst, *signed, false, lhs, rhs, strings, label_name, stack,
         ),
@@ -2992,6 +3015,327 @@ fn emit_wide_math_assignment(
     asm.push_str(&format!("  {opcode} {rhs}\n"));
 
     Ok(())
+}
+
+fn emit_intrinsic_call_assignment(
+    asm: &mut String,
+    dst: &AssignmentTarget,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    args: &[Operand],
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let dst = assignment_operand_target(dst)?;
+
+    match (op, width) {
+        (IntrinsicOp::Sqrt, MemoryWidth::F32 | MemoryWidth::F64) => {
+            emit_float_sqrt_intrinsic(asm, dst, width, &args[0], strings, label_name, stack)
+        }
+        (IntrinsicOp::Sqrt, _) => Err(String::from(
+            "sqrt only supports f32 or f64; integer sqrt is not implemented",
+        )),
+        (IntrinsicOp::Min | IntrinsicOp::Max, MemoryWidth::F32 | MemoryWidth::F64) => {
+            emit_float_min_max_intrinsic(
+                asm, dst, op, width, &args[0], &args[1], strings, label_name, stack,
+            )
+        }
+        (IntrinsicOp::Min | IntrinsicOp::Max, MemoryWidth::Ptr) => Err(String::from(
+            "min and max do not support ptr width; use an integer width",
+        )),
+        (IntrinsicOp::Min | IntrinsicOp::Max, _) => emit_integer_min_max_intrinsic(
+            asm, dst, op, width, &args[0], &args[1], strings, label_name, stack,
+        ),
+    }
+}
+
+fn emit_float_sqrt_intrinsic(
+    asm: &mut String,
+    dst: &Operand,
+    width: MemoryWidth,
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_intrinsic_destination("sqrt", dst)?;
+    validate_float_math_operand("sqrt operand", src, width, strings, label_name, stack)?;
+
+    let Operand::Register(dst_register) = dst else {
+        unreachable!()
+    };
+    let src = emit_float_operand(src, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {src}\n",
+        float_sqrt_opcode(width)
+    ));
+
+    Ok(())
+}
+
+fn emit_float_min_max_intrinsic(
+    asm: &mut String,
+    dst: &Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_intrinsic_destination(intrinsic_op_name(op), dst)?;
+    validate_float_math_operand(
+        "Floating-point intrinsic left operand",
+        lhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_float_math_operand(
+        "Floating-point intrinsic right operand",
+        rhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    if lhs != dst {
+        emit_float_copy_instruction(asm, lhs, dst, width, strings, label_name, stack)?;
+    }
+
+    let Operand::Register(dst_register) = dst else {
+        unreachable!()
+    };
+    let rhs = emit_float_operand(rhs, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {rhs}\n",
+        float_min_max_opcode(op, width)
+    ));
+
+    Ok(())
+}
+
+fn emit_integer_min_max_intrinsic(
+    asm: &mut String,
+    dst: &Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_integer_min_max_intrinsic(dst, width, lhs, rhs, strings, label_name, stack)?;
+
+    emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
+    let dst_register = match dst {
+        Operand::Register(register) => register,
+        _ => unreachable!(),
+    };
+    let intrinsic_width = memory_width_bits(width);
+    let dst = Operand::Register(register_alias(dst_register, intrinsic_width)?);
+    let rhs = integer_min_max_rhs(rhs, intrinsic_width, strings, label_name, stack)?;
+    let dst_operand = emit_operand(&dst, strings, label_name, stack)?;
+    let rhs_operand = emit_operand(&rhs, strings, label_name, stack)?;
+    let keep_label = format!(
+        ".L.__subsea.{label_name}.{}_{}_keep",
+        intrinsic_op_name(op),
+        asm.len()
+    );
+
+    asm.push_str(&format!("  cmp {dst_operand}, {rhs_operand}\n"));
+    asm.push_str(&format!(
+        "  {} {keep_label}\n",
+        integer_min_max_keep_jump(op, width)
+    ));
+    asm.push_str(&format!("  mov {dst_operand}, {rhs_operand}\n"));
+    asm.push_str(&format!("{keep_label}:\n"));
+
+    Ok(())
+}
+
+fn validate_float_intrinsic_destination(name: &str, dst: &Operand) -> Result<(), String> {
+    match dst {
+        Operand::Register(register) if is_xmm_register(register) => Ok(()),
+        _ => Err(format!(
+            "{name} floating-point intrinsic destination must be an XMM register"
+        )),
+    }
+}
+
+fn validate_integer_min_max_intrinsic(
+    dst: &Operand,
+    width: MemoryWidth,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Integer min/max intrinsic destination must be a register",
+        ));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Integer min/max intrinsic destination must be an integer register",
+        ));
+    }
+
+    let expected = memory_width_bits(width);
+    let dst_width = register_width(dst_register)
+        .ok_or_else(|| String::from("Integer min/max intrinsic destination must be a register"))?;
+    if dst_width != expected {
+        return Err(format!(
+            "Integer min/max intrinsic destination must be {}-bit, found {}-bit register",
+            expected.bits(),
+            dst_width.bits()
+        ));
+    }
+
+    validate_integer_min_max_operand(
+        "Integer min/max intrinsic left operand",
+        lhs,
+        expected,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_integer_min_max_operand(
+        "Integer min/max intrinsic right operand",
+        rhs,
+        expected,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    if operand_uses_high_byte_register(lhs) && operand_uses_extended_register(dst) {
+        return Err(String::from(
+            "Integer min/max intrinsic cannot combine high-byte registers ah, bh, ch, or dh with extended registers",
+        ));
+    }
+
+    if operand_uses_high_byte_register(rhs) && operand_uses_extended_register(dst) {
+        return Err(String::from(
+            "Integer min/max intrinsic cannot combine high-byte registers ah, bh, ch, or dh with extended registers",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_integer_min_max_operand(
+    name: &str,
+    operand: &Operand,
+    expected: Width,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if operand_uses_xmm_register(operand) || is_float_memory_operand(operand, strings, stack)? {
+        return Err(format!("{name} must be an integer operand"));
+    }
+
+    if matches!(
+        operand,
+        Operand::Pointer(_)
+            | Operand::AddressOf(_)
+            | Operand::StringProperty { .. }
+            | Operand::Converted { .. }
+            | Operand::Cast { .. }
+            | Operand::FloatLiteral(_)
+    ) {
+        return Err(format!("{name} must be an integer operand"));
+    }
+
+    if let Some(width) = operand_width(operand, strings, label_name, stack)?
+        && width != expected
+    {
+        return Err(format!(
+            "{name} must be {}-bit, found {}-bit operand",
+            expected.bits(),
+            width.bits()
+        ));
+    }
+
+    Ok(())
+}
+
+fn integer_min_max_rhs(
+    rhs: &Operand,
+    width: Width,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Operand, String> {
+    match rhs {
+        Operand::Register(register) if register_width(register).is_some_and(|rhs| rhs != width) => {
+            Ok(Operand::Register(register_alias(register, width)?))
+        }
+        _ => {
+            if is_immediate_operand(rhs, strings, label_name, stack) {
+                return Ok(rhs.clone());
+            }
+
+            Ok(rhs.clone())
+        }
+    }
+}
+
+fn integer_min_max_keep_jump(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
+    match (op, width) {
+        (
+            IntrinsicOp::Min,
+            MemoryWidth::I8 | MemoryWidth::I16 | MemoryWidth::I32 | MemoryWidth::I64,
+        ) => "jle",
+        (
+            IntrinsicOp::Min,
+            MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32 | MemoryWidth::U64,
+        ) => "jbe",
+        (
+            IntrinsicOp::Max,
+            MemoryWidth::I8 | MemoryWidth::I16 | MemoryWidth::I32 | MemoryWidth::I64,
+        ) => "jge",
+        (
+            IntrinsicOp::Max,
+            MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32 | MemoryWidth::U64,
+        ) => "jae",
+        _ => unreachable!(),
+    }
+}
+
+fn float_sqrt_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "sqrtss",
+        MemoryWidth::F64 => "sqrtsd",
+        _ => unreachable!(),
+    }
+}
+
+fn float_min_max_opcode(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
+    match (op, width) {
+        (IntrinsicOp::Min, MemoryWidth::F32) => "minss",
+        (IntrinsicOp::Min, MemoryWidth::F64) => "minsd",
+        (IntrinsicOp::Max, MemoryWidth::F32) => "maxss",
+        (IntrinsicOp::Max, MemoryWidth::F64) => "maxsd",
+        _ => unreachable!(),
+    }
+}
+
+fn intrinsic_op_name(op: IntrinsicOp) -> &'static str {
+    match op {
+        IntrinsicOp::Max => "max",
+        IntrinsicOp::Min => "min",
+        IntrinsicOp::Sqrt => "sqrt",
+    }
 }
 
 fn emit_float_binary_assignment(

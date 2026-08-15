@@ -24,7 +24,7 @@ main: {
   bytes[3] = 10
 
   rsi = &bytes[1]
-  stack message:str = slice rsi, 3
+  stack message:str = slice(rsi, 3)
   linux.print message
 
   linux.exit 0

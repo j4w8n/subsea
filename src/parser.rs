@@ -1,9 +1,9 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression,
-    FloatMathOp, ImportDeclaration, Instruction, Label, MathOp, MemoryDeclaration, MemoryValue,
-    MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer, StringProperty,
-    WidthConversion,
+    FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
+    MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource, StringInitializer,
+    StringProperty, WidthConversion,
 };
 use crate::grammar::Token;
 use std::collections::HashSet;
@@ -372,9 +372,11 @@ impl Parser {
 
                 if matches!(self.peek(), Some(Token::Repeat)) {
                     self.advance();
+                    self.expect(Token::LParen, "Expected '(' after repeat")?;
                     let count = self.parse_usize_literal("repeat count")?;
                     self.expect(Token::Comma, "Expected ',' after repeat count")?;
                     let value = self.parse_memory_value(width)?;
+                    self.expect(Token::RParen, "Expected ')' after repeat value")?;
                     return Ok(MemoryDeclaration::Repeat {
                         name,
                         width,
@@ -700,6 +702,7 @@ impl Parser {
     }
 
     fn parse_read_instruction(&mut self) -> Result<Instruction, String> {
+        self.expect(Token::LParen, "Expected '(' after linux.read")?;
         let src = match self.advance() {
             Some(Token::Stdin) => ReadSource::Stdin,
             Some(token) => {
@@ -716,6 +719,7 @@ impl Parser {
         let dst = self.parse_operand()?;
         self.expect(Token::Comma, "Expected ',' after read destination")?;
         let len = self.parse_operand()?;
+        self.expect(Token::RParen, "Expected ')' after read buffer size")?;
 
         Ok(Instruction::Read { src, dst, len })
     }
@@ -724,9 +728,11 @@ impl Parser {
         match self.advance() {
             Some(Token::Text(value)) => Ok(StringInitializer::Literal(value)),
             Some(Token::Slice) => {
+                self.expect(Token::LParen, "Expected '(' after slice")?;
                 let ptr = self.parse_operand()?;
                 self.expect(Token::Comma, "Expected ',' after slice pointer")?;
                 let len = self.parse_operand()?;
+                self.expect(Token::RParen, "Expected ')' after slice length")?;
 
                 Ok(StringInitializer::Slice { ptr, len })
             }
@@ -849,6 +855,8 @@ impl Parser {
                 op: crate::ast::BitwiseUnaryOp::Not,
                 operand,
             }
+        } else if self.next_tokens_are_intrinsic_call() {
+            self.parse_intrinsic_call_assignment_value()?
         } else {
             let expression = self.parse_expression(0)?;
             match self.peek() {
@@ -892,6 +900,65 @@ impl Parser {
             })
         } else {
             Ok(Instruction::Assign { dst, value })
+        }
+    }
+
+    fn next_tokens_are_intrinsic_call(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(_)))
+            && matches!(self.tokens.get(self.position + 1), Some(Token::LParen))
+    }
+
+    fn parse_intrinsic_call_assignment_value(&mut self) -> Result<AssignmentValue, String> {
+        let name = match self.advance() {
+            Some(Token::Ident(name)) => name,
+            _ => unreachable!(),
+        };
+        let op = parse_intrinsic_op(&name)?;
+
+        self.expect(Token::LParen, "Expected '(' after intrinsic name")?;
+        let args = self.parse_intrinsic_args(&name)?;
+        self.expect(Token::Colon, "Expected ':' after typed intrinsic call")?;
+        let width_name = self.expect_ident("typed intrinsic width after ':'")?;
+        let width = MemoryWidth::parse(&width_name)?;
+
+        validate_intrinsic_arity(op, args.len())?;
+
+        Ok(AssignmentValue::IntrinsicCall { op, width, args })
+    }
+
+    fn parse_intrinsic_args(&mut self, name: &str) -> Result<Vec<Operand>, String> {
+        let mut args = Vec::new();
+
+        if matches!(self.peek(), Some(Token::RParen)) {
+            self.advance();
+            return Ok(args);
+        }
+
+        loop {
+            args.push(self.parse_operand()?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.advance();
+                    if matches!(self.peek(), Some(Token::RParen)) {
+                        return Err(format!("Typed intrinsic call {name} cannot end with ','"));
+                    }
+                }
+                Some(Token::RParen) => {
+                    self.advance();
+                    return Ok(args);
+                }
+                Some(token) => {
+                    return Err(format!(
+                        "Expected ',' or ')' after typed intrinsic argument, found {token:?}"
+                    ));
+                }
+                None => {
+                    return Err(String::from(
+                        "Expected ',' or ')' after typed intrinsic argument, found end of input",
+                    ));
+                }
+            }
         }
     }
 
@@ -1668,6 +1735,39 @@ fn assignment_value(op: AssignmentOp, lhs: Operand, rhs: Operand) -> AssignmentV
             }
         }
         AssignmentOp::UnsupportedDivision => unreachable!(),
+    }
+}
+
+fn parse_intrinsic_op(name: &str) -> Result<IntrinsicOp, String> {
+    match name {
+        "max" => Ok(IntrinsicOp::Max),
+        "min" => Ok(IntrinsicOp::Min),
+        "sqrt" => Ok(IntrinsicOp::Sqrt),
+        _ => Err(format!("Unknown typed intrinsic call {name:?}")),
+    }
+}
+
+fn validate_intrinsic_arity(op: IntrinsicOp, count: usize) -> Result<(), String> {
+    let expected = match op {
+        IntrinsicOp::Max | IntrinsicOp::Min => 2,
+        IntrinsicOp::Sqrt => 1,
+    };
+
+    if count == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "Typed intrinsic call {} expects {expected} argument(s), found {count}",
+            intrinsic_op_name(op)
+        ))
+    }
+}
+
+fn intrinsic_op_name(op: IntrinsicOp) -> &'static str {
+    match op {
+        IntrinsicOp::Max => "max",
+        IntrinsicOp::Min => "min",
+        IntrinsicOp::Sqrt => "sqrt",
     }
 }
 

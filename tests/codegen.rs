@@ -2,9 +2,9 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition,
-    ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction, Label,
-    MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart, Program, ReadSource,
-    StringInitializer, StringProperty, WidthConversion,
+    ConditionExpr, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
+    IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PrintPart,
+    Program, ReadSource, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -2456,6 +2456,106 @@ fn emits_xmm_float_register_arithmetic() {
     assert!(asm.contains("  movsd xmm2, xmm3\n"));
     assert!(asm.contains("  mulsd xmm2, xmm4\n"));
     assert_assembles(&asm);
+}
+
+#[test]
+fn emits_float_typed_intrinsic_calls() {
+    let program = main_program(vec![
+        Instruction::Const {
+            name: s("limit"),
+            value: BindingValue::Float {
+                value: s("2.0"),
+                width: MemoryWidth::F64,
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Sqrt,
+                width: MemoryWidth::F64,
+                args: vec![float("4.0")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm0")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Min,
+                width: MemoryWidth::F64,
+                args: vec![reg("xmm0"), ident("limit")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("xmm1")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Max,
+                width: MemoryWidth::F32,
+                args: vec![reg("xmm2"), reg("xmm3")],
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains(".Lfloatval_main_limit:\n  .double 2.0\n"));
+    assert!(asm.contains(".Lfloatlit_main_2:\n  .double 4.0\n"));
+    assert!(asm.contains("  sqrtsd xmm0, qword ptr [rip + .Lfloatlit_main_2]\n"));
+    assert!(asm.contains("  minsd xmm0, qword ptr [rip + .Lfloatval_main_limit]\n"));
+    assert!(asm.contains("  movss xmm1, xmm2\n"));
+    assert!(asm.contains("  maxss xmm1, xmm3\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_integer_typed_intrinsic_calls() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Max,
+                width: MemoryWidth::I64,
+                args: vec![reg("rbx"), Operand::Immediate(5)],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("al")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Min,
+                width: MemoryWidth::U8,
+                args: vec![reg("bl"), reg("cl")],
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov rax, rbx\n"));
+    assert!(asm.contains("  cmp rax, 5\n"));
+    assert!(asm.contains("  jge .L.__subsea.main.max_"));
+    assert!(asm.contains("  mov rax, 5\n"));
+    assert!(asm.contains("  mov al, bl\n"));
+    assert!(asm.contains("  cmp al, cl\n"));
+    assert!(asm.contains("  jbe .L.__subsea.main.min_"));
+    assert!(asm.contains("  mov al, cl\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_integer_sqrt_typed_intrinsic_call() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::IntrinsicCall {
+            op: IntrinsicOp::Sqrt,
+            width: MemoryWidth::I64,
+            args: vec![reg("rbx")],
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "sqrt only supports f32 or f64; integer sqrt is not implemented"
+    );
 }
 
 #[test]
