@@ -600,10 +600,6 @@ pub(crate) fn stack_string_property_slot(
     })
 }
 
-pub(crate) fn build_stack_frame(label: &Label) -> StackFrame {
-    build_stack_frame_from_layout(&crate::lower::lower_stack_layout(label), 16)
-}
-
 pub(crate) fn build_stack_frame_from_layout(
     layout: &crate::ir::StackLayout,
     alignment: usize,
@@ -646,8 +642,9 @@ pub(crate) fn validate_label(
     label: &Label,
     top_level_labels: &HashSet<&str>,
     stack: &StackFrame,
+    frame_pointer: &str,
 ) -> Result<(), String> {
-    validate_stack_register_use(label, stack)?;
+    validate_stack_register_use(label, stack, frame_pointer)?;
     validate_label_control_flow(label, top_level_labels)
 }
 
@@ -795,30 +792,35 @@ fn previous_instructions_set_exit_syscall(
     rax_is_exit && rdi_is_set
 }
 
-fn validate_stack_register_use(label: &Label, stack: &StackFrame) -> Result<(), String> {
+fn validate_stack_register_use(
+    label: &Label,
+    stack: &StackFrame,
+    frame_pointer: &str,
+) -> Result<(), String> {
     if !stack.has_slots() {
         return Ok(());
     }
 
     for instruction in &label.instructions {
-        validate_instruction_does_not_use_rbp(instruction, &label.name)?;
+        validate_instruction_does_not_use_frame_pointer(instruction, &label.name, frame_pointer)?;
     }
 
     Ok(())
 }
 
-fn validate_instruction_does_not_use_rbp(
+fn validate_instruction_does_not_use_frame_pointer(
     instruction: &Instruction,
     label_name: &str,
+    frame_pointer: &str,
 ) -> Result<(), String> {
     if let Instruction::Assign {
         dst: AssignmentTarget::RegisterPair(RegisterPair { high, low }),
         ..
     } = instruction
-        && (is_rbp_register(high) || is_rbp_register(low))
+        && (high == frame_pointer || low == frame_pointer)
     {
         return Err(format!(
-            "Label {label_name:?} declares stack variables, so rbp is reserved"
+            "Label {label_name:?} declares stack variables, so {frame_pointer} is reserved"
         ));
     }
 
@@ -826,58 +828,55 @@ fn validate_instruction_does_not_use_rbp(
         value: AssignmentValue::PairBinary { lhs, rhs, .. },
         ..
     } = instruction
-        && (register_pair_uses_rbp(lhs) || register_pair_uses_rbp(rhs))
+        && (register_pair_uses_frame_pointer(lhs, frame_pointer)
+            || register_pair_uses_frame_pointer(rhs, frame_pointer))
     {
         return Err(format!(
-            "Label {label_name:?} declares stack variables, so rbp is reserved"
+            "Label {label_name:?} declares stack variables, so {frame_pointer} is reserved"
         ));
     }
 
     let mut uses_rbp = false;
     instruction.visit_operands(|operand| {
-        uses_rbp |= operand_uses_rbp(operand);
+        uses_rbp |= operand_uses_frame_pointer(operand, frame_pointer);
     });
 
     if uses_rbp {
         return Err(format!(
-            "Label {label_name:?} declares stack variables, so rbp is reserved"
+            "Label {label_name:?} declares stack variables, so {frame_pointer} is reserved"
         ));
     }
 
     Ok(())
 }
 
-fn register_pair_uses_rbp(pair: &RegisterPair) -> bool {
-    is_rbp_register(&pair.high) || is_rbp_register(&pair.low)
+fn register_pair_uses_frame_pointer(pair: &RegisterPair, frame_pointer: &str) -> bool {
+    pair.high == frame_pointer || pair.low == frame_pointer
 }
 
-fn operand_uses_rbp(operand: &Operand) -> bool {
+fn operand_uses_frame_pointer(operand: &Operand, frame_pointer: &str) -> bool {
     match operand {
-        Operand::Register(name) => is_rbp_register(name),
-        Operand::Dereference { address, .. } => address_uses_rbp(address),
+        Operand::Register(name) => name == frame_pointer,
+        Operand::Dereference { address, .. } => address_uses_frame_pointer(address, frame_pointer),
         _ => false,
     }
 }
 
-fn address_uses_rbp(address: &Address) -> bool {
-    address_term_uses_rbp(&address.first)
+fn address_uses_frame_pointer(address: &Address, frame_pointer: &str) -> bool {
+    address_term_uses_frame_pointer(&address.first, frame_pointer)
         || address
             .rest
             .iter()
-            .any(|(_, term)| address_term_uses_rbp(term))
+            .any(|(_, term)| address_term_uses_frame_pointer(term, frame_pointer))
 }
 
-fn address_term_uses_rbp(term: &AddressTerm) -> bool {
+fn address_term_uses_frame_pointer(term: &AddressTerm, frame_pointer: &str) -> bool {
     match term {
         AddressTerm::Register(name) | AddressTerm::ScaledRegister { register: name, .. } => {
-            is_rbp_register(name)
+            name == frame_pointer
         }
         _ => false,
     }
-}
-
-fn is_rbp_register(name: &str) -> bool {
-    matches!(name, "rbp" | "ebp" | "bp" | "bpl")
 }
 
 fn is_local_label_target(target: &str) -> bool {

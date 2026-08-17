@@ -31,8 +31,10 @@ pub fn emit(program: &ir::Program) -> Result<String, String> {
         if frame_size > 0 {
             asm.push_str(&format!("  sub sp, sp, #{frame_size}\n"));
         }
-        for instruction in &label.instructions {
-            emit_instruction(&mut asm, instruction, &slots, frame_size)?;
+        for (index, instruction) in label.instructions.iter().enumerate() {
+            emit_instruction(&mut asm, instruction, &slots, frame_size).map_err(|message| {
+                format!("__SUBSEA_AARCH__{}\0{}\0{message}", label.name, index)
+            })?;
         }
         if frame_size > 0
             && !label

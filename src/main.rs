@@ -6,7 +6,7 @@ use std::{
 };
 
 use subsea::backend::{Architecture, Target, aarch64};
-use subsea::codegen::{emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
+use subsea::codegen::{emit_x86_64_asm_with_origins, validate_program_with_diagnostics_for_target};
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
     build_executable_for_target, build_freestanding_executable, build_object_for_target,
@@ -572,18 +572,23 @@ fn compile_to_asm_with_timings(
     let parse_started = Instant::now();
     let loaded = imports::load_program_with_origins(&source_path)?;
     let program = loaded.program;
-    if target.spec().architecture == Architecture::X86_64 {
-        validate_program_with_diagnostics(&program, &loaded.origins)
-            .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
-    }
+    validate_program_with_diagnostics_for_target(&program, &loaded.origins, target)
+        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
     let parse_ast = parse_started.elapsed();
 
     let codegen_started = Instant::now();
     let entry_symbol = entry_symbol.unwrap_or("_start");
     let asm = if target.spec().architecture == Architecture::AArch64 {
-        let semantic_ir = subsea::lower::lower_program(&program)
-            .map_err(|error| format!("{}:{}: {}", error.label, error.instruction, error.message))?;
-        aarch64::emit(&semantic_ir)?
+        let semantic_ir = subsea::lower::lower_program(&program).map_err(|error| {
+            let diagnostic = subsea::diagnostic::Diagnostic::new(error.message);
+            let diagnostic = loaded
+                .origins
+                .instruction_span(&error.label, error.instruction)
+                .map_or(diagnostic.clone(), |span| diagnostic.at(span));
+            diagnostic.render(loaded.origins.sources())
+        })?;
+        aarch64::emit(&semantic_ir)
+            .map_err(|error| render_backend_diagnostic(&error, &loaded.origins))?
     } else {
         emit_x86_64_asm_with_origins(&program, target, entry_symbol, &loaded.origins)
             .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?
@@ -599,6 +604,21 @@ fn compile_to_asm_with_timings(
             codegen,
         },
     })
+}
+
+fn render_backend_diagnostic(error: &str, origins: &subsea::diagnostic::ProgramOrigins) -> String {
+    let Some((label, index, message)) = error.strip_prefix("__SUBSEA_AARCH__").and_then(|value| {
+        let mut parts = value.splitn(3, '\0');
+        Some((parts.next()?, parts.next()?.parse().ok()?, parts.next()?))
+    }) else {
+        return error.to_owned();
+    };
+
+    let diagnostic = subsea::diagnostic::Diagnostic::new(message);
+    let diagnostic = origins
+        .instruction_span(label, index)
+        .map_or(diagnostic.clone(), |span| diagnostic.at(span));
+    diagnostic.render(origins.sources())
 }
 
 fn print_build_timings(

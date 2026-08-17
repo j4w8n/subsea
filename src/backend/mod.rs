@@ -181,4 +181,11 @@ impl Target {
     pub fn supports_runtime(self, operation: RuntimeOperation) -> bool {
         self.spec().runtime_operations.contains(&operation)
     }
+
+    pub(crate) fn is_register(self, name: &str) -> bool {
+        match self.spec().architecture {
+            Architecture::X86_64 => x86_64::is_register(name),
+            Architecture::AArch64 => aarch64::is_register(name),
+        }
+    }
 }

@@ -54,6 +54,94 @@ fn builds_aarch_core_fixture_when_cross_toolchain_is_available() {
 }
 
 #[test]
+fn aarch_diagnostic_rejects_x86_register_with_source_location() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch",
+            "tests/fixtures/aarch_invalid_register.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("aarch_invalid_register.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("Register \"rax\" is not available on target aarch"));
+}
+
+#[test]
+fn aarch_diagnostic_rejects_x86_inline_assembly_with_source_location() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch",
+            "tests/fixtures/aarch_inline_x86.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("aarch_inline_x86.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("x86 inline assembly is not available on target aarch"));
+}
+
+#[test]
+fn aarch_lowering_diagnostic_includes_source_location() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch",
+            "tests/fixtures/aarch_unsupported.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("aarch_unsupported.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("push is not represented in the target-neutral IR yet"));
+}
+
+#[test]
+fn aarch_backend_diagnostic_includes_source_location() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch",
+            "tests/fixtures/aarch_unsupported_backend.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("aarch_unsupported_backend.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("AArch64 backend does not support stack strings yet"));
+}
+
+#[test]
 fn compiles_and_runs_runtime_string_program() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

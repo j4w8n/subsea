@@ -320,6 +320,19 @@ impl Operand {
             operand => operand,
         }
     }
+
+    pub fn visit_registers(&self, mut visit: impl FnMut(&str)) {
+        match self {
+            Self::Register(name) => visit(name),
+            Self::Dereference { address, .. } | Self::AddressOf(address) => {
+                address.visit_registers(&mut visit)
+            }
+            Self::Converted { operand, .. } | Self::Cast { operand, .. } => {
+                operand.visit_registers(visit)
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -703,12 +716,30 @@ pub struct Address {
     pub rest: Vec<(AddressOperator, AddressTerm)>,
 }
 
+impl Address {
+    pub fn visit_registers(&self, visit: &mut impl FnMut(&str)) {
+        self.first.visit_registers(visit);
+        for (_, term) in &self.rest {
+            term.visit_registers(visit);
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum AddressTerm {
     Immediate(i128),
     Register(String),
     ScaledRegister { register: String, scale: i64 },
     Ident(String),
+}
+
+impl AddressTerm {
+    fn visit_registers(&self, visit: &mut impl FnMut(&str)) {
+        match self {
+            Self::Register(name) | Self::ScaledRegister { register: name, .. } => visit(name),
+            Self::Immediate(_) | Self::Ident(_) => {}
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

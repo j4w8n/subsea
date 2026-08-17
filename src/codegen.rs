@@ -1,7 +1,7 @@
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
-    build_stack_frame, build_stack_frame_from_layout, collect_string_bindings, destination_width,
-    float_memory_width, immediate_value, is_float_memory_operand, memory_width_bits, operand_width,
+    build_stack_frame_from_layout, collect_string_bindings, destination_width, float_memory_width,
+    immediate_value, is_float_memory_operand, memory_width_bits, operand_width,
     resolve_memory_width, stack_scalar_slot, stack_string_slot, validate_float_literal,
     validate_float_width, validate_label,
 };
@@ -23,7 +23,7 @@ use crate::backend::x86_64::{
     is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, pair_math_opcodes,
     wide_math_opcode, width as register_width,
 };
-use crate::backend::{RuntimeOperation, TargetSpec};
+use crate::backend::{Architecture, RuntimeOperation, TargetSpec};
 use crate::diagnostic::{Diagnostic, ProgramOrigins};
 use crate::ir;
 use crate::lower;
@@ -59,7 +59,17 @@ pub fn validate_program_with_diagnostics(
     program: &Program,
     origins: &ProgramOrigins,
 ) -> Result<(), Diagnostic> {
+    validate_program_with_diagnostics_for_target(program, origins, Target::X86_64)
+}
+
+pub fn validate_program_with_diagnostics_for_target(
+    program: &Program,
+    origins: &ProgramOrigins,
+    target: Target,
+) -> Result<(), Diagnostic> {
     validate_program_symbols(program).map_err(Diagnostic::new)?;
+
+    validate_target_registers(program, target, origins)?;
 
     let top_level_labels: HashSet<&str> = program
         .labels
@@ -67,13 +77,101 @@ pub fn validate_program_with_diagnostics(
         .map(|label| label.name.as_str())
         .collect();
     for label in &program.labels {
-        let stack = build_stack_frame(label);
-        validate_label(label, &top_level_labels, &stack).map_err(|message| {
+        let stack = build_stack_frame_from_layout(
+            &lower::lower_stack_layout(label),
+            target.spec().stack_alignment,
+        );
+        validate_label(
+            label,
+            &top_level_labels,
+            &stack,
+            target.spec().frame_pointer,
+        )
+        .map_err(|message| {
             let diagnostic = Diagnostic::new(message);
             origins
                 .instruction_span(&label.name, 0)
                 .map_or(diagnostic.clone(), |span| diagnostic.at(span))
         })?;
+    }
+
+    Ok(())
+}
+
+fn validate_target_registers(
+    program: &Program,
+    target: Target,
+    origins: &ProgramOrigins,
+) -> Result<(), Diagnostic> {
+    for label in &program.labels {
+        for (index, instruction) in label.instructions.iter().enumerate() {
+            if target.spec().architecture == Architecture::AArch64
+                && matches!(instruction, crate::ast::Instruction::InlineAsm { .. })
+            {
+                let diagnostic =
+                    Diagnostic::new("x86 inline assembly is not available on target aarch");
+                return Err(origins
+                    .instruction_span(&label.name, index)
+                    .map_or(diagnostic.clone(), |span| diagnostic.at(span)));
+            }
+
+            let mut invalid = None;
+            instruction.visit_operands(|operand| {
+                if invalid.is_some() {
+                    return;
+                }
+                operand.visit_registers(|register| {
+                    if invalid.is_none() && !target.is_register(register) {
+                        invalid = Some(register.to_owned());
+                    }
+                });
+            });
+
+            if invalid.is_none() {
+                match instruction {
+                    crate::ast::Instruction::Assign {
+                        dst: crate::ast::AssignmentTarget::RegisterPair(pair),
+                        ..
+                    }
+                    | crate::ast::Instruction::AssignIf {
+                        dst: crate::ast::AssignmentTarget::RegisterPair(pair),
+                        ..
+                    } => {
+                        for register in [&pair.high, &pair.low] {
+                            if !target.is_register(register) {
+                                invalid = Some(register.clone());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if invalid.is_none()
+                && let crate::ast::Instruction::Assign {
+                    value: crate::ast::AssignmentValue::PairBinary { lhs, rhs, .. },
+                    ..
+                } = instruction
+            {
+                for register in [&lhs.high, &lhs.low, &rhs.high, &rhs.low] {
+                    if !target.is_register(register) {
+                        invalid = Some(register.clone());
+                        break;
+                    }
+                }
+            }
+
+            if let Some(register) = invalid {
+                let diagnostic = Diagnostic::new(format!(
+                    "Register {register:?} is not available on target {}",
+                    target.name()
+                ));
+                return Err(origins
+                    .instruction_span(&label.name, index)
+                    .map_or(diagnostic.clone(), |span| diagnostic.at(span)));
+            }
+        }
     }
 
     Ok(())
@@ -122,7 +220,7 @@ fn emit_x86_64_asm_impl(
     entry_symbol: &str,
     origins: Option<&ProgramOrigins>,
 ) -> Result<String, String> {
-    if target.spec().architecture != crate::backend::Architecture::X86_64 {
+    if target.spec().architecture != Architecture::X86_64 {
         return Err(format!(
             "x86-64 backend cannot compile target {} yet",
             target.name()
@@ -454,7 +552,12 @@ fn emit_x86_64_asm_impl(
             }
         }
 
-        validate_label(label, &top_level_labels, &stack)?;
+        validate_label(
+            label,
+            &top_level_labels,
+            &stack,
+            target.spec().frame_pointer,
+        )?;
 
         asm.push('\n');
     }
