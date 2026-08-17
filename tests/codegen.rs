@@ -3193,6 +3193,134 @@ fn emits_integer_typed_intrinsic_calls() {
 }
 
 #[test]
+fn emits_integer_min_max_to_memory() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("result"),
+            width: MemoryWidth::U64,
+            value: 0,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Max,
+                        width: MemoryWidth::U64,
+                        args: vec![reg("rbx"), reg("rcx")],
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, rbx\n"));
+    assert!(asm.contains("  cmp r10, rcx\n"));
+    assert!(asm.contains("  mov qword ptr [result], r10\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_float_intrinsics_to_memory_with_xmm15() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![
+            MemoryDeclaration::FloatScalar {
+                name: s("input"),
+                width: MemoryWidth::F64,
+                value: s("2.5"),
+            },
+            MemoryDeclaration::FloatScalar {
+                name: s("other"),
+                width: MemoryWidth::F64,
+                value: s("3.5"),
+            },
+            MemoryDeclaration::FloatScalar {
+                name: s("result"),
+                width: MemoryWidth::F64,
+                value: s("0.0"),
+            },
+        ],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Sqrt,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None)],
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Round,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None)],
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Max,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None), deref_ident("other", None)],
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Floor,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None)],
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Ceil,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None)],
+                    },
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Trunc,
+                        width: MemoryWidth::F64,
+                        args: vec![deref_ident("input", None)],
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  sqrtsd xmm15, qword ptr [input]\n"));
+    assert!(asm.contains("  roundsd xmm15, qword ptr [input], 0\n"));
+    assert!(asm.contains("  maxsd xmm15, qword ptr [other]\n"));
+    assert!(asm.contains("  roundsd xmm15, qword ptr [input], 1\n"));
+    assert!(asm.contains("  roundsd xmm15, qword ptr [input], 2\n"));
+    assert!(asm.contains("  roundsd xmm15, qword ptr [input], 3\n"));
+    assert!(asm.contains("  movsd qword ptr [result], xmm15\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn emits_unsigned_integer_sqrt_typed_intrinsic_calls() {
     let program = main_program(vec![
         Instruction::Assign {
@@ -3221,6 +3349,167 @@ fn emits_unsigned_integer_sqrt_typed_intrinsic_calls() {
     assert!(asm.contains("  mov r10d, 81\n"));
     assert!(asm.contains("  mov r11, 1073741824\n"));
     assert_assembles(&asm);
+}
+
+#[test]
+fn emits_integer_sqrt_to_memory() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("result"),
+            width: MemoryWidth::U64,
+            value: 0,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Sqrt,
+                        width: MemoryWidth::U64,
+                        args: vec![reg("rbx")],
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r11, rbx\n"));
+    assert!(asm.contains("  mov qword ptr [result], r10\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_integer_sqrt_to_stack_memory() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: Vec::new(),
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Stack {
+                    name: s("result"),
+                    width: MemoryWidth::U32,
+                    value: Operand::Immediate(0),
+                },
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(ident("result")),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Sqrt,
+                        width: MemoryWidth::U32,
+                        args: vec![Operand::Immediate(81)],
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov dword ptr [rbp - 8], r10d\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_integer_sqrt_to_indexed_memory() {
+    let destination = Operand::Dereference {
+        address: Address {
+            first: AddressTerm::Register(s("rdi")),
+            rest: vec![(
+                AddressOperator::Add,
+                AddressTerm::ScaledRegister {
+                    register: s("rcx"),
+                    scale: 2,
+                },
+            )],
+        },
+        width: Some(MemoryWidth::U16),
+    };
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(destination),
+        value: AssignmentValue::IntrinsicCall {
+            op: IntrinsicOp::Sqrt,
+            width: MemoryWidth::U16,
+            args: vec![reg("bx")],
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov word ptr [rdi + rcx * 2], r10w\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn preserves_memory_sqrt_source_before_storing_result() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("result"),
+            width: MemoryWidth::U64,
+            value: 81,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(deref_ident("result", None)),
+                    value: AssignmentValue::IntrinsicCall {
+                        op: IntrinsicOp::Sqrt,
+                        width: MemoryWidth::U64,
+                        args: vec![deref_ident("result", None)],
+                    },
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+    let load = asm.find("  mov r11, qword ptr [result]\n").unwrap();
+    let store = asm.find("  mov qword ptr [result], r10\n").unwrap();
+
+    assert!(load < store);
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_memory_sqrt_destination_that_uses_all_scratch_registers() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(Operand::Dereference {
+            address: Address {
+                first: AddressTerm::Register(s("r10")),
+                rest: Vec::new(),
+            },
+            width: Some(MemoryWidth::U64),
+        }),
+        value: AssignmentValue::IntrinsicCall {
+            op: IntrinsicOp::Sqrt,
+            width: MemoryWidth::U64,
+            args: vec![reg("rbx")],
+        },
+    }]);
+
+    let error = emit_x86_64_linux_asm(&program).unwrap_err();
+
+    assert_eq!(
+        error,
+        "Integer sqrt intrinsic has no temporary scratch register"
+    );
 }
 
 #[test]

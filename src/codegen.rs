@@ -3160,17 +3160,35 @@ fn emit_float_sqrt_intrinsic(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    validate_float_intrinsic_destination("sqrt", dst)?;
+    let memory_destination =
+        validate_float_intrinsic_destination("sqrt", dst, width, strings, stack)?;
     validate_float_math_operand("sqrt operand", src, width, strings, label_name, stack)?;
 
-    let Operand::Register(dst_register) = dst else {
-        unreachable!()
+    let dst_register = if memory_destination {
+        "xmm15"
+    } else {
+        let Operand::Register(dst_register) = dst else {
+            unreachable!()
+        };
+        dst_register.as_str()
     };
     let src = emit_float_operand(src, width, strings, label_name, stack)?;
     asm.push_str(&format!(
         "  {} {dst_register}, {src}\n",
         float_sqrt_opcode(width)
     ));
+
+    if memory_destination {
+        emit_float_copy_instruction(
+            asm,
+            &Operand::Register(String::from("xmm15")),
+            dst,
+            width,
+            strings,
+            label_name,
+            stack,
+        )?;
+    }
 
     Ok(())
 }
@@ -3185,33 +3203,56 @@ fn emit_integer_sqrt_intrinsic(
     stack: &StackFrame,
 ) -> Result<(), String> {
     let expected = memory_width_bits(width);
-    let Operand::Register(dst_register) = dst else {
-        return Err(String::from(
-            "Integer sqrt intrinsic destination must be a register",
-        ));
+    let (dst_register, memory_destination) = match dst {
+        Operand::Register(dst_register) if !is_xmm_register(dst_register) => {
+            let dst_width = register_width(dst_register).ok_or_else(|| {
+                String::from("Integer sqrt intrinsic destination must be an integer register")
+            })?;
+            if dst_width != expected {
+                return Err(format!(
+                    "Integer sqrt intrinsic destination must be {}-bit, found {}-bit register",
+                    expected.bits(),
+                    dst_width.bits()
+                ));
+            }
+            if matches!(dst_register.as_str(), "ah" | "bh" | "ch" | "dh") {
+                return Err(String::from(
+                    "Integer sqrt intrinsic destination cannot use a high-byte register",
+                ));
+            }
+            (Some(dst_register.as_str()), false)
+        }
+        Operand::Register(_) => {
+            return Err(String::from(
+                "Integer sqrt intrinsic destination must be an integer register or memory operand",
+            ));
+        }
+        dst if is_memory_operand(dst, stack) && !matches!(dst, Operand::StringProperty { .. }) => {
+            if is_float_memory_operand(dst, strings, stack)? {
+                return Err(String::from(
+                    "Integer sqrt intrinsic destination must be an integer memory operand",
+                ));
+            }
+            let Some(dst_width) = operand_width(dst, strings, label_name, stack)? else {
+                return Err(String::from(
+                    "Integer sqrt intrinsic memory destination must have a known width",
+                ));
+            };
+            if dst_width != expected {
+                return Err(format!(
+                    "Integer sqrt intrinsic destination must be {}-bit, found {}-bit memory operand",
+                    expected.bits(),
+                    dst_width.bits()
+                ));
+            }
+            (None, true)
+        }
+        _ => {
+            return Err(String::from(
+                "Integer sqrt intrinsic destination must be an integer register or memory operand",
+            ));
+        }
     };
-
-    if is_xmm_register(dst_register) {
-        return Err(String::from(
-            "Integer sqrt intrinsic destination must be an integer register",
-        ));
-    }
-
-    let dst_width = register_width(dst_register)
-        .ok_or_else(|| String::from("Integer sqrt intrinsic destination must be a register"))?;
-    if dst_width != expected {
-        return Err(format!(
-            "Integer sqrt intrinsic destination must be {}-bit, found {}-bit register",
-            expected.bits(),
-            dst_width.bits()
-        ));
-    }
-
-    if matches!(dst_register.as_str(), "ah" | "bh" | "ch" | "dh") {
-        return Err(String::from(
-            "Integer sqrt intrinsic destination cannot use a high-byte register",
-        ));
-    }
 
     validate_integer_min_max_operand(
         "Integer sqrt intrinsic operand",
@@ -3237,16 +3278,21 @@ fn emit_integer_sqrt_intrinsic(
         }
     }
 
-    let mut scratch = ["r10", "r11", "r8", "r9"]
-        .into_iter()
-        .filter(|register| !same_register_family(register, dst_register));
-    let narrow_destination = matches!(expected, Width::Bits8 | Width::Bits16);
-    let accumulator = if narrow_destination {
+    let mut scratch =
+        ["r10", "r11", "r8", "r9"]
+            .into_iter()
+            .filter(|register| match dst_register {
+                Some(dst_register) => !same_register_family(register, dst_register),
+                None => !operand_address_uses_register_family(dst, register),
+            });
+    let narrow_destination =
+        dst_register.is_some() && matches!(expected, Width::Bits8 | Width::Bits16);
+    let accumulator = if memory_destination || narrow_destination {
         scratch.next().ok_or_else(|| {
             String::from("Integer sqrt intrinsic has no accumulator scratch register")
         })?
     } else {
-        dst_register.as_str()
+        dst_register.expect("register destination")
     };
     let base = scratch
         .next()
@@ -3302,7 +3348,10 @@ fn emit_integer_sqrt_intrinsic(
 
     if narrow_destination {
         let result = register_alias(&dst_accumulator, expected)?;
-        asm.push_str(&format!("  mov {dst_register}, {result}\n"));
+        asm.push_str(&format!("  mov {}, {result}\n", dst_register.unwrap()));
+    } else if memory_destination {
+        let result = Operand::Register(register_alias(&dst_accumulator, expected)?);
+        emit_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
     }
     if is_signed_integer_width(width) {
         asm.push_str(&format!("  jmp {after_negative_label}\n"));
@@ -3385,7 +3434,8 @@ fn emit_float_rounding_intrinsic(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    validate_float_intrinsic_destination(intrinsic_op_name(op), dst)?;
+    let memory_destination =
+        validate_float_intrinsic_destination(intrinsic_op_name(op), dst, width, strings, stack)?;
     validate_float_math_operand(
         &format!("{} operand", intrinsic_op_name(op)),
         src,
@@ -3395,8 +3445,13 @@ fn emit_float_rounding_intrinsic(
         stack,
     )?;
 
-    let Operand::Register(dst_register) = dst else {
-        unreachable!()
+    let dst_register = if memory_destination {
+        "xmm15"
+    } else {
+        let Operand::Register(dst_register) = dst else {
+            unreachable!()
+        };
+        dst_register.as_str()
     };
     let src = emit_float_operand(src, width, strings, label_name, stack)?;
     asm.push_str(&format!(
@@ -3404,6 +3459,18 @@ fn emit_float_rounding_intrinsic(
         float_rounding_opcode(width),
         float_rounding_mode(op)
     ));
+
+    if memory_destination {
+        emit_float_copy_instruction(
+            asm,
+            &Operand::Register(String::from("xmm15")),
+            dst,
+            width,
+            strings,
+            label_name,
+            stack,
+        )?;
+    }
 
     Ok(())
 }
@@ -3419,7 +3486,8 @@ fn emit_float_min_max_intrinsic(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    validate_float_intrinsic_destination(intrinsic_op_name(op), dst)?;
+    let memory_destination =
+        validate_float_intrinsic_destination(intrinsic_op_name(op), dst, width, strings, stack)?;
     validate_float_math_operand(
         "Floating-point intrinsic left operand",
         lhs,
@@ -3437,11 +3505,17 @@ fn emit_float_min_max_intrinsic(
         stack,
     )?;
 
-    if lhs != dst {
-        emit_float_copy_instruction(asm, lhs, dst, width, strings, label_name, stack)?;
+    let target = if memory_destination {
+        Operand::Register(String::from("xmm15"))
+    } else {
+        dst.clone()
+    };
+
+    if lhs != &target {
+        emit_float_copy_instruction(asm, lhs, &target, width, strings, label_name, stack)?;
     }
 
-    let Operand::Register(dst_register) = dst else {
+    let Operand::Register(dst_register) = &target else {
         unreachable!()
     };
     let rhs = emit_float_operand(rhs, width, strings, label_name, stack)?;
@@ -3449,6 +3523,10 @@ fn emit_float_min_max_intrinsic(
         "  {} {dst_register}, {rhs}\n",
         float_min_max_opcode(op, width)
     ));
+
+    if memory_destination {
+        emit_float_copy_instruction(asm, &target, dst, width, strings, label_name, stack)?;
+    }
 
     Ok(())
 }
@@ -3466,15 +3544,20 @@ fn emit_integer_min_max_intrinsic(
 ) -> Result<(), String> {
     validate_integer_min_max_intrinsic(dst, width, lhs, rhs, strings, label_name, stack)?;
 
-    emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
-    let dst_register = match dst {
-        Operand::Register(register) => register,
-        _ => unreachable!(),
-    };
     let intrinsic_width = memory_width_bits(width);
-    let dst = Operand::Register(register_alias(dst_register, intrinsic_width)?);
+    let memory_destination = !matches!(dst, Operand::Register(_));
+    let result_register = if memory_destination {
+        integer_memory_result_register(dst, rhs)?
+    } else {
+        match dst {
+            Operand::Register(register) => register.clone(),
+            _ => unreachable!(),
+        }
+    };
+    let result = Operand::Register(register_alias(&result_register, intrinsic_width)?);
+    emit_copy_instruction(asm, lhs, &result, strings, label_name, stack)?;
     let rhs = integer_min_max_rhs(rhs, intrinsic_width, strings, label_name, stack)?;
-    let dst_operand = emit_operand(&dst, strings, label_name, stack)?;
+    let dst_operand = emit_operand(&result, strings, label_name, stack)?;
     let rhs_operand = emit_operand(&rhs, strings, label_name, stack)?;
     let keep_label = format!(
         ".L.__subsea.{label_name}.{}_{}_keep",
@@ -3490,15 +3573,61 @@ fn emit_integer_min_max_intrinsic(
     asm.push_str(&format!("  mov {dst_operand}, {rhs_operand}\n"));
     asm.push_str(&format!("{keep_label}:\n"));
 
+    if memory_destination {
+        emit_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
+    }
+
     Ok(())
 }
 
-fn validate_float_intrinsic_destination(name: &str, dst: &Operand) -> Result<(), String> {
+fn integer_memory_result_register(dst: &Operand, rhs: &Operand) -> Result<String, String> {
+    ["r10", "r11", "r8", "r9"]
+        .into_iter()
+        .find(|register| {
+            !operand_address_uses_register_family(dst, register)
+                && !operand_uses_register_family(rhs, register)
+        })
+        .map(String::from)
+        .ok_or_else(|| {
+            String::from("Integer min/max intrinsic has no available result scratch register")
+        })
+}
+
+fn validate_float_intrinsic_destination(
+    name: &str,
+    dst: &Operand,
+    width: MemoryWidth,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<bool, String> {
     match dst {
-        Operand::Register(register) if is_xmm_register(register) => Ok(()),
+        Operand::Register(register) if is_xmm_register(register) => Ok(false),
+        dst if is_memory_operand(dst, stack)
+            && !matches!(dst, Operand::StringProperty { .. })
+            && is_float_memory_operand(dst, strings, stack)? =>
+        {
+            if resolve_memory_width_for_float_destination(dst, strings, stack)? != Some(width) {
+                return Err(format!(
+                    "{name} floating-point intrinsic destination width must match {width:?}"
+                ));
+            }
+            Ok(true)
+        }
         _ => Err(format!(
-            "{name} floating-point intrinsic destination must be an XMM register"
+            "{name} floating-point intrinsic destination must be an XMM register or floating-point memory operand"
         )),
+    }
+}
+
+fn resolve_memory_width_for_float_destination(
+    dst: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> Result<Option<MemoryWidth>, String> {
+    match dst {
+        Operand::Dereference { address, width } => resolve_memory_width(address, *width, strings),
+        Operand::Ident(name) => Ok(stack_scalar_slot(stack, name).map(|(_, width)| width)),
+        _ => Ok(None),
     }
 }
 
@@ -3511,24 +3640,37 @@ fn validate_integer_min_max_intrinsic(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    let Operand::Register(dst_register) = dst else {
-        return Err(String::from(
-            "Integer min/max intrinsic destination must be a register",
-        ));
-    };
-
-    if is_xmm_register(dst_register) {
-        return Err(String::from(
-            "Integer min/max intrinsic destination must be an integer register",
-        ));
-    }
-
     let expected = memory_width_bits(width);
-    let dst_width = register_width(dst_register)
-        .ok_or_else(|| String::from("Integer min/max intrinsic destination must be a register"))?;
+    let dst_width = match dst {
+        Operand::Register(dst_register) if !is_xmm_register(dst_register) => {
+            register_width(dst_register).ok_or_else(|| {
+                String::from("Integer min/max intrinsic destination must be a register")
+            })?
+        }
+        Operand::Register(_) => {
+            return Err(String::from(
+                "Integer min/max intrinsic destination must be an integer register",
+            ));
+        }
+        dst if is_memory_operand(dst, stack) && !matches!(dst, Operand::StringProperty { .. }) => {
+            if is_float_memory_operand(dst, strings, stack)? {
+                return Err(String::from(
+                    "Integer min/max intrinsic destination must be integer memory",
+                ));
+            }
+            operand_width(dst, strings, label_name, stack)?.ok_or_else(|| {
+                String::from("Integer min/max intrinsic memory destination must have a known width")
+            })?
+        }
+        _ => {
+            return Err(String::from(
+                "Integer min/max intrinsic destination must be an integer register or memory operand",
+            ));
+        }
+    };
     if dst_width != expected {
         return Err(format!(
-            "Integer min/max intrinsic destination must be {}-bit, found {}-bit register",
+            "Integer min/max intrinsic destination must be {}-bit, found {}-bit operand",
             expected.bits(),
             dst_width.bits()
         ));
