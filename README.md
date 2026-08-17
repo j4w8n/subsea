@@ -954,7 +954,7 @@ xmm6 = trunc(xmm7):f32
 - `min` and `max` support scalar integer widths `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, and `u64` with signedness taken from the width.
 - Integer `min` and `max` destinations must be integer registers. `i8` and `u8` are lowered with branches because x86-64 does not have 8-bit conditional moves.
 - `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc` support scalar floating widths `f32` and `f64`; floating-point destinations must be XMM registers.
-- Integer `sqrt` is not implemented yet; `sqrt(...):i64` and other integer widths are rejected.
+- Integer `sqrt` supports signed and unsigned widths from 8 to 64 bits, and returns the floor square root. Signed inputs must be non-negative; negative immediate values are rejected at compile time, while negative runtime values trap.
 - Integer result rounding is not implemented yet; `round(...):i64` and other integer widths are rejected.
 - Floating-point rounding emits SSE4.1 `roundss` or `roundsd`: `round` uses nearest, `floor` rounds down, `ceil` rounds up, and `trunc` rounds toward zero.
 - Floating-point intrinsic operands can be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the intrinsic width.
