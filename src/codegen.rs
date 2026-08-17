@@ -473,6 +473,9 @@ fn emit_compare_condition_jump(
     validate_resolved_integer_compare_op(op)?;
     validate_compare_operands(lhs, rhs, strings, label_name, stack)?;
 
+    let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
+        && matches!(lhs, Operand::Register(register) if !is_xmm_register(register))
+        && immediate_value(rhs, strings, label_name, stack) == Some(0);
     let lhs = emit_operand(lhs, strings, label_name, stack)?;
     let rhs = emit_operand(rhs, strings, label_name, stack)?;
     let op = if jump_if_true {
@@ -480,7 +483,11 @@ fn emit_compare_condition_jump(
     } else {
         invert_compare_op(op)
     };
-    asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+    if use_test {
+        asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+    } else {
+        asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+    }
     asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
 
     Ok(())
@@ -3241,13 +3248,13 @@ fn emit_power_operation(
         ));
     }
 
-    let exponent_uses_r10_address = operand_address_uses_register_family(exponent, "r10");
+    let exponent_uses_r10 = operand_uses_register_family(exponent, "r10");
     let base_uses_r11_address = operand_address_uses_register_family(base, "r11");
 
-    match (exponent_uses_r10_address, base_uses_r11_address) {
+    match (exponent_uses_r10, base_uses_r11_address) {
         (true, true) => {
             return Err(String::from(
-                "Power cannot use r10 in the exponent address and r11 in the base address because both are scratch registers",
+                "Power cannot use r10 in the exponent and r11 in the base address because both are scratch registers",
             ));
         }
         (true, false) => {
@@ -3496,35 +3503,29 @@ fn validate_division_operands(
 }
 
 fn expression_temp_register(dst: &Operand, expression: &Expression) -> Result<String, String> {
-    if !operand_uses_register_family(dst, "r10")
-        && !expression_uses_register_family(expression, "r10")
-    {
-        Ok(String::from("r10"))
-    } else if !operand_uses_register_family(dst, "r11")
-        && !expression_uses_register_family(expression, "r11")
-    {
-        Ok(String::from("r11"))
-    } else {
-        Err(String::from(
-            "Arithmetic expression cannot use both r10 and r11 because they are scratch registers",
-        ))
+    for register in ["r10", "r11", "r8", "r9"] {
+        if !operand_uses_register_family(dst, register)
+            && !expression_uses_register_family(expression, register)
+        {
+            return Ok(String::from(register));
+        }
     }
+
+    Err(String::from(
+        "Arithmetic expression has no available temporary register",
+    ))
 }
 
 fn division_temp_register(lhs: &Operand, rhs: &Operand) -> Result<String, String> {
-    if !operand_uses_register_family(lhs, "r10")
-        && !operand_address_uses_register_family(rhs, "r10")
-    {
-        Ok(String::from("r10"))
-    } else if !operand_uses_register_family(lhs, "r11")
-        && !operand_address_uses_register_family(rhs, "r11")
-    {
-        Ok(String::from("r11"))
-    } else {
-        Err(String::from(
-            "Division cannot materialize its right operand because both r10 and r11 are in use",
-        ))
+    for register in ["r10", "r11", "r8", "r9"] {
+        if !operand_uses_register_family(lhs, register)
+            && !operand_address_uses_register_family(rhs, register)
+        {
+            return Ok(String::from(register));
+        }
     }
+
+    Err(String::from("Division has no available temporary register"))
 }
 
 fn expression_uses_register_family(expression: &Expression, register: &str) -> bool {
@@ -3575,9 +3576,16 @@ fn emit_condition_for_setcc(
             validate_resolved_integer_compare_op(op)?;
             validate_compare_operands(lhs, rhs, strings, label_name, stack)?;
 
+            let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
+                && matches!(lhs, Operand::Register(register) if !is_xmm_register(register))
+                && immediate_value(rhs, strings, label_name, stack) == Some(0);
             let lhs = emit_operand(lhs, strings, label_name, stack)?;
             let rhs = emit_operand(rhs, strings, label_name, stack)?;
-            asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+            if use_test {
+                asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+            } else {
+                asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+            }
 
             Ok(compare_set_opcode(op))
         }
@@ -4241,6 +4249,21 @@ fn emit_float_binary_operand_assignment(
         stack,
     )?;
 
+    if rhs == dst {
+        if matches!(op, FloatMathOp::Add | FloatMathOp::Multiply) {
+            let rhs = emit_float_operand(lhs, width, strings, label_name, stack)?;
+            asm.push_str(&format!(
+                "  {} {dst_register}, {rhs}\n",
+                float_math_opcode(op, width)
+            ));
+            return Ok(());
+        }
+
+        return Err(String::from(
+            "Non-commutative floating-point assignment destination cannot also be the right operand",
+        ));
+    }
+
     if lhs != dst {
         emit_float_copy_instruction(asm, lhs, dst, width, strings, label_name, stack)?;
     }
@@ -4478,6 +4501,18 @@ fn emit_copy_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
+    if src == dst
+        && !matches!(
+            src,
+            Operand::Converted { .. }
+                | Operand::Cast { .. }
+                | Operand::Pointer(_)
+                | Operand::AddressOf(_)
+        )
+    {
+        return Ok(());
+    }
+
     if let Operand::Converted {
         operand,
         conversion,

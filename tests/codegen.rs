@@ -1435,7 +1435,7 @@ fn emits_conditional_assignment_with_jump_around() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  cmp rcx, 0\n"));
+    assert!(asm.contains("  test rcx, rcx\n"));
     assert!(asm.contains("  jne .L.__subsea.main.assign_if_1_skip\n"));
     assert!(asm.contains("  mov rax, rbx\n"));
     assert!(asm.contains(".L.__subsea.main.assign_if_1_skip:\n"));
@@ -1792,6 +1792,25 @@ fn emits_power_with_runtime_register_exponent() {
 }
 
 #[test]
+fn preserves_power_exponent_when_it_uses_r10() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Binary {
+            op: MathOp::Power,
+            lhs: reg("rbx"),
+            rhs: reg("r10"),
+        },
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+    let exponent_load = asm.find("  mov r11, r10\n").unwrap();
+    let base_load = asm.find("  mov r10, rbx\n").unwrap();
+
+    assert!(exponent_load < base_load);
+    assert_assembles(&asm);
+}
+
+#[test]
 fn zero_extends_narrow_power_register_exponent() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
@@ -2107,7 +2126,7 @@ fn emits_conditional_indirect_jump() {
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
-    assert!(asm.contains("  cmp rcx, 0\n"));
+    assert!(asm.contains("  test rcx, rcx\n"));
     assert!(asm.contains("  jne .L.__subsea.main.indirect_jmp_1_skip\n"));
     assert!(asm.contains("  jmp rax\n"));
     assert!(asm.contains(".L.__subsea.main.indirect_jmp_1_skip:\n"));
