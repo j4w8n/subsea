@@ -93,7 +93,7 @@ sbb rdx, rcx
 
 For now, pair add/sub requires 64-bit integer registers. The destination pair must match the left operand pair so every changed register is visible in the assignment. Destination high/low registers must be different, and the right high register cannot overlap the destination low register because the low operation runs first.
 
-Arithmetic expression lowering may also use `r10` or `r11` as scratch registers. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on `r10` or `r11` being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
+Arithmetic expression lowering may use `r10`, `r11`, `r8`, or `r9` as scratch registers, preferring `r10` and `r11` when available. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on these scratch registers being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
 
 ## Compile-time Bindings
 
