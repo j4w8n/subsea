@@ -1753,6 +1753,25 @@ fn emits_power_with_immediate_exponent() {
 }
 
 #[test]
+fn does_not_copy_power_base_into_destination_first() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::Expression(Expression::Binary {
+            op: ExprOp::Power,
+            lhs: Box::new(Expression::Operand(reg("rdx"))),
+            rhs: Box::new(Expression::Operand(Operand::Immediate(3))),
+        }),
+    }]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, rdx\n"));
+    assert!(!asm.contains("  mov rax, rdx\n"));
+    assert!(asm.contains("  test r11, r11\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn emits_power_with_runtime_register_exponent() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),

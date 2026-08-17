@@ -3089,6 +3089,17 @@ fn emit_expression_to_register(
             emit_copy_instruction(asm, operand, dst, strings, label_name, stack)
         }
         Expression::Binary { op, lhs, rhs } => {
+            if matches!(op, ExprOp::Math(MathOp::Power) | ExprOp::Power) {
+                let Expression::Operand(base) = lhs.as_ref() else {
+                    return Err(String::from("Power base must be an operand"));
+                };
+                let Expression::Operand(exponent) = rhs.as_ref() else {
+                    return Err(String::from("Power exponent must be an operand"));
+                };
+
+                return emit_power_operation(asm, dst, base, exponent, strings, label_name, stack);
+            }
+
             let precomputed_rhs = if !matches!(op, ExprOp::Math(MathOp::Power) | ExprOp::Power)
                 && expression_uses_register_family(rhs, dst_register)
             {
@@ -3102,12 +3113,7 @@ fn emit_expression_to_register(
             emit_expression_to_register(asm, dst, lhs, strings, label_name, stack)?;
 
             match op {
-                ExprOp::Math(MathOp::Power) | ExprOp::Power => {
-                    let Expression::Operand(exponent) = rhs.as_ref() else {
-                        return Err(String::from("Power exponent must be an operand"));
-                    };
-                    emit_power_operation(asm, dst, dst, exponent, strings, label_name, stack)
-                }
+                ExprOp::Math(MathOp::Power) | ExprOp::Power => unreachable!(),
                 ExprOp::Math(op) => {
                     let rhs_operand = if let Some(rhs_operand) = precomputed_rhs {
                         rhs_operand
@@ -3274,7 +3280,7 @@ fn emit_power_operation(
 
     asm.push_str(&format!("  mov {dst_register}, 1\n"));
     asm.push_str(&format!("{loop_label}:\n"));
-    asm.push_str("  cmp r11, 0\n");
+    asm.push_str("  test r11, r11\n");
     asm.push_str(&format!("  je {done_label}\n"));
     asm.push_str("  test r11, 1\n");
     asm.push_str(&format!("  je {skip_multiply_label}\n"));
