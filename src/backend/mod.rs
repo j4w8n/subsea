@@ -67,20 +67,20 @@ pub enum Target {
 impl Target {
     pub fn parse(name: &str) -> Result<Self, String> {
         match name {
-            "x86_64" => Ok(Self::X86_64),
-            "x86_64-free" => Ok(Self::X86_64Free),
-            "aarch64-linux" => Ok(Self::AArch64Linux),
+            "x86" => Ok(Self::X86_64),
+            "x86-free" => Ok(Self::X86_64Free),
+            "aarch" => Ok(Self::AArch64Linux),
             _ => Err(format!(
-                "Unknown target {name:?}; expected x86_64, x86_64-free, or aarch64-linux"
+                "Unknown target {name:?}; expected x86, x86-free, or aarch"
             )),
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::X86_64 => "x86_64",
-            Self::X86_64Free => "x86_64-free",
-            Self::AArch64Linux => "aarch64-linux",
+            Self::X86_64 => "x86",
+            Self::X86_64Free => "x86-free",
+            Self::AArch64Linux => "aarch",
         }
     }
 

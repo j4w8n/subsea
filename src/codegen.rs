@@ -223,7 +223,7 @@ fn emit_x86_64_asm_impl(
                     Instruction::Exit { code } => {
                         if !target.supports_runtime(RuntimeOperation::Exit) {
                             return Err(String::from(
-                                "exit is only supported for target x86_64; use hlt or an explicit loop for x86_64-free",
+                                "exit is only supported for target x86; use hlt or an explicit loop for x86-free",
                             ));
                         }
 

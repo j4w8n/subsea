@@ -9,7 +9,8 @@ use subsea::backend::{Architecture, Target, aarch64};
 use subsea::codegen::{emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
-    build_freestanding_executable, build_object, run_executable,
+    build_executable_for_target, build_freestanding_executable, build_object_for_target,
+    run_executable,
 };
 use subsea::imports;
 
@@ -366,7 +367,7 @@ fn parse_source_target_and_entry(
 fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(), String> {
     if entry_symbol.is_some() && !target.is_freestanding() {
         return Err(String::from(
-            "--entry is only supported for target x86_64-free",
+            "--entry is only supported for target x86-free",
         ));
     }
 
@@ -379,7 +380,7 @@ fn validate_linker_script_target(
 ) -> Result<(), String> {
     if linker_script.is_some() && !target.is_freestanding() {
         return Err(String::from(
-            "--linker-script/-T is only supported for target x86_64-free",
+            "--linker-script/-T is only supported for target x86-free",
         ));
     }
 
@@ -389,7 +390,7 @@ fn validate_linker_script_target(
 fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> Result<(), String> {
     if output_format == BuildOutputFormat::Binary && !target.is_freestanding() {
         return Err(String::from(
-            "--format binary is only supported for target x86_64-free",
+            "--format binary is only supported for target x86-free",
         ));
     }
 
@@ -399,7 +400,7 @@ fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> R
 fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), String> {
     if linker_provided && !target.is_freestanding() {
         return Err(String::from(
-            "--linker is only supported for target x86_64-free",
+            "--linker is only supported for target x86-free",
         ));
     }
 
@@ -409,7 +410,7 @@ fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), S
 fn validate_link_inputs_target(target: Target, link_inputs: &[PathBuf]) -> Result<(), String> {
     if !link_inputs.is_empty() && !target.is_freestanding() {
         return Err(String::from(
-            "--link-input is only supported for target x86_64-free",
+            "--link-input is only supported for target x86-free",
         ));
     }
 
@@ -422,7 +423,7 @@ fn validate_link_inputs_require_linker_script(
 ) -> Result<(), String> {
     if !link_inputs.is_empty() && linker_script.is_none() {
         return Err(String::from(
-            "--link-input requires --linker-script/-T for target x86_64-free",
+            "--link-input requires --linker-script/-T for target x86-free",
         ));
     }
 
@@ -435,7 +436,7 @@ fn validate_binary_requires_linker_script(
 ) -> Result<(), String> {
     if output_format == BuildOutputFormat::Binary && linker_script.is_none() {
         return Err(String::from(
-            "--format binary requires --linker-script/-T for target x86_64-free",
+            "--format binary requires --linker-script/-T for target x86-free",
         ));
     }
 
@@ -508,10 +509,10 @@ fn build_output(
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::Path::new("target").join("subsea").join("main.o"));
 
-            build_object(asm, &object_path)
+            build_object_for_target(asm, target, &object_path)
         }
     } else {
-        build_executable(asm, output_path)
+        build_executable_for_target(asm, target, output_path)
     }
 }
 
@@ -625,8 +626,8 @@ fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
     eprintln!("  subsea run <file.ss>");
     eprintln!(
-        "  subsea build [--target|-t x86_64|x86_64-free] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
+        "  subsea build [--target|-t x86|x86-free|aarch] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
     );
-    eprintln!("  subsea emit-asm [--target|-t x86_64|x86_64-free] [--entry symbol] <file.ss>");
+    eprintln!("  subsea emit-asm [--target|-t x86|x86-free|aarch] [--entry symbol] <file.ss>");
     process::exit(code);
 }

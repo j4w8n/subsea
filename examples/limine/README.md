@@ -7,13 +7,13 @@ The `iso_root` directory should contain the Limine boot files, `limine.conf`, an
 Build the kernel ELF into the ISO staging tree:
 
 ```sh
-subsea build -t x86_64-free -T kernel.ld -o iso_root/boot/kernel.elf kernel.ss
+ subsea build -t x86-free -T kernel.ld -o iso_root/boot/kernel.elf kernel.ss
 ```
 
 Build the kernel object only:
 
 ```sh
-subsea build -t x86_64-free -o kernel.o examples/limine/kernel.ss
+ subsea build -t x86-free -o kernel.o examples/limine/kernel.ss
 ```
 
 Inspect the Limine request section:

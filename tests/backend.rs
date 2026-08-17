@@ -56,12 +56,14 @@ fn x86_64_freestanding_target_shares_architecture_but_changes_environment() {
 #[test]
 fn target_names_and_parsing_remain_stable() {
     for (name, expected) in [
-        ("x86_64", Target::X86_64),
-        ("x86_64-free", Target::X86_64Free),
+        ("x86", Target::X86_64),
+        ("x86-free", Target::X86_64Free),
+        ("aarch", Target::AArch64Linux),
     ] {
         assert_eq!(Target::parse(name), Ok(expected));
-        assert_eq!(expected.name(), name);
     }
+    assert_eq!(Target::X86_64.name(), "x86");
+    assert_eq!(Target::AArch64Linux.name(), "aarch");
 }
 
 #[test]
@@ -69,7 +71,7 @@ fn aarch64_linux_target_describes_the_initial_cross_backend_contract() {
     let target = Target::AArch64Linux;
     let spec = target.spec();
 
-    assert_eq!(target.name(), "aarch64-linux");
+    assert_eq!(target.name(), "aarch");
     assert_eq!(spec.architecture, Architecture::AArch64);
     assert_eq!(spec.environment, Environment::Linux);
     assert_eq!(spec.pointer_width, 64);
@@ -78,7 +80,7 @@ fn aarch64_linux_target_describes_the_initial_cross_backend_contract() {
     assert_eq!(spec.integer_return_register, "x0");
     assert_eq!(spec.float_return_register, "v0");
     assert_eq!(spec.runtime_call_convention, "aapcs64");
-    assert!(Target::parse("aarch64-linux").is_ok());
+    assert!(Target::parse("aarch").is_ok());
 }
 
 #[test]

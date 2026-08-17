@@ -21,6 +21,39 @@ fn compiles_and_runs_example_program() {
 }
 
 #[test]
+fn builds_aarch_core_fixture_when_cross_toolchain_is_available() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    if Command::new("aarch64-linux-gnu-as")
+        .arg("--version")
+        .output()
+        .is_err()
+        || Command::new("aarch64-linux-gnu-ld")
+            .arg("--version")
+            .output()
+            .is_err()
+    {
+        return;
+    }
+
+    let output_path =
+        std::env::temp_dir().join(format!("subsea-aarch-core-{}", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["build", "--target", "aarch", "-o"])
+        .arg(&output_path)
+        .arg("tests/fixtures/aarch_core.ss")
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path.exists());
+    let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
 fn compiles_and_runs_runtime_string_program() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
@@ -347,12 +380,7 @@ fn build_rejects_duplicate_timings_flag() {
 fn emit_asm_accepts_freestanding_target() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
-        .args([
-            "emit-asm",
-            "--target",
-            "x86_64-free",
-            "tests/fixtures/hlt.ss",
-        ])
+        .args(["emit-asm", "--target", "x86-free", "tests/fixtures/hlt.ss"])
         .output()
         .expect("failed to start subsea");
 
@@ -371,7 +399,7 @@ fn freestanding_target_accepts_custom_entry_symbol() {
         .args([
             "emit-asm",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "--entry",
             "kernel_entry",
             "tests/fixtures/hlt.ss",
@@ -409,7 +437,7 @@ fn linux_target_rejects_custom_entry_symbol() {
 fn freestanding_target_rejects_linux_helpers() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
-        .args(["emit-asm", "-t", "x86_64-free", "tests/fixtures/main.ss"])
+        .args(["emit-asm", "-t", "x86-free", "tests/fixtures/main.ss"])
         .output()
         .expect("failed to start subsea");
 
@@ -424,7 +452,7 @@ fn codegen_diagnostic_points_to_failing_instruction() {
         .args([
             "emit-asm",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "tests/fixtures/diagnostic_reserve.ss",
         ])
         .output()
@@ -477,7 +505,7 @@ fn freestanding_build_writes_object_file() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "-o",
             output_path.to_str().unwrap(),
             "tests/fixtures/hlt.ss",
@@ -514,7 +542,7 @@ fn freestanding_build_links_with_linker_script() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "--linker-script",
             "tests/fixtures/kernel.ld",
             "-o",
@@ -554,7 +582,7 @@ fn freestanding_build_writes_raw_binary() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "-T",
             "tests/fixtures/kernel.ld",
             "--format",
@@ -593,7 +621,7 @@ fn freestanding_build_accepts_custom_linker() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "--linker",
             "ld",
             "-T",
@@ -652,7 +680,7 @@ fn freestanding_build_accepts_extra_link_input() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "-T",
             "tests/fixtures/kernel.ld",
             "--link-input",
@@ -694,7 +722,7 @@ fn limine_example_builds_kernel_elf() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "-T",
             "examples/limine/kernel.ld",
             "-o",
@@ -735,7 +763,7 @@ fn freestanding_build_accepts_short_linker_script_flag() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "-T",
             "tests/fixtures/kernel.ld",
             "-o",
@@ -782,7 +810,7 @@ fn binary_format_requires_linker_script() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "--format",
             "binary",
             "tests/fixtures/hlt.ss",
@@ -825,7 +853,7 @@ fn link_input_requires_linker_script() {
         .args([
             "build",
             "-t",
-            "x86_64-free",
+            "x86-free",
             "--link-input",
             "extra.o",
             "tests/fixtures/hlt.ss",

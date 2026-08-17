@@ -46,7 +46,15 @@ pub enum FreestandingOutputFormat {
 }
 
 pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOutput, String> {
-    let toolchain = Target::X86_64.spec();
+    build_executable_for_target(asm, Target::X86_64, output_path)
+}
+
+pub fn build_executable_for_target(
+    asm: &str,
+    target: Target,
+    output_path: Option<&Path>,
+) -> Result<BuildOutput, String> {
+    let toolchain = target.spec();
     let build_dir = Path::new("target").join("subsea").join(unique_build_id()?);
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("Failed to create build dir: {error}"))?;
@@ -104,7 +112,15 @@ pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOu
 }
 
 pub fn build_object(asm: &str, output_path: &Path) -> Result<BuildOutput, String> {
-    let assembled = assemble_to_output_object(asm, output_path)?;
+    build_object_for_target(asm, Target::X86_64, output_path)
+}
+
+pub fn build_object_for_target(
+    asm: &str,
+    target: Target,
+    output_path: &Path,
+) -> Result<BuildOutput, String> {
+    let assembled = assemble_to_output_object(asm, target, output_path)?;
 
     Ok(BuildOutput {
         build_dir: assembled.build_dir,
@@ -210,8 +226,12 @@ struct AssembledObject {
     assemble: Duration,
 }
 
-fn assemble_to_output_object(asm: &str, object_path: &Path) -> Result<AssembledObject, String> {
-    let toolchain = Target::X86_64.spec();
+fn assemble_to_output_object(
+    asm: &str,
+    target: Target,
+    object_path: &Path,
+) -> Result<AssembledObject, String> {
+    let toolchain = target.spec();
     let build_dir = Path::new("target").join("subsea").join(unique_build_id()?);
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("Failed to create build dir: {error}"))?;
