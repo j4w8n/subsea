@@ -601,11 +601,18 @@ pub(crate) fn stack_string_property_slot(
 }
 
 pub(crate) fn build_stack_frame(label: &Label) -> StackFrame {
+    build_stack_frame_from_layout(&crate::lower::lower_stack_layout(label), 16)
+}
+
+pub(crate) fn build_stack_frame_from_layout(
+    layout: &crate::ir::StackLayout,
+    alignment: usize,
+) -> StackFrame {
     let mut slots = HashMap::new();
     let mut offset = 0;
 
-    for instruction in &label.instructions {
-        if let Instruction::Stack { name, width, .. } = instruction {
+    for slot in &layout.slots {
+        if let crate::ir::StackSlot::Scalar { name, width } = slot {
             offset += width.size().max(8);
             slots.insert(
                 name.clone(),
@@ -614,7 +621,7 @@ pub(crate) fn build_stack_frame(label: &Label) -> StackFrame {
                     width: *width,
                 },
             );
-        } else if let Instruction::StackString { name, .. } = instruction {
+        } else if let crate::ir::StackSlot::String { name } = slot {
             offset += 8;
             let ptr_offset = offset;
             offset += 8;
@@ -631,7 +638,7 @@ pub(crate) fn build_stack_frame(label: &Label) -> StackFrame {
 
     StackFrame {
         slots,
-        size: align_to(offset, 16),
+        size: align_to(offset, alignment),
     }
 }
 

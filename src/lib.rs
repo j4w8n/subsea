@@ -1,10 +1,14 @@
 mod analysis;
 pub mod ast;
+pub mod backend;
 pub mod codegen;
 pub mod diagnostic;
 pub mod driver;
 pub mod grammar;
 pub mod imports;
+pub mod ir;
 pub mod lexer;
+pub mod lower;
 pub mod parser;
+mod platform;
 pub mod register;

@@ -5,7 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::codegen::{Target, emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
+use subsea::backend::Target;
+use subsea::codegen::{emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
     build_freestanding_executable, build_object, run_executable,
@@ -360,7 +361,7 @@ fn parse_source_target_and_entry(
 }
 
 fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(), String> {
-    if entry_symbol.is_some() && target != Target::X86_64Free {
+    if entry_symbol.is_some() && !target.is_freestanding() {
         return Err(String::from(
             "--entry is only supported for target x86_64-free",
         ));
@@ -373,7 +374,7 @@ fn validate_linker_script_target(
     target: Target,
     linker_script: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    if linker_script.is_some() && target != Target::X86_64Free {
+    if linker_script.is_some() && !target.is_freestanding() {
         return Err(String::from(
             "--linker-script/-T is only supported for target x86_64-free",
         ));
@@ -383,7 +384,7 @@ fn validate_linker_script_target(
 }
 
 fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> Result<(), String> {
-    if output_format == BuildOutputFormat::Binary && target != Target::X86_64Free {
+    if output_format == BuildOutputFormat::Binary && !target.is_freestanding() {
         return Err(String::from(
             "--format binary is only supported for target x86_64-free",
         ));
@@ -393,7 +394,7 @@ fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> R
 }
 
 fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), String> {
-    if linker_provided && target != Target::X86_64Free {
+    if linker_provided && !target.is_freestanding() {
         return Err(String::from(
             "--linker is only supported for target x86_64-free",
         ));
@@ -403,7 +404,7 @@ fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), S
 }
 
 fn validate_link_inputs_target(target: Target, link_inputs: &[PathBuf]) -> Result<(), String> {
-    if !link_inputs.is_empty() && target != Target::X86_64Free {
+    if !link_inputs.is_empty() && !target.is_freestanding() {
         return Err(String::from(
             "--link-input is only supported for target x86_64-free",
         ));
@@ -482,7 +483,7 @@ fn build_output(
     output_format: BuildOutputFormat,
     linker: &str,
 ) -> Result<driver::BuildOutput, String> {
-    if target == Target::X86_64Free {
+    if target.is_freestanding() {
         if let Some(linker_script) = linker_script {
             let output_path = output_path
                 .map(std::path::Path::to_path_buf)
@@ -491,6 +492,7 @@ fn build_output(
             build_freestanding_executable(
                 asm,
                 FreestandingLinkOptions {
+                    target,
                     output_path: &output_path,
                     linker_script,
                     link_inputs,

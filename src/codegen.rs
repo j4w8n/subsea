@@ -1,9 +1,9 @@
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
-    build_stack_frame, collect_string_bindings, destination_width, float_memory_width,
-    immediate_value, is_float_memory_operand, memory_width_bits, operand_width, register_width,
-    resolve_memory_width, stack_scalar_slot, stack_string_property_slot, stack_string_slot,
-    validate_float_literal, validate_float_width, validate_label,
+    build_stack_frame, build_stack_frame_from_layout, collect_string_bindings, destination_width,
+    float_memory_width, immediate_value, is_float_memory_operand, memory_width_bits, operand_width,
+    resolve_memory_width, stack_scalar_slot, stack_string_slot, validate_float_literal,
+    validate_float_width, validate_label,
 };
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BitwiseUnaryOp,
@@ -12,15 +12,25 @@ use crate::ast::{
     MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource, RegisterPair,
     StringInitializer, StringProperty, WidthConversion,
 };
+use crate::backend::TargetSpec;
+use crate::backend::x86_64::{
+    bitwise_unary_opcode, compare_jump_opcode, compare_set_opcode, division_opcode,
+    emit_address as emit_x86_address, emit_ir_operand as emit_x86_ir_operand,
+    emit_operand as emit_x86_operand, family as register_family, float_compare_jump_opcode,
+    float_compare_opcode, float_math_opcode, float_min_max_opcode,
+    float_move_opcode as float_move_opcode_for_width, float_rounding_mode, float_rounding_opcode,
+    float_sqrt_opcode, integer_math_opcode, is_extended as is_extended_register,
+    is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, pair_math_opcodes,
+    wide_math_opcode, width as register_width,
+};
 use crate::diagnostic::{Diagnostic, ProgramOrigins};
+use crate::ir;
+use crate::lower;
 use crate::parser::validate_program_symbols;
+use crate::platform::linux;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Target {
-    X86_64,
-    X86_64Free,
-}
+pub use crate::backend::Target;
 
 struct LabelSymbols<'a> {
     source_entry: &'a str,
@@ -34,29 +44,6 @@ impl<'a> LabelSymbols<'a> {
         } else {
             source_label.to_string()
         }
-    }
-}
-
-impl Target {
-    pub fn parse(name: &str) -> Result<Self, String> {
-        match name {
-            "x86_64" => Ok(Self::X86_64),
-            "x86_64-free" => Ok(Self::X86_64Free),
-            _ => Err(format!(
-                "Unknown target {name:?}; expected x86_64 or x86_64-free"
-            )),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::X86_64Free => "x86_64-free",
-        }
-    }
-
-    fn is_freestanding(self) -> bool {
-        matches!(self, Self::X86_64Free)
     }
 }
 
@@ -156,12 +143,13 @@ fn emit_x86_64_asm_impl(
         .collect();
 
     for label in &program.labels {
-        let stack = build_stack_frame(label);
+        let stack_layout = lower::lower_stack_layout(label);
+        let stack = build_stack_frame_from_layout(&stack_layout, target.spec().stack_alignment);
 
         asm.push_str(&format!("{}:\n", labels.emit_label(&label.name)));
 
         if stack.has_slots() {
-            emit_frame_prologue(&mut asm, &stack);
+            emit_frame_prologue(&mut asm, &stack, target.spec());
             emit_stack_initializers(&mut asm, &label.instructions, &strings, &label.name, &stack)?;
         }
 
@@ -226,9 +214,8 @@ fn emit_x86_64_asm_impl(
                             ));
                         }
 
-                        asm.push_str("  mov rax, 60\n");
                         asm.push_str(&format!("  mov rdi, {code}\n"));
-                        asm.push_str("  syscall\n");
+                        linux::emit_syscall(&mut asm, linux::SYS_EXIT);
                     }
                     Instruction::InlineAsm { text } => {
                         asm.push_str(&format!("  {text}\n"));
@@ -263,13 +250,26 @@ fn emit_x86_64_asm_impl(
                             &stack,
                         )?;
                     }
-                    Instruction::Print { parts } => {
+                    Instruction::Print { .. } => {
                         if target.is_freestanding() {
                             return Err(String::from("print is only supported for target x86_64"));
                         }
 
-                        for part in parts {
-                            match part {
+                        let ir::Instruction::Runtime(ir::RuntimeOperation::Print {
+                            parts: ir_parts,
+                        }) = lower::lower_runtime_instruction(
+                            instruction,
+                            &label.name,
+                            instruction_index,
+                        )
+                        .map_err(|error| error.message)?
+                        else {
+                            return Err(String::from("Expected lowered print operation"));
+                        };
+
+                        for ir_part in ir_parts {
+                            let part = ir_print_part_to_ast(&ir_part);
+                            match &part {
                                 PrintPart::Binding(name) => {
                                     if let Some(slot) = stack.slots.get(name) {
                                         runtime_print_index += 1;
@@ -297,7 +297,7 @@ fn emit_x86_64_asm_impl(
                                             &strings,
                                             &mut literal_indexes,
                                             &label.name,
-                                            part,
+                                            &part,
                                         )?;
 
                                         emit_print_string_instruction(&mut asm, string);
@@ -308,7 +308,7 @@ fn emit_x86_64_asm_impl(
                                         &strings,
                                         &mut literal_indexes,
                                         &label.name,
-                                        part,
+                                        &part,
                                     )?;
 
                                     emit_print_string_instruction(&mut asm, string);
@@ -350,42 +350,66 @@ fn emit_x86_64_asm_impl(
                         let src = emit_operand(src, &strings, &label.name, &stack)?;
                         asm.push_str(&format!("  push {src}\n"));
                     }
-                    Instruction::Read { src, dst, len } => {
+                    Instruction::Read { .. } => {
                         if target.is_freestanding() {
                             return Err(String::from("read is only supported for target x86_64"));
                         }
 
-                        emit_read_instruction(
-                            &mut asm,
-                            src,
+                        let ir::Instruction::Runtime(ir::RuntimeOperation::Read {
+                            source,
                             dst,
                             len,
+                        }) = lower::lower_runtime_instruction(
+                            instruction,
+                            &label.name,
+                            instruction_index,
+                        )
+                        .map_err(|error| error.message)?
+                        else {
+                            return Err(String::from("Expected lowered read operation"));
+                        };
+
+                        emit_read_instruction(
+                            &mut asm,
+                            &match source {
+                                ir::ReadSource::Stdin => ReadSource::Stdin,
+                            },
+                            &ir_operand_to_ast(&dst),
+                            &ir_operand_to_ast(&len),
                             &strings,
                             &label.name,
                             &stack,
                         )?;
                     }
-                    Instruction::Release { ptr, len } => {
+                    Instruction::Release { .. } => {
                         if target.is_freestanding() {
                             return Err(String::from(
                                 "release is only supported for target x86_64",
                             ));
                         }
 
+                        let ir::Instruction::Runtime(ir::RuntimeOperation::Release { ptr, len }) =
+                            lower::lower_runtime_instruction(
+                                instruction,
+                                &label.name,
+                                instruction_index,
+                            )
+                            .map_err(|error| error.message)?
+                        else {
+                            return Err(String::from("Expected lowered release operation"));
+                        };
+
                         emit_release_instruction(
                             &mut asm,
-                            ptr,
-                            len,
+                            &ir_operand_to_ast(&ptr),
+                            &ir_operand_to_ast(&len),
                             &strings,
                             &label.name,
                             &stack,
                         )?;
                     }
                     Instruction::Ret => {
-                        if stack.has_slots() {
-                            emit_frame_epilogue(&mut asm);
-                        }
-                        asm.push_str("  ret\n");
+                        emit_return_instruction(&mut asm, &stack, target.spec());
                     }
                     Instruction::Syscall => {
                         asm.push_str("  syscall\n");
@@ -436,6 +460,139 @@ fn emit_condition_jump(
     stack: &StackFrame,
     index: usize,
 ) -> Result<(), String> {
+    let condition = lower::lower_condition(condition);
+    let ast_condition = ir_condition_to_ast(&condition);
+    if can_emit_ir_condition(&ast_condition, strings, label_name, stack) {
+        emit_ir_condition_jump(
+            asm,
+            target,
+            &condition,
+            jump_if_true,
+            strings,
+            label_name,
+            stack,
+        )
+    } else {
+        emit_condition_jump_legacy(
+            asm,
+            target,
+            &ast_condition,
+            jump_if_true,
+            strings,
+            label_name,
+            stack,
+            index,
+        )
+    }
+}
+
+fn emit_ir_condition_jump(
+    asm: &mut String,
+    target: &str,
+    condition: &ir::Condition,
+    jump_if_true: bool,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match condition {
+        ir::Condition::Compare { lhs, op, rhs } => {
+            let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
+                && matches!(lhs, ir::Operand::TargetRegister(register) if !is_xmm_register(register))
+                && matches!(rhs, ir::Operand::Immediate(0));
+            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            let op = if jump_if_true {
+                *op
+            } else {
+                invert_compare_op(*op)
+            };
+            if use_test {
+                asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+            } else {
+                asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+            }
+            asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
+            Ok(())
+        }
+        ir::Condition::BitwiseAndZero { lhs, rhs, op } => {
+            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            let jump = match (*op, jump_if_true) {
+                (CompareOp::Equal, true) | (CompareOp::NotEqual, false) => "je",
+                (CompareOp::NotEqual, true) | (CompareOp::Equal, false) => "jne",
+                _ => unreachable!(),
+            };
+            asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+            asm.push_str(&format!("  {jump} {target}\n"));
+            Ok(())
+        }
+    }
+}
+
+fn can_emit_ir_condition(
+    condition: &ConditionExpr,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> bool {
+    match condition {
+        ConditionExpr::Compare(condition) => {
+            if resolve_float_compare_width(condition, strings, label_name, stack)
+                .ok()
+                .flatten()
+                .is_some()
+                || is_immediate_operand(&condition.lhs, strings, label_name, stack)
+            {
+                return false;
+            }
+
+            normalize_compare(
+                &condition.lhs,
+                &condition.rhs,
+                condition.op,
+                strings,
+                label_name,
+                stack,
+            )
+            .and_then(|(lhs, rhs, op)| {
+                validate_resolved_integer_compare_op(op)?;
+                validate_compare_operands(lhs, rhs, strings, label_name, stack)
+            })
+            .is_ok()
+                && can_emit_ir_operand_pair(&condition.lhs, &condition.rhs, strings, stack)
+        }
+        ConditionExpr::BitwiseAndZero { lhs, rhs, op } => {
+            validate_test_condition_operands(lhs, rhs, *op, strings, label_name, stack).is_ok()
+                && can_emit_ir_operand_pair(lhs, rhs, strings, stack)
+        }
+    }
+}
+
+fn can_emit_ir_operand_pair(
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    stack: &StackFrame,
+) -> bool {
+    !operand_uses_xmm_register(lhs)
+        && !operand_uses_xmm_register(rhs)
+        && !is_float_memory_operand(lhs, strings, stack).unwrap_or(true)
+        && !is_float_memory_operand(rhs, strings, stack).unwrap_or(true)
+        && is_simple_ast_operand(lhs)
+        && is_simple_ast_operand(rhs)
+}
+
+fn emit_condition_jump_legacy(
+    asm: &mut String,
+    target: &str,
+    condition: &ConditionExpr,
+    jump_if_true: bool,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
     match condition {
         ConditionExpr::Compare(condition) => emit_compare_condition_jump(
             asm,
@@ -463,6 +620,57 @@ fn emit_condition_jump(
 
 fn emit_call_instruction(
     asm: &mut String,
+    source_target: &ControlTarget,
+    labels: &LabelSymbols,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let target = lower::lower_control_target(source_target);
+    let direct = match source_target {
+        ControlTarget::Label(_) => true,
+        ControlTarget::Operand(operand) => {
+            validate_indirect_control_target("call", operand, strings, label_name, stack).is_ok()
+                && matches!(&target, ir::ControlTarget::Operand(operand) if is_direct_ir_operand(operand))
+        }
+    };
+    if direct {
+        emit_ir_call_instruction(asm, &target, labels, strings, label_name, stack)
+    } else {
+        emit_call_instruction_legacy(
+            asm,
+            &ir_control_target_to_ast(&target),
+            labels,
+            strings,
+            label_name,
+            stack,
+        )
+    }
+}
+
+fn emit_ir_call_instruction(
+    asm: &mut String,
+    target: &ir::ControlTarget,
+    labels: &LabelSymbols,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    match target {
+        ir::ControlTarget::Label(target) => {
+            asm.push_str(&format!("  call {}\n", labels.emit_label(target)));
+            Ok(())
+        }
+        ir::ControlTarget::Operand(operand) => {
+            let operand = emit_x86_ir_operand(operand, strings, label_name, stack)?;
+            asm.push_str(&format!("  call {operand}\n"));
+            Ok(())
+        }
+    }
+}
+
+fn emit_call_instruction_legacy(
+    asm: &mut String,
     target: &ControlTarget,
     labels: &LabelSymbols,
     strings: &StringTable,
@@ -481,6 +689,34 @@ fn emit_call_instruction(
             Ok(())
         }
     }
+}
+
+fn ir_control_target_to_ast(target: &ir::ControlTarget) -> ControlTarget {
+    match target {
+        ir::ControlTarget::Label(name) => ControlTarget::Label(name.clone()),
+        ir::ControlTarget::Operand(operand) => ControlTarget::Operand(ir_operand_to_ast(operand)),
+    }
+}
+
+fn emit_return_instruction(asm: &mut String, stack: &StackFrame, spec: TargetSpec) {
+    let instruction = ir::Instruction::Ret;
+    emit_ir_return_instruction(asm, &instruction, stack, spec);
+}
+
+fn emit_ir_return_instruction(
+    asm: &mut String,
+    instruction: &ir::Instruction,
+    stack: &StackFrame,
+    spec: TargetSpec,
+) {
+    if !matches!(instruction, ir::Instruction::Ret) {
+        return;
+    }
+
+    if stack.has_slots() {
+        emit_frame_epilogue(asm, spec);
+    }
+    asm.push_str("  ret\n");
 }
 
 fn emit_jmp_instruction(
@@ -690,30 +926,6 @@ fn invert_compare_op(op: CompareOp) -> CompareOp {
     }
 }
 
-fn compare_jump_opcode(op: CompareOp) -> &'static str {
-    match op {
-        CompareOp::Equal => "je",
-        CompareOp::NotEqual => "jne",
-        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
-            unreachable!()
-        }
-        CompareOp::SignedLess => "jl",
-        CompareOp::SignedLessEqual => "jle",
-        CompareOp::SignedGreater => "jg",
-        CompareOp::SignedGreaterEqual => "jge",
-        CompareOp::UnsignedLess => "jb",
-        CompareOp::UnsignedLessEqual => "jbe",
-        CompareOp::UnsignedGreater => "ja",
-        CompareOp::UnsignedGreaterEqual => "jae",
-        CompareOp::FloatEqual(_)
-        | CompareOp::FloatNotEqual(_)
-        | CompareOp::FloatLess(_)
-        | CompareOp::FloatLessEqual(_)
-        | CompareOp::FloatGreater(_)
-        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
-    }
-}
-
 fn validate_resolved_integer_compare_op(op: CompareOp) -> Result<(), String> {
     match op {
         CompareOp::Less => Err(String::from(
@@ -900,21 +1112,6 @@ fn is_shift_math_op(op: MathOp) -> bool {
     )
 }
 
-fn integer_math_opcode(op: MathOp) -> &'static str {
-    match op {
-        MathOp::Add => "add",
-        MathOp::BitAnd => "and",
-        MathOp::BitOr => "or",
-        MathOp::BitXor => "xor",
-        MathOp::Multiply => "imul",
-        MathOp::Power => unreachable!(),
-        MathOp::ShiftLeft => "shl",
-        MathOp::ShiftRightArithmetic => "sar",
-        MathOp::ShiftRightLogical => "shr",
-        MathOp::Subtract => "sub",
-    }
-}
-
 fn emit_float_conditional_jump(
     asm: &mut String,
     target: &str,
@@ -970,26 +1167,6 @@ fn emit_float_conditional_jump(
     }
 
     Ok(())
-}
-
-fn float_compare_opcode(width: MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => "ucomiss",
-        MemoryWidth::F64 => "ucomisd",
-        _ => unreachable!(),
-    }
-}
-
-fn float_compare_jump_opcode(op: CompareOp) -> &'static str {
-    match op {
-        CompareOp::Equal | CompareOp::FloatEqual(_) => "je",
-        CompareOp::NotEqual | CompareOp::FloatNotEqual(_) => "jne",
-        CompareOp::Less | CompareOp::FloatLess(_) => "jb",
-        CompareOp::LessEqual | CompareOp::FloatLessEqual(_) => "jbe",
-        CompareOp::Greater | CompareOp::FloatGreater(_) => "ja",
-        CompareOp::GreaterEqual | CompareOp::FloatGreaterEqual(_) => "jae",
-        _ => unreachable!(),
-    }
 }
 
 fn validate_compare_operands(
@@ -1066,17 +1243,23 @@ fn validate_test_condition_operands(
     validate_binary_operands("test", rhs, lhs, strings, label_name, stack)
 }
 
-fn emit_frame_prologue(asm: &mut String, stack: &StackFrame) {
-    asm.push_str("  push rbp\n");
-    asm.push_str("  mov rbp, rsp\n");
+fn emit_frame_prologue(asm: &mut String, stack: &StackFrame, spec: TargetSpec) {
+    asm.push_str(&format!("  push {}\n", spec.frame_pointer));
+    asm.push_str(&format!(
+        "  mov {}, {}\n",
+        spec.frame_pointer, spec.stack_pointer
+    ));
     if stack.size > 0 {
-        asm.push_str(&format!("  sub rsp, {}\n", stack.size));
+        asm.push_str(&format!("  sub {}, {}\n", spec.stack_pointer, stack.size));
     }
 }
 
-fn emit_frame_epilogue(asm: &mut String) {
-    asm.push_str("  mov rsp, rbp\n");
-    asm.push_str("  pop rbp\n");
+fn emit_frame_epilogue(asm: &mut String, spec: TargetSpec) {
+    asm.push_str(&format!(
+        "  mov {}, {}\n",
+        spec.stack_pointer, spec.frame_pointer
+    ));
+    asm.push_str(&format!("  pop {}\n", spec.frame_pointer));
 }
 
 fn emit_stack_initializers(
@@ -1428,12 +1611,27 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
 
 fn emit_print_string_instruction(asm: &mut String, string: &StringBinding) {
     emit_print_volatile_pushes(asm);
-    asm.push_str("  mov rax, 1\n");
-    asm.push_str("  mov rdi, 1\n");
-    asm.push_str(&format!("  lea rsi, [rip + {}]\n", string.asm_label));
-    asm.push_str(&format!("  mov rdx, {}\n", string.value.len()));
-    asm.push_str("  syscall\n");
+    linux::emit_write_label(asm, &string.asm_label, string.value.len());
     emit_print_volatile_pops(asm);
+}
+
+fn ir_print_part_to_ast(part: &ir::PrintPart) -> PrintPart {
+    match part {
+        ir::PrintPart::Binding(name) => PrintPart::Binding(name.clone()),
+        ir::PrintPart::FormattedOperand { format, operand } => PrintPart::FormattedOperand {
+            format: match format {
+                ir::PrintFormat::Infer => PrintFormat::Infer,
+                ir::PrintFormat::SignedDecimal(width) => PrintFormat::SignedDecimal(*width),
+                ir::PrintFormat::UnsignedDecimal(width) => PrintFormat::UnsignedDecimal(*width),
+                ir::PrintFormat::Hex => PrintFormat::Hex,
+                ir::PrintFormat::Binary => PrintFormat::Binary,
+                ir::PrintFormat::Pointer => PrintFormat::Pointer,
+            },
+            operand: ir_operand_to_ast(operand),
+        },
+        ir::PrintPart::Literal(value) => PrintPart::Literal(value.clone()),
+        ir::PrintPart::Operand(operand) => PrintPart::Operand(ir_operand_to_ast(operand)),
+    }
 }
 
 fn emit_print_volatile_pushes(asm: &mut String) {
@@ -1566,9 +1764,7 @@ fn emit_print_operand_instruction(
     }
     asm.push_str("  lea rdx, [rsp + 80]\n");
     asm.push_str("  sub rdx, rsi\n");
-    asm.push_str("  mov rax, 1\n");
-    asm.push_str("  mov rdi, 1\n");
-    asm.push_str("  syscall\n");
+    linux::emit_write_registers(asm);
     asm.push_str("  add rsp, 80\n");
     asm.push_str("  pop rbx\n");
     emit_print_volatile_pops(asm);
@@ -1732,11 +1928,9 @@ fn emit_print_stack_string_instruction(
         .ok_or_else(|| format!("Unknown string stack variable {name:?}"))?;
 
     emit_print_volatile_pushes(asm);
-    asm.push_str("  mov rax, 1\n");
-    asm.push_str("  mov rdi, 1\n");
     asm.push_str(&format!("  mov rsi, qword ptr [rbp - {ptr_offset}]\n"));
     asm.push_str(&format!("  mov rdx, qword ptr [rbp - {len_offset}]\n"));
-    asm.push_str("  syscall\n");
+    linux::emit_write_registers(asm);
     emit_print_volatile_pops(asm);
 
     Ok(())
@@ -1876,8 +2070,7 @@ fn emit_read_instruction(
     emit_read_len_arg(asm, len, strings, label_name, stack)?;
     emit_read_dst_arg(asm, dst)?;
     emit_read_src_arg(asm, src);
-    asm.push_str("  mov rax, 0\n");
-    asm.push_str("  syscall\n");
+    linux::emit_read(asm);
 
     Ok(())
 }
@@ -1891,13 +2084,12 @@ fn emit_linux_reserve_assignment(
     stack: &StackFrame,
 ) -> Result<(), String> {
     emit_reserve_len_arg(asm, len, strings, label_name, stack)?;
-    asm.push_str("  mov rax, 9\n");
-    asm.push_str("  mov rdi, 0\n");
+    asm.push_str(&format!("  mov rdi, {}\n", linux::STDIN));
     asm.push_str("  mov rdx, 3\n");
     asm.push_str("  mov r10, 34\n");
     asm.push_str("  mov r8, -1\n");
     asm.push_str("  mov r9, 0\n");
-    asm.push_str("  syscall\n");
+    linux::emit_mmap(asm);
 
     if dst != &Operand::Register(String::from("rax")) {
         emit_copy_instruction(
@@ -1923,8 +2115,7 @@ fn emit_release_instruction(
 ) -> Result<(), String> {
     emit_release_ptr_arg(asm, ptr, strings, label_name, stack)?;
     emit_release_len_arg(asm, len, strings, label_name, stack)?;
-    asm.push_str("  mov rax, 11\n");
-    asm.push_str("  syscall\n");
+    linux::emit_munmap(asm);
 
     Ok(())
 }
@@ -2027,7 +2218,7 @@ fn emit_linux_memory_size_arg(
 
 fn emit_read_src_arg(asm: &mut String, src: &ReadSource) {
     match src {
-        ReadSource::Stdin => asm.push_str("  mov rdi, 0\n"),
+        ReadSource::Stdin => asm.push_str(&format!("  mov rdi, {}\n", linux::STDIN)),
     }
 }
 
@@ -2221,9 +2412,7 @@ fn emit_bitwise_unary_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    let opcode = match op {
-        BitwiseUnaryOp::Not => "not",
-    };
+    let opcode = bitwise_unary_opcode(op);
 
     validate_bitwise_unary_operand(opcode, dst, strings, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
@@ -2233,6 +2422,680 @@ fn emit_bitwise_unary_instruction(
 }
 
 fn emit_assignment(
+    asm: &mut String,
+    dst: &AssignmentTarget,
+    value: &AssignmentValue,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if let Some(instruction) = try_lower_core_assignment(dst, value, strings, label_name, stack)? {
+        return emit_ir_assignment(asm, &instruction, strings, label_name, stack);
+    }
+
+    if let Ok(instruction) = lower::lower_assignment(dst, value, label_name, 0) {
+        if matches!(
+            instruction,
+            ir::Instruction::Assign {
+                value: ir::Value::IntrinsicCall { .. },
+                ..
+            }
+        ) {
+            return emit_ir_assignment(asm, &instruction, strings, label_name, stack);
+        }
+        let (dst, value) = ir_assignment_to_ast(&instruction)?;
+        return emit_assignment_legacy(asm, &dst, &value, strings, label_name, stack);
+    }
+
+    emit_assignment_legacy(asm, dst, value, strings, label_name, stack)
+}
+
+fn try_lower_core_assignment(
+    dst: &AssignmentTarget,
+    value: &AssignmentValue,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<Option<ir::Instruction>, String> {
+    if let AssignmentValue::Operand(src) = value
+        && let Ok(dst_operand) = assignment_operand_target(dst)
+        && matches!(dst_operand, Operand::Dereference { .. })
+        && string_bytes_assignment_source(src, strings, label_name)?.is_some()
+    {
+        return Ok(None);
+    }
+
+    let direct_copy = if let AssignmentValue::Operand(src) = value {
+        can_direct_ast_copy(src, dst, strings, label_name, stack)?
+    } else {
+        false
+    };
+    let direct_binary = if let AssignmentValue::Binary { op, lhs, rhs } = value {
+        can_direct_ast_binary(*op, dst, lhs, rhs, strings, label_name, stack)?
+    } else {
+        false
+    };
+
+    let is_core = match value {
+        AssignmentValue::Operand(_) => true,
+        AssignmentValue::Binary { op, lhs, rhs } => {
+            if *op == MathOp::Power {
+                false
+            } else if *op == MathOp::Multiply
+                && !matches!(assignment_operand_target(dst), Ok(Operand::Register(_)))
+            {
+                false
+            } else if integer_op_can_be_float(*op) {
+                resolve_float_binary_width(lhs, rhs, strings, label_name, stack)?.is_none()
+                    && !is_ambiguous_float_binary_operand(lhs)
+                    && !is_ambiguous_float_binary_operand(rhs)
+                    && !is_ambiguous_float_binary_operand(
+                        assignment_operand_target(dst).unwrap_or(&Operand::Immediate(0)),
+                    )
+            } else {
+                true
+            }
+        }
+        _ => false,
+    };
+
+    if !is_core {
+        return Ok(None);
+    }
+
+    let Some(instruction) = lower::lower_assignment(dst, value, label_name, 0).ok() else {
+        return Ok(None);
+    };
+
+    if let ir::Instruction::Assign {
+        dst: ir_dst,
+        value: ir::Value::Operand(ir_src),
+    } = &instruction
+        && direct_copy
+        && is_direct_ir_operand(ir_dst)
+        && is_direct_ir_operand(ir_src)
+        && !ir_copy_requires_legacy(ir_src, ir_dst)
+    {
+        return Ok(Some(instruction));
+    }
+
+    if let ir::Instruction::Assign {
+        dst: ir_dst,
+        value: ir::Value::Binary { lhs, rhs, .. },
+    } = &instruction
+        && direct_binary
+        && is_direct_ir_operand(ir_dst)
+        && is_direct_ir_operand(lhs)
+        && is_direct_ir_operand(rhs)
+    {
+        return Ok(Some(instruction));
+    }
+
+    if direct_binary {
+        Ok(Some(instruction))
+    } else {
+        Ok(None)
+    }
+}
+
+fn emit_ir_assignment(
+    asm: &mut String,
+    instruction: &ir::Instruction,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ir::Instruction::Assign { dst, value } = instruction else {
+        return Err(String::from("Expected an IR assignment"));
+    };
+
+    match value {
+        ir::Value::Operand(src) => {
+            let dst = match instruction {
+                ir::Instruction::Assign { dst, .. } => dst,
+                _ => unreachable!(),
+            };
+            emit_ir_copy_instruction(asm, src, dst, strings, label_name, stack)
+        }
+        ir::Value::Binary { op, lhs, rhs }
+            if is_direct_ir_operand(dst)
+                && is_direct_ir_operand(lhs)
+                && is_direct_ir_operand(rhs) =>
+        {
+            emit_ir_integer_binary_assignment(asm, dst, *op, lhs, rhs, strings, label_name, stack)
+        }
+        ir::Value::Binary { op, lhs, rhs } => {
+            let dst = ir_operand_to_ast(dst);
+            emit_integer_binary_assignment(
+                asm,
+                &dst,
+                *op,
+                &ir_operand_to_ast(lhs),
+                &ir_operand_to_ast(rhs),
+                strings,
+                label_name,
+                stack,
+            )
+        }
+        ir::Value::FloatBinary {
+            width,
+            op,
+            lhs,
+            rhs,
+        } if matches!(dst, ir::Operand::TargetRegister(name) if is_xmm_register(name)) => {
+            emit_ir_float_binary_assignment(
+                asm, dst, *width, *op, lhs, rhs, strings, label_name, stack,
+            )
+        }
+        ir::Value::IntrinsicCall { op, width, args }
+            if is_direct_ir_operand(dst) && args.iter().all(is_direct_ir_operand) =>
+        {
+            emit_ir_intrinsic_call_assignment(
+                asm, dst, *op, *width, args, strings, label_name, stack,
+            )
+        }
+        _ => {
+            let (dst, value) = ir_assignment_to_ast(instruction)?;
+            emit_assignment_legacy(asm, &dst, &value, strings, label_name, stack)
+        }
+    }
+}
+
+fn emit_ir_float_binary_assignment(
+    asm: &mut String,
+    dst: &ir::Operand,
+    width: MemoryWidth,
+    op: FloatMathOp,
+    lhs: &ir::Operand,
+    rhs: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    validate_float_width(width)?;
+
+    let ir::Operand::TargetRegister(dst_register) = dst else {
+        return Err(String::from(
+            "Floating-point arithmetic destination must be an XMM register",
+        ));
+    };
+
+    if lhs != dst {
+        let lhs = emit_ir_float_operand(lhs, width, strings, label_name, stack)?;
+        asm.push_str(&format!(
+            "  {} {dst_register}, {lhs}\n",
+            float_move_opcode_for_width(width)?
+        ));
+    }
+
+    if rhs == dst && !matches!(op, FloatMathOp::Add | FloatMathOp::Multiply) {
+        return Err(String::from(
+            "Non-commutative floating-point assignment destination cannot also be the right operand",
+        ));
+    }
+
+    let rhs = if rhs == dst {
+        emit_ir_float_operand(lhs, width, strings, label_name, stack)?
+    } else {
+        emit_ir_float_operand(rhs, width, strings, label_name, stack)?
+    };
+    asm.push_str(&format!(
+        "  {} {dst_register}, {rhs}\n",
+        float_math_opcode(op, width)
+    ));
+    Ok(())
+}
+
+fn emit_ir_float_operand(
+    operand: &ir::Operand,
+    width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<String, String> {
+    match operand {
+        ir::Operand::FloatLiteral(value) => {
+            let binding = strings
+                .float_literals
+                .get(&(label_name.to_owned(), width, value.clone()))
+                .ok_or_else(|| String::from("Internal error: missing float literal"))?;
+            Ok(format!(
+                "{} ptr [rip + {}]",
+                binding.width.ptr(),
+                binding.asm_label
+            ))
+        }
+        ir::Operand::Name(name) if stack_scalar_slot(stack, name).is_none() => {
+            let binding = strings
+                .float_bindings
+                .get(&(label_name.to_owned(), name.clone()))
+                .ok_or_else(|| format!("Unknown float binding {name:?} in label {label_name:?}"))?;
+            Ok(format!(
+                "{} ptr [rip + {}]",
+                binding.width.ptr(),
+                binding.asm_label
+            ))
+        }
+        _ => emit_x86_ir_operand(operand, strings, label_name, stack),
+    }
+}
+
+fn emit_ir_float_copy_instruction(
+    asm: &mut String,
+    src: &ir::Operand,
+    dst: &ir::Operand,
+    width: MemoryWidth,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
+    let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst}, {src}\n",
+        float_move_opcode_for_width(width)?
+    ));
+    Ok(())
+}
+
+fn ir_assignment_to_ast(
+    instruction: &ir::Instruction,
+) -> Result<(AssignmentTarget, AssignmentValue), String> {
+    let ir::Instruction::Assign { dst, value } = instruction else {
+        return Err(String::from("Expected an IR assignment"));
+    };
+
+    Ok((
+        AssignmentTarget::Operand(ir_operand_to_ast(dst)),
+        ir_value_to_ast(value),
+    ))
+}
+
+fn ir_value_to_ast(value: &ir::Value) -> AssignmentValue {
+    match value {
+        ir::Value::Operand(operand) => AssignmentValue::Operand(ir_operand_to_ast(operand)),
+        ir::Value::Binary { op, lhs, rhs } => AssignmentValue::Binary {
+            op: *op,
+            lhs: ir_operand_to_ast(lhs),
+            rhs: ir_operand_to_ast(rhs),
+        },
+        ir::Value::Expression { op, lhs, rhs } => {
+            AssignmentValue::Expression(ir_expression_to_ast(op, lhs, rhs))
+        }
+        ir::Value::BitwiseUnary { op, operand } => AssignmentValue::BitwiseUnary {
+            op: *op,
+            operand: ir_operand_to_ast(operand),
+        },
+        ir::Value::Condition(condition) => {
+            AssignmentValue::Condition(ir_condition_to_ast(condition))
+        }
+        ir::Value::FloatBinary {
+            width,
+            op,
+            lhs,
+            rhs,
+        } => AssignmentValue::FloatBinary {
+            width: *width,
+            op: *op,
+            lhs: ir_operand_to_ast(lhs),
+            rhs: ir_operand_to_ast(rhs),
+        },
+        ir::Value::IntrinsicCall { op, width, args } => AssignmentValue::IntrinsicCall {
+            op: *op,
+            width: *width,
+            args: args.iter().map(ir_operand_to_ast).collect(),
+        },
+        ir::Value::StringBytes { value } => AssignmentValue::StringBytes {
+            value: value.clone(),
+        },
+        ir::Value::PlatformReserve { len } => AssignmentValue::LinuxReserve {
+            len: ir_operand_to_ast(len),
+        },
+    }
+}
+
+fn ir_expression_to_ast(op: &ExprOp, lhs: &ir::Value, rhs: &ir::Value) -> Expression {
+    Expression::Binary {
+        op: *op,
+        lhs: Box::new(ir_value_expression_to_ast(lhs)),
+        rhs: Box::new(ir_value_expression_to_ast(rhs)),
+    }
+}
+
+fn ir_value_expression_to_ast(value: &ir::Value) -> Expression {
+    match value {
+        ir::Value::Expression { op, lhs, rhs } => ir_expression_to_ast(op, lhs, rhs),
+        _ => Expression::Operand(ir_operand_to_ast_value(value)),
+    }
+}
+
+fn ir_operand_to_ast_value(value: &ir::Value) -> Operand {
+    match value {
+        ir::Value::Operand(operand) => ir_operand_to_ast(operand),
+        _ => Operand::Immediate(0),
+    }
+}
+
+fn can_direct_ast_binary(
+    op: MathOp,
+    dst: &AssignmentTarget,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<bool, String> {
+    if op == MathOp::Power
+        || (op == MathOp::Multiply
+            && !matches!(assignment_operand_target(dst), Ok(Operand::Register(_))))
+        || !is_simple_ast_operand(lhs)
+        || !is_simple_ast_operand(rhs)
+    {
+        return Ok(false);
+    }
+
+    let Ok(dst) = assignment_operand_target(dst) else {
+        return Ok(false);
+    };
+
+    if !is_simple_ast_operand(dst)
+        || operand_uses_xmm_register(lhs)
+        || operand_uses_xmm_register(rhs)
+        || operand_uses_xmm_register(dst)
+        || is_float_memory_operand(lhs, strings, stack)?
+        || is_float_memory_operand(rhs, strings, stack)?
+        || is_float_memory_operand(dst, strings, stack)?
+    {
+        return Ok(false);
+    }
+
+    if validate_binary_assignment_does_not_clobber_rhs_address(dst, rhs).is_err()
+        || (is_shift_math_op(op)
+            && validate_shift_assignment_does_not_clobber_count(dst, rhs).is_err())
+    {
+        return Ok(false);
+    }
+
+    let opcode = integer_math_opcode(op);
+    if is_shift_math_op(op)
+        && validate_shift_operands(opcode, rhs, dst, strings, label_name, stack).is_err()
+    {
+        return Ok(false);
+    }
+
+    let valid = if lhs == dst {
+        validate_binary_operands(opcode, rhs, dst, strings, label_name, stack)
+    } else if rhs == dst {
+        if is_commutative_math_op(op) {
+            validate_binary_operands(opcode, lhs, dst, strings, label_name, stack)
+        } else if op == MathOp::Subtract {
+            validate_binary_operands("add", lhs, dst, strings, label_name, stack)
+        } else {
+            return Ok(false);
+        }
+    } else {
+        validate_binary_operands("mov", lhs, dst, strings, label_name, stack)
+            .and_then(|_| validate_binary_operands(opcode, rhs, dst, strings, label_name, stack))
+    };
+
+    Ok(valid.is_ok())
+}
+
+fn is_simple_ast_operand(operand: &Operand) -> bool {
+    matches!(
+        operand,
+        Operand::Immediate(_)
+            | Operand::Ident(_)
+            | Operand::Dereference { .. }
+            | Operand::Register(_)
+            | Operand::StringProperty { .. }
+    )
+}
+
+fn emit_ir_integer_binary_assignment(
+    asm: &mut String,
+    dst: &ir::Operand,
+    op: MathOp,
+    lhs: &ir::Operand,
+    rhs: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if lhs == dst {
+        return emit_ir_integer_math_instruction(asm, op, rhs, dst, strings, label_name, stack);
+    }
+
+    if rhs == dst {
+        if is_commutative_math_op(op) {
+            return emit_ir_integer_math_instruction(asm, op, lhs, dst, strings, label_name, stack);
+        }
+        if op == MathOp::Subtract {
+            let dst_text = emit_x86_ir_operand(dst, strings, label_name, stack)?;
+            asm.push_str(&format!("  neg {dst_text}\n"));
+            return emit_ir_binary_instruction(asm, "add", lhs, dst, strings, label_name, stack);
+        }
+        return Err(format!(
+            "Binary assignment destination cannot also be the right operand for {}",
+            math_op_symbol(op)
+        ));
+    }
+
+    emit_ir_binary_instruction(asm, "mov", lhs, dst, strings, label_name, stack)?;
+    emit_ir_integer_math_instruction(asm, op, rhs, dst, strings, label_name, stack)
+}
+
+fn emit_ir_integer_math_instruction(
+    asm: &mut String,
+    op: MathOp,
+    src: &ir::Operand,
+    dst: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_ir_binary_instruction(
+        asm,
+        integer_math_opcode(op),
+        src,
+        dst,
+        strings,
+        label_name,
+        stack,
+    )
+}
+
+fn emit_ir_binary_instruction(
+    asm: &mut String,
+    opcode: &str,
+    src: &ir::Operand,
+    dst: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let src = emit_x86_ir_operand(src, strings, label_name, stack)?;
+    let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
+    Ok(())
+}
+
+fn is_direct_ir_operand(operand: &ir::Operand) -> bool {
+    if matches!(operand, ir::Operand::FloatLiteral(_)) {
+        return false;
+    }
+
+    matches!(
+        operand,
+        ir::Operand::Immediate(_)
+            | ir::Operand::Name(_)
+            | ir::Operand::Memory { .. }
+            | ir::Operand::StringProperty { .. }
+            | ir::Operand::TargetRegister(_)
+    )
+}
+
+fn can_direct_ast_copy(
+    src: &Operand,
+    dst: &AssignmentTarget,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<bool, String> {
+    let dst = match dst {
+        AssignmentTarget::Operand(dst) => dst,
+        AssignmentTarget::RegisterPair(_) => return Ok(false),
+    };
+
+    let simple = |operand: &Operand| {
+        matches!(
+            operand,
+            Operand::Immediate(_)
+                | Operand::Ident(_)
+                | Operand::Dereference { .. }
+                | Operand::Register(_)
+                | Operand::StringProperty { .. }
+        )
+    };
+    if !simple(src) || !simple(dst) {
+        return Ok(false);
+    }
+
+    if operand_uses_xmm_register(src)
+        || operand_uses_xmm_register(dst)
+        || is_float_memory_operand(src, strings, stack)?
+        || is_float_memory_operand(dst, strings, stack)?
+    {
+        return Ok(false);
+    }
+
+    if let (Operand::Register(src), Operand::Register(dst)) = (src, dst)
+        && register_width(src).is_some()
+        && register_width(src) != register_width(dst)
+    {
+        return Ok(false);
+    }
+
+    if let Operand::Register(src) = src
+        && let Some(src_width) = register_width(src)
+        && let Some(dst_width) = operand_width(dst, strings, label_name, stack)?
+        && src_width.bits() > dst_width.bits()
+    {
+        return Ok(false);
+    }
+
+    validate_binary_operands("mov", src, dst, strings, label_name, stack)?;
+    Ok(true)
+}
+
+fn ir_copy_requires_legacy(src: &ir::Operand, dst: &ir::Operand) -> bool {
+    let is_high_byte = |operand: &ir::Operand| matches!(operand, ir::Operand::TargetRegister(name) if is_high_byte_register(name));
+    let is_extended = |operand: &ir::Operand| matches!(operand, ir::Operand::TargetRegister(name) if is_extended_register(name));
+
+    (is_high_byte(src) && is_extended(dst)) || (is_high_byte(dst) && is_extended(src))
+}
+
+fn emit_ir_copy_instruction(
+    asm: &mut String,
+    src: &ir::Operand,
+    dst: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if src == dst {
+        return Ok(());
+    }
+
+    let src = emit_x86_ir_operand(src, strings, label_name, stack)?;
+    let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
+    asm.push_str(&format!("  mov {dst}, {src}\n"));
+    Ok(())
+}
+
+fn ir_operand_to_ast(operand: &ir::Operand) -> Operand {
+    match operand {
+        ir::Operand::Immediate(value) => Operand::Immediate(*value),
+        ir::Operand::FloatLiteral(value) => Operand::FloatLiteral(value.clone()),
+        ir::Operand::Name(name) => Operand::Ident(name.clone()),
+        ir::Operand::Pointer(name) => Operand::Pointer(name.clone()),
+        ir::Operand::Memory { address, width } => Operand::Dereference {
+            address: ir_address_to_ast(address),
+            width: *width,
+        },
+        ir::Operand::AddressOf(address) => Operand::AddressOf(ir_address_to_ast(address)),
+        ir::Operand::StringProperty { name, property } => Operand::StringProperty {
+            name: name.clone(),
+            property: match property {
+                ir::StringProperty::Len => StringProperty::Len,
+                ir::StringProperty::Ptr => StringProperty::Ptr,
+            },
+        },
+        ir::Operand::Converted {
+            operand,
+            conversion,
+        } => Operand::Converted {
+            operand: Box::new(ir_operand_to_ast(operand)),
+            conversion: match conversion {
+                ir::WidthConversion::SignExtend => WidthConversion::SignExtend,
+                ir::WidthConversion::ZeroExtend => WidthConversion::ZeroExtend,
+            },
+        },
+        ir::Operand::Cast { operand, width } => Operand::Cast {
+            operand: Box::new(ir_operand_to_ast(operand)),
+            width: *width,
+        },
+        ir::Operand::TargetRegister(name) => Operand::Register(name.clone()),
+    }
+}
+
+fn ir_condition_to_ast(condition: &ir::Condition) -> ConditionExpr {
+    match condition {
+        ir::Condition::Compare { lhs, op, rhs } => ConditionExpr::Compare(Condition {
+            lhs: ir_operand_to_ast(lhs),
+            op: *op,
+            rhs: ir_operand_to_ast(rhs),
+        }),
+        ir::Condition::BitwiseAndZero { lhs, rhs, op } => ConditionExpr::BitwiseAndZero {
+            lhs: ir_operand_to_ast(lhs),
+            rhs: ir_operand_to_ast(rhs),
+            op: *op,
+        },
+    }
+}
+
+fn ir_address_to_ast(address: &ir::Address) -> Address {
+    Address {
+        first: ir_address_term_to_ast(&address.first),
+        rest: address
+            .rest
+            .iter()
+            .map(|(operator, term)| {
+                (
+                    match operator {
+                        ir::AddressOperator::Add => AddressOperator::Add,
+                        ir::AddressOperator::Subtract => AddressOperator::Subtract,
+                    },
+                    ir_address_term_to_ast(term),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn ir_address_term_to_ast(term: &ir::AddressTerm) -> AddressTerm {
+    match term {
+        ir::AddressTerm::Immediate(value) => AddressTerm::Immediate(*value),
+        ir::AddressTerm::Name(name) => AddressTerm::Ident(name.clone()),
+        ir::AddressTerm::TargetRegister(name) => AddressTerm::Register(name.clone()),
+        ir::AddressTerm::ScaledTargetRegister { register, scale } => AddressTerm::ScaledRegister {
+            register: register.clone(),
+            scale: *scale,
+        },
+    }
+}
+
+fn emit_assignment_legacy(
     asm: &mut String,
     dst: &AssignmentTarget,
     value: &AssignmentValue,
@@ -2335,15 +3198,7 @@ fn emit_assignment(
                 }
             }
 
-            validate_binary_assignment_does_not_clobber_rhs_address(dst, rhs)?;
-            if is_shift_math_op(*op) {
-                validate_shift_assignment_does_not_clobber_count(dst, rhs)?;
-            }
-
-            {
-                emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
-                emit_integer_math_instruction(asm, *op, rhs, dst, strings, label_name, stack)
-            }
+            emit_integer_binary_assignment(asm, dst, *op, lhs, rhs, strings, label_name, stack)
         }
         AssignmentValue::FloatBinary {
             width,
@@ -2354,11 +3209,27 @@ fn emit_assignment(
             asm, dst, *width, *op, lhs, rhs, strings, label_name, stack,
         ),
         AssignmentValue::IntrinsicCall { op, width, args } => {
-            emit_intrinsic_call_assignment(asm, dst, *op, *width, args, strings, label_name, stack)
+            emit_intrinsic_call_assignment_legacy(
+                asm, dst, *op, *width, args, strings, label_name, stack,
+            )
         }
-        AssignmentValue::LinuxReserve { len } => {
-            let dst = assignment_operand_target(dst)?;
-            emit_linux_reserve_assignment(asm, dst, len, strings, label_name, stack)
+        AssignmentValue::LinuxReserve { .. } => {
+            let ir::Instruction::Assign {
+                dst: ir_dst,
+                value: ir::Value::PlatformReserve { len: ir_len },
+            } = lower::lower_assignment(dst, value, label_name, 0)
+                .map_err(|error| error.message)?
+            else {
+                return Err(String::from("Expected lowered platform reserve assignment"));
+            };
+            emit_linux_reserve_assignment(
+                asm,
+                &ir_operand_to_ast(&ir_dst),
+                &ir_operand_to_ast(&ir_len),
+                strings,
+                label_name,
+                stack,
+            )
         }
         AssignmentValue::StringBytes { value } => {
             let dst = assignment_operand_target(dst)?;
@@ -2374,6 +3245,51 @@ fn emit_assignment(
             emit_pair_binary_assignment(asm, dst, *op, lhs, rhs)
         }
     }
+}
+
+fn emit_integer_binary_assignment(
+    asm: &mut String,
+    dst: &Operand,
+    op: MathOp,
+    lhs: &Operand,
+    rhs: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if lhs == dst {
+        return emit_integer_math_instruction(asm, op, rhs, dst, strings, label_name, stack);
+    }
+
+    if rhs == dst {
+        match op {
+            op if is_commutative_math_op(op) => {
+                return emit_integer_math_instruction(
+                    asm, op, lhs, dst, strings, label_name, stack,
+                );
+            }
+            MathOp::Subtract => {
+                let dst_operand = emit_operand(dst, strings, label_name, stack)?;
+                asm.push_str(&format!("  neg {dst_operand}\n"));
+
+                return emit_binary_instruction(asm, "add", lhs, dst, strings, label_name, stack);
+            }
+            op => {
+                return Err(format!(
+                    "Binary assignment destination cannot also be the right operand for {}",
+                    math_op_symbol(op)
+                ));
+            }
+        }
+    }
+
+    validate_binary_assignment_does_not_clobber_rhs_address(dst, rhs)?;
+    if is_shift_math_op(op) {
+        validate_shift_assignment_does_not_clobber_count(dst, rhs)?;
+    }
+
+    emit_copy_instruction(asm, lhs, dst, strings, label_name, stack)?;
+    emit_integer_math_instruction(asm, op, rhs, dst, strings, label_name, stack)
 }
 
 fn assignment_value_uses_linux_reserve(value: &AssignmentValue) -> bool {
@@ -2747,7 +3663,7 @@ fn emit_division_from_accumulator(
         asm.push_str("  xor rdx, rdx\n");
     }
 
-    let opcode = if signed { "idiv" } else { "div" };
+    let opcode = division_opcode(signed);
     let divisor = emit_operand(&divisor, strings, label_name, stack)?;
     asm.push_str(&format!("  {opcode} {divisor}\n"));
 
@@ -2934,6 +3850,114 @@ fn emit_boolean_condition_assignment(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
+    let source_condition = condition.clone();
+    let condition = lower::lower_condition(condition);
+    let ast_condition = ir_condition_to_ast(&condition);
+    let ir_dst = lower::lower_assignment(
+        &AssignmentTarget::Operand(dst.clone()),
+        &AssignmentValue::Condition(source_condition),
+        label_name,
+        0,
+    )
+    .ok()
+    .and_then(|instruction| match instruction {
+        ir::Instruction::Assign { dst, .. } => Some(dst),
+        _ => None,
+    });
+    if can_emit_ir_condition(&ast_condition, strings, label_name, stack)
+        && ir_dst
+            .as_ref()
+            .is_some_and(|dst| matches!(dst, ir::Operand::TargetRegister(_)))
+    {
+        emit_ir_boolean_condition_assignment(
+            asm,
+            ir_dst.as_ref().expect("checked above"),
+            &condition,
+            strings,
+            label_name,
+            stack,
+        )
+    } else {
+        emit_boolean_condition_assignment_legacy(
+            asm,
+            dst,
+            &ast_condition,
+            strings,
+            label_name,
+            stack,
+        )
+    }
+}
+
+fn emit_ir_boolean_condition_assignment(
+    asm: &mut String,
+    dst: &ir::Operand,
+    condition: &ir::Condition,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let set_opcode = match condition {
+        ir::Condition::Compare { lhs, op, rhs } => {
+            let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
+                && matches!(lhs, ir::Operand::TargetRegister(register) if !is_xmm_register(register))
+                && matches!(rhs, ir::Operand::Immediate(0));
+            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            if use_test {
+                asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+            } else {
+                asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+            }
+            compare_set_opcode(*op)
+        }
+        ir::Condition::BitwiseAndZero { lhs, rhs, op } => {
+            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+            match op {
+                CompareOp::Equal => "sete",
+                CompareOp::NotEqual => "setne",
+                _ => unreachable!(),
+            }
+        }
+    };
+
+    emit_ir_setcc_result(asm, set_opcode, dst, strings, label_name, stack)
+}
+
+fn emit_ir_setcc_result(
+    asm: &mut String,
+    set_opcode: &str,
+    dst: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ir::Operand::TargetRegister(register) = dst else {
+        return Err(String::from(
+            "IR boolean assignment requires a register destination",
+        ));
+    };
+
+    if register_width(register) == Some(Width::Bits8) {
+        asm.push_str(&format!("  {set_opcode} {register}\n"));
+    } else {
+        asm.push_str(&format!("  {set_opcode} r10b\n"));
+        let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
+        asm.push_str(&format!("  movzx {dst}, r10b\n"));
+    }
+    Ok(())
+}
+
+fn emit_boolean_condition_assignment_legacy(
+    asm: &mut String,
+    dst: &Operand,
+    condition: &ConditionExpr,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
     let set_opcode = emit_condition_for_setcc(asm, condition, strings, label_name, stack)?;
     emit_setcc_result(asm, set_opcode, dst, strings, label_name, stack)
 }
@@ -3033,30 +4057,6 @@ fn emit_setcc_result(
     Ok(())
 }
 
-fn compare_set_opcode(op: CompareOp) -> &'static str {
-    match op {
-        CompareOp::Equal => "sete",
-        CompareOp::NotEqual => "setne",
-        CompareOp::SignedLess => "setl",
-        CompareOp::SignedLessEqual => "setle",
-        CompareOp::SignedGreater => "setg",
-        CompareOp::SignedGreaterEqual => "setge",
-        CompareOp::UnsignedLess => "setb",
-        CompareOp::UnsignedLessEqual => "setbe",
-        CompareOp::UnsignedGreater => "seta",
-        CompareOp::UnsignedGreaterEqual => "setae",
-        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
-            unreachable!()
-        }
-        CompareOp::FloatEqual(_)
-        | CompareOp::FloatNotEqual(_)
-        | CompareOp::FloatLess(_)
-        | CompareOp::FloatLessEqual(_)
-        | CompareOp::FloatGreater(_)
-        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
-    }
-}
-
 fn emit_wide_math_assignment(
     asm: &mut String,
     dst: &AssignmentTarget,
@@ -3103,12 +4103,7 @@ fn emit_wide_math_assignment(
         }
     }
 
-    let opcode = match (division, signed) {
-        (false, true) => "imul",
-        (false, false) => "mul",
-        (true, true) => "idiv",
-        (true, false) => "div",
-    };
+    let opcode = wide_math_opcode(division, signed);
     let rhs = emit_operand(&rhs, strings, label_name, stack)?;
     asm.push_str(&format!("  {opcode} {rhs}\n"));
 
@@ -3130,10 +4125,7 @@ fn emit_pair_binary_assignment(
 
     validate_pair_binary_assignment(dst, lhs, rhs)?;
 
-    let (low_opcode, high_opcode) = match op {
-        PairBinaryOp::Add => ("add", "adc"),
-        PairBinaryOp::Subtract => ("sub", "sbb"),
-    };
+    let (low_opcode, high_opcode) = pair_math_opcodes(op);
 
     asm.push_str(&format!("  {low_opcode} {}, {}\n", dst.low, rhs.low));
     asm.push_str(&format!("  {high_opcode} {}, {}\n", dst.high, rhs.high));
@@ -3190,7 +4182,292 @@ fn validate_pair_binary_register(name: &str, register: &str) -> Result<(), Strin
     }
 }
 
-fn emit_intrinsic_call_assignment(
+fn emit_ir_intrinsic_call_assignment(
+    asm: &mut String,
+    dst: &ir::Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    args: &[ir::Operand],
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if let Some(src) = args.first()
+        && matches!(
+            op,
+            IntrinsicOp::Ceil | IntrinsicOp::Floor | IntrinsicOp::Round | IntrinsicOp::Trunc
+        )
+        && matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
+    {
+        return emit_ir_float_rounding_intrinsic(
+            asm, dst, op, width, src, strings, label_name, stack,
+        );
+    }
+
+    if let Some(src) = args.first()
+        && matches!(op, IntrinsicOp::Sqrt)
+        && matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
+    {
+        return emit_ir_float_sqrt_intrinsic(asm, dst, width, src, strings, label_name, stack);
+    }
+
+    if args.len() >= 2
+        && matches!(op, IntrinsicOp::Min | IntrinsicOp::Max)
+        && matches!(width, MemoryWidth::F32 | MemoryWidth::F64)
+    {
+        return emit_ir_float_min_max_intrinsic(
+            asm, dst, op, width, &args[0], &args[1], strings, label_name, stack,
+        );
+    }
+
+    if args.len() >= 2
+        && matches!(op, IntrinsicOp::Min | IntrinsicOp::Max)
+        && !matches!(
+            width,
+            MemoryWidth::F32 | MemoryWidth::F64 | MemoryWidth::Ptr
+        )
+    {
+        return emit_ir_integer_min_max_intrinsic(
+            asm, dst, op, width, &args[0], &args[1], strings, label_name, stack,
+        );
+    }
+
+    let dst = ir_operand_to_ast(dst);
+    let args = args.iter().map(ir_operand_to_ast).collect::<Vec<_>>();
+    emit_intrinsic_call_assignment_legacy(
+        asm,
+        &AssignmentTarget::Operand(dst),
+        op,
+        width,
+        &args,
+        strings,
+        label_name,
+        stack,
+    )
+}
+
+fn emit_ir_float_rounding_intrinsic(
+    asm: &mut String,
+    dst: &ir::Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    src: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ast_dst = ir_operand_to_ast(dst);
+    let ast_src = ir_operand_to_ast(src);
+    let memory_destination = validate_float_intrinsic_destination(
+        intrinsic_op_name(op),
+        &ast_dst,
+        width,
+        strings,
+        stack,
+    )?;
+    validate_float_math_operand(
+        &format!("{} operand", intrinsic_op_name(op)),
+        &ast_src,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    let dst_register = if memory_destination {
+        "xmm15"
+    } else {
+        let ir::Operand::TargetRegister(register) = dst else {
+            unreachable!()
+        };
+        register.as_str()
+    };
+    let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {src}, {}\n",
+        float_rounding_opcode(width),
+        float_rounding_mode(op)
+    ));
+
+    if memory_destination {
+        emit_ir_float_copy_instruction(
+            asm,
+            &ir::Operand::TargetRegister(String::from("xmm15")),
+            dst,
+            width,
+            strings,
+            label_name,
+            stack,
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_ir_float_sqrt_intrinsic(
+    asm: &mut String,
+    dst: &ir::Operand,
+    width: MemoryWidth,
+    src: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ast_dst = ir_operand_to_ast(dst);
+    let ast_src = ir_operand_to_ast(src);
+    let memory_destination =
+        validate_float_intrinsic_destination("sqrt", &ast_dst, width, strings, stack)?;
+    validate_float_math_operand("sqrt operand", &ast_src, width, strings, label_name, stack)?;
+
+    let dst_register = if memory_destination {
+        "xmm15"
+    } else {
+        let ir::Operand::TargetRegister(register) = dst else {
+            unreachable!()
+        };
+        register.as_str()
+    };
+    let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {dst_register}, {src}\n",
+        float_sqrt_opcode(width)
+    ));
+
+    if memory_destination {
+        emit_ir_float_copy_instruction(
+            asm,
+            &ir::Operand::TargetRegister(String::from("xmm15")),
+            dst,
+            width,
+            strings,
+            label_name,
+            stack,
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_ir_float_min_max_intrinsic(
+    asm: &mut String,
+    dst: &ir::Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    lhs: &ir::Operand,
+    rhs: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ast_dst = ir_operand_to_ast(dst);
+    let ast_lhs = ir_operand_to_ast(lhs);
+    let ast_rhs = ir_operand_to_ast(rhs);
+    let memory_destination = validate_float_intrinsic_destination(
+        intrinsic_op_name(op),
+        &ast_dst,
+        width,
+        strings,
+        stack,
+    )?;
+    validate_float_math_operand(
+        "Floating-point intrinsic left operand",
+        &ast_lhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+    validate_float_math_operand(
+        "Floating-point intrinsic right operand",
+        &ast_rhs,
+        width,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    let target = if memory_destination {
+        ir::Operand::TargetRegister(String::from("xmm15"))
+    } else {
+        dst.clone()
+    };
+    if lhs != &target {
+        emit_ir_float_copy_instruction(asm, lhs, &target, width, strings, label_name, stack)?;
+    }
+    let ir::Operand::TargetRegister(register) = &target else {
+        unreachable!()
+    };
+    let rhs = emit_ir_float_operand(rhs, width, strings, label_name, stack)?;
+    asm.push_str(&format!(
+        "  {} {register}, {rhs}\n",
+        float_min_max_opcode(op, width)
+    ));
+    if memory_destination {
+        emit_ir_float_copy_instruction(asm, &target, dst, width, strings, label_name, stack)?;
+    }
+    Ok(())
+}
+
+fn emit_ir_integer_min_max_intrinsic(
+    asm: &mut String,
+    dst: &ir::Operand,
+    op: IntrinsicOp,
+    width: MemoryWidth,
+    lhs: &ir::Operand,
+    rhs: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let ast_dst = ir_operand_to_ast(dst);
+    let ast_lhs = ir_operand_to_ast(lhs);
+    let ast_rhs = ir_operand_to_ast(rhs);
+    validate_integer_min_max_intrinsic(
+        &ast_dst, width, &ast_lhs, &ast_rhs, strings, label_name, stack,
+    )?;
+
+    let intrinsic_width = memory_width_bits(width);
+    let memory_destination = !matches!(dst, ir::Operand::TargetRegister(_));
+    let result_register = if memory_destination {
+        integer_memory_result_register(&ast_dst, &ast_rhs)?
+    } else {
+        let ir::Operand::TargetRegister(register) = dst else {
+            unreachable!()
+        };
+        register.clone()
+    };
+    let result_register = register_alias(&result_register, intrinsic_width)?;
+    let result = ir::Operand::TargetRegister(result_register.clone());
+    emit_ir_copy_instruction(asm, lhs, &result, strings, label_name, stack)?;
+
+    let rhs = match rhs {
+        ir::Operand::TargetRegister(register)
+            if register_width(register).is_some_and(|rhs_width| rhs_width != intrinsic_width) =>
+        {
+            ir::Operand::TargetRegister(register_alias(register, intrinsic_width)?)
+        }
+        _ => rhs.clone(),
+    };
+    let dst_operand = emit_x86_ir_operand(&result, strings, label_name, stack)?;
+    let rhs_operand = emit_x86_ir_operand(&rhs, strings, label_name, stack)?;
+    let keep_label = format!(
+        ".L.__subsea.{label_name}.{}_{}_keep",
+        intrinsic_op_name(op),
+        asm.len()
+    );
+    asm.push_str(&format!("  cmp {dst_operand}, {rhs_operand}\n"));
+    asm.push_str(&format!(
+        "  {} {keep_label}\n",
+        integer_min_max_keep_jump(op, width)
+    ));
+    asm.push_str(&format!("  mov {dst_operand}, {rhs_operand}\n"));
+    asm.push_str(&format!("{keep_label}:\n"));
+
+    if memory_destination {
+        emit_ir_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
+    }
+    Ok(())
+}
+
+fn emit_intrinsic_call_assignment_legacy(
     asm: &mut String,
     dst: &AssignmentTarget,
     op: IntrinsicOp,
@@ -3883,42 +5160,6 @@ fn integer_min_max_keep_jump(op: IntrinsicOp, width: MemoryWidth) -> &'static st
     }
 }
 
-fn float_sqrt_opcode(width: MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => "sqrtss",
-        MemoryWidth::F64 => "sqrtsd",
-        _ => unreachable!(),
-    }
-}
-
-fn float_rounding_opcode(width: MemoryWidth) -> &'static str {
-    match width {
-        MemoryWidth::F32 => "roundss",
-        MemoryWidth::F64 => "roundsd",
-        _ => unreachable!(),
-    }
-}
-
-fn float_rounding_mode(op: IntrinsicOp) -> u8 {
-    match op {
-        IntrinsicOp::Round => 0,
-        IntrinsicOp::Floor => 1,
-        IntrinsicOp::Ceil => 2,
-        IntrinsicOp::Trunc => 3,
-        _ => unreachable!(),
-    }
-}
-
-fn float_min_max_opcode(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
-    match (op, width) {
-        (IntrinsicOp::Min, MemoryWidth::F32) => "minss",
-        (IntrinsicOp::Min, MemoryWidth::F64) => "minsd",
-        (IntrinsicOp::Max, MemoryWidth::F32) => "maxss",
-        (IntrinsicOp::Max, MemoryWidth::F64) => "maxsd",
-        _ => unreachable!(),
-    }
-}
-
 fn intrinsic_op_name(op: IntrinsicOp) -> &'static str {
     match op {
         IntrinsicOp::Ceil => "ceil",
@@ -4135,20 +5376,6 @@ fn validate_float_math_operand(
         Operand::Register(register) => Err(format!(
             "{name} must be an XMM register, found integer register {register}"
         )),
-    }
-}
-
-fn float_math_opcode(op: FloatMathOp, width: MemoryWidth) -> &'static str {
-    match (op, width) {
-        (FloatMathOp::Add, MemoryWidth::F32) => "addss",
-        (FloatMathOp::Add, MemoryWidth::F64) => "addsd",
-        (FloatMathOp::Divide, MemoryWidth::F32) => "divss",
-        (FloatMathOp::Divide, MemoryWidth::F64) => "divsd",
-        (FloatMathOp::Multiply, MemoryWidth::F32) => "mulss",
-        (FloatMathOp::Multiply, MemoryWidth::F64) => "mulsd",
-        (FloatMathOp::Subtract, MemoryWidth::F32) => "subss",
-        (FloatMathOp::Subtract, MemoryWidth::F64) => "subsd",
-        _ => unreachable!(),
     }
 }
 
@@ -5038,100 +6265,11 @@ fn emit_operand(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<String, String> {
-    match operand {
-        Operand::Converted { .. } | Operand::Cast { .. } => Err(String::from(
-            "Conversion operands are only supported as assignment sources",
-        )),
-        Operand::AddressOf(_) => Err(String::from(
-            "Address-of operands are only supported as assignment sources",
-        )),
-        Operand::Dereference { address, width } => {
-            let emitted_address = emit_address(address);
-
-            Ok(match resolve_memory_width(address, *width, strings)? {
-                Some(width) => format!("{} ptr [{}]", width.ptr(), emitted_address),
-                None => format!("[{emitted_address}]"),
-            })
-        }
-        Operand::FloatLiteral(value) => Err(format!(
-            "Float literal {value} requires an explicit floating-point operator width"
-        )),
-        Operand::Immediate(value) => Ok(value.to_string()),
-        Operand::Register(name) => Ok(name.clone()),
-        Operand::Ident(name) => match stack_scalar_slot(stack, name) {
-            Some((offset, width)) => Ok(format!("{} ptr [rbp - {}]", width.ptr(), offset)),
-            None if stack_string_slot(stack, name).is_some() => Err(format!(
-                "String stack variable {name:?} in label {label_name:?} cannot be used as an operand"
-            )),
-            None => match strings
-                .integers
-                .get(&(label_name.to_string(), name.clone()))
-            {
-                Some(binding) => Ok(binding.value.to_string()),
-                None if strings
-                    .float_bindings
-                    .contains_key(&(label_name.to_string(), name.clone())) =>
-                {
-                    Err(format!(
-                        "Float binding {name:?} in label {label_name:?} requires a floating-point operator width"
-                    ))
-                }
-                None if strings
-                    .bindings
-                    .contains_key(&(label_name.to_string(), name.clone())) =>
-                {
-                    Err(format!(
-                        "String binding {name:?} in label {label_name:?} cannot be used as an operand"
-                    ))
-                }
-                None => Err(format!("Unknown binding {name:?} in label {label_name:?}")),
-            },
-        },
-        Operand::StringProperty { name, property } => {
-            if let Some(offset) = stack_string_property_slot(stack, name, *property) {
-                return Ok(format!("qword ptr [rbp - {offset}]"));
-            }
-
-            let binding = strings
-                .bindings
-                .get(&(label_name.to_string(), name.clone()))
-                .ok_or_else(|| {
-                    format!("Unknown string binding {name:?} in label {label_name:?}")
-                })?;
-
-            Ok(match property {
-                StringProperty::Len => binding.value.len().to_string(),
-                StringProperty::Ptr => format!("offset {}", binding.asm_label),
-            })
-        }
-        Operand::Pointer(name) => Err(format!(
-            "Pointer operand &{name} is only supported as the right side of assignment"
-        )),
-    }
+    emit_x86_operand(operand, strings, label_name, stack)
 }
 
 fn emit_address(address: &Address) -> String {
-    let mut value = emit_address_term(&address.first);
-
-    for (operator, term) in &address.rest {
-        match operator {
-            AddressOperator::Add => value.push_str(" + "),
-            AddressOperator::Subtract => value.push_str(" - "),
-        }
-
-        value.push_str(&emit_address_term(term));
-    }
-
-    value
-}
-
-fn emit_address_term(term: &AddressTerm) -> String {
-    match term {
-        AddressTerm::Immediate(value) => value.to_string(),
-        AddressTerm::Register(name) => name.clone(),
-        AddressTerm::ScaledRegister { register, scale } => format!("{register} * {scale}"),
-        AddressTerm::Ident(name) => name.clone(),
-    }
+    emit_x86_address(address)
 }
 
 fn float_move_opcode(
@@ -5160,19 +6298,9 @@ fn float_move_opcode(
     }
 }
 
-fn float_move_opcode_for_width(width: MemoryWidth) -> Result<&'static str, String> {
-    match width {
-        MemoryWidth::F32 => Ok("movss"),
-        MemoryWidth::F64 => Ok("movsd"),
-        _ => Err(String::from(
-            "XMM moves require an explicitly f32 or f64 memory operand",
-        )),
-    }
-}
-
 fn register_alias(name: &str, width: Width) -> Result<String, String> {
-    let family = crate::register::family(name)
-        .ok_or_else(|| format!("Expected integer register, found {name}"))?;
+    let family =
+        register_family(name).ok_or_else(|| format!("Expected integer register, found {name}"))?;
 
     let alias = match (family, width) {
         ("rax", Width::Bits64) => "rax",
@@ -5326,8 +6454,7 @@ fn address_term_uses_register_family(term: &AddressTerm, register: &str) -> bool
 }
 
 fn same_register_family(left: &str, right: &str) -> bool {
-    crate::register::family(left)
-        .is_some_and(|family| crate::register::family(right) == Some(family))
+    register_family(left).is_some_and(|family| register_family(right) == Some(family))
 }
 
 fn address_uses_register(address: &Address, predicate: fn(&str) -> bool) -> bool {
@@ -5345,49 +6472,4 @@ fn address_term_uses_register(term: &AddressTerm, predicate: fn(&str) -> bool) -
         }
         _ => false,
     }
-}
-
-fn is_high_byte_register(name: &str) -> bool {
-    matches!(name, "ah" | "bh" | "ch" | "dh")
-}
-
-fn is_extended_register(name: &str) -> bool {
-    matches!(
-        name,
-        "r8" | "r9"
-            | "r10"
-            | "r11"
-            | "r12"
-            | "r13"
-            | "r14"
-            | "r15"
-            | "r8d"
-            | "r9d"
-            | "r10d"
-            | "r11d"
-            | "r12d"
-            | "r13d"
-            | "r14d"
-            | "r15d"
-            | "r8w"
-            | "r9w"
-            | "r10w"
-            | "r11w"
-            | "r12w"
-            | "r13w"
-            | "r14w"
-            | "r15w"
-            | "r8b"
-            | "r9b"
-            | "r10b"
-            | "r11b"
-            | "r12b"
-            | "r13b"
-            | "r14b"
-            | "r15b"
-    )
-}
-
-fn is_xmm_register(name: &str) -> bool {
-    crate::register::is_xmm(name)
 }

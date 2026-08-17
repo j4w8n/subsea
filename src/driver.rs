@@ -5,6 +5,8 @@ use std::process::{self, Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::backend::Target;
+
 static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct BuildOutput {
@@ -29,6 +31,7 @@ pub struct BuildTimings {
 }
 
 pub struct FreestandingLinkOptions<'a> {
+    pub target: Target,
     pub output_path: &'a Path,
     pub linker_script: &'a Path,
     pub link_inputs: &'a [PathBuf],
@@ -150,7 +153,7 @@ pub fn build_freestanding_executable(
     let mut link_command = Command::new(options.linker);
     link_command
         .arg("-m")
-        .arg("elf_x86_64")
+        .arg(options.target.spec().linker_emulation)
         .arg("-T")
         .arg(options.linker_script)
         .arg(&object_path);
