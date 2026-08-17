@@ -93,7 +93,7 @@ sbb rdx, rcx
 
 For now, pair add/sub requires 64-bit integer registers. The destination pair must match the left operand pair so every changed register is visible in the assignment. Destination high/low registers must be different, and the right high register cannot overlap the destination low register because the low operation runs first.
 
-Arithmetic expression lowering may use `r10`, `r11`, `r8`, or `r9` as scratch registers, preferring `r10` and `r11` when available. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on these scratch registers being preserved across arithmetic expressions, power-of, low-result division/modulo, or widened multiply/divide with immediate or clobbered right operands.
+Arithmetic expression lowering may use `r10`, `r11`, `r8`, or `r9` as scratch registers, preferring `r10` and `r11` when available. Floating-point intrinsic assignments to memory use `xmm15` as an explicit scratch register. Power-of uses `r10` for the base and `r11` for the exponent. Do not rely on these scratch registers being preserved across arithmetic expressions, power-of, low-result division/modulo, widened multiply/divide with immediate or clobbered right operands, or floating-point intrinsics assigned to memory.
 
 ## Compile-time Bindings
 
@@ -241,6 +241,40 @@ Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers
   comment
 */
 ```
+
+## Scratch Registers
+
+Some features can use the following registers as scratch storage. Unless an operation explicitly documents preservation, do not rely on these registers retaining their values across the operation.
+
+### `r8`, `r9`, `r10`, `r11`
+
+- Arithmetic expression lowering may use these registers as temporaries, preferring `r10` and `r11` when available.
+- Integer `min` and `max` assigned to memory may use one of these registers for the result before storing it.
+- Integer `sqrt` assigned to memory may use these registers for the input, accumulator, bit mask, and intermediate value.
+- Low-result signed or unsigned division and modulo may use `r10` or `r11` to materialize a divisor.
+- Widened multiply and divide may use `r10` or `r11` for an immediate or otherwise conflicting right operand.
+- Power-of uses `r10` for the mutable base and `r11` for the mutable exponent.
+
+### `rax`, `rdx`
+
+- Low-result signed or unsigned division and modulo use the hardware `rax`/`rdx` dividend and result registers.
+- Widened signed or unsigned multiply and divide use the hardware `rdx:rax` result pair.
+- `linux.syscall` uses `rax` for the syscall number and return value.
+
+### `xmm15`
+
+- Floating-point `sqrt`, `min`, `max`, `round`, `floor`, `ceil`, and `trunc` assigned to memory use `xmm15` as the result temporary.
+- Do not rely on `xmm15` being preserved across floating-point intrinsic assignments to memory.
+
+### Registers Temporarily Used By `linux.print`
+
+- Runtime printing temporarily uses `rax`, `rbx`, `rcx`, `rdi`, `rsi`, `rdx`, and `r11` while preparing syscalls and formatting values.
+- `linux.print` saves and restores these general-purpose registers for each print part, so they are preserved after the operation.
+
+### Raw `syscall`
+
+- The raw `syscall` instruction clobbers `rcx` and `r11` according to the x86-64 instruction contract.
+- The syscall number, arguments, and return value use the Linux syscall register convention; Subsea does not automatically preserve those registers for a raw `syscall`.
 
 ## Printing
 
@@ -953,7 +987,7 @@ xmm6 = trunc(xmm7):f32
 - Supported typed intrinsics are `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc`.
 - `min` and `max` support scalar integer widths `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, and `u64` with signedness taken from the width.
 - Integer `min` and `max` destinations must be integer registers. `i8` and `u8` are lowered with branches because x86-64 does not have 8-bit conditional moves.
-- `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc` support scalar floating widths `f32` and `f64`; floating-point destinations must be XMM registers.
+- `min`, `max`, `sqrt`, `round`, `floor`, `ceil`, and `trunc` support scalar floating widths `f32` and `f64`; floating-point destinations may be XMM registers or matching floating-point memory operands.
 - Integer `sqrt` supports signed and unsigned widths from 8 to 64 bits, and returns the floor square root. Signed inputs must be non-negative; negative immediate values are rejected at compile time, while negative runtime values trap.
 - Integer result rounding is not implemented yet; `round(...):i64` and other integer widths are rejected.
 - Floating-point rounding emits SSE4.1 `roundss` or `roundsd`: `round` uses nearest, `floor` rounds down, `ceil` rounds up, and `trunc` rounds toward zero.
