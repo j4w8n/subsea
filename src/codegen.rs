@@ -3123,8 +3123,19 @@ fn emit_intrinsic_call_assignment(
         (IntrinsicOp::Sqrt, MemoryWidth::F32 | MemoryWidth::F64) => {
             emit_float_sqrt_intrinsic(asm, dst, width, &args[0], strings, label_name, stack)
         }
+        (
+            IntrinsicOp::Sqrt,
+            MemoryWidth::I8
+            | MemoryWidth::I16
+            | MemoryWidth::I32
+            | MemoryWidth::I64
+            | MemoryWidth::U8
+            | MemoryWidth::U16
+            | MemoryWidth::U32
+            | MemoryWidth::U64,
+        ) => emit_integer_sqrt_intrinsic(asm, dst, width, &args[0], strings, label_name, stack),
         (IntrinsicOp::Sqrt, _) => Err(String::from(
-            "sqrt only supports f32 or f64; integer sqrt is not implemented",
+            "sqrt integer operands must use a signed or unsigned integer width",
         )),
         (IntrinsicOp::Min | IntrinsicOp::Max, MemoryWidth::F32 | MemoryWidth::F64) => {
             emit_float_min_max_intrinsic(
@@ -3162,6 +3173,206 @@ fn emit_float_sqrt_intrinsic(
     ));
 
     Ok(())
+}
+
+fn emit_integer_sqrt_intrinsic(
+    asm: &mut String,
+    dst: &Operand,
+    width: MemoryWidth,
+    src: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let expected = memory_width_bits(width);
+    let Operand::Register(dst_register) = dst else {
+        return Err(String::from(
+            "Integer sqrt intrinsic destination must be a register",
+        ));
+    };
+
+    if is_xmm_register(dst_register) {
+        return Err(String::from(
+            "Integer sqrt intrinsic destination must be an integer register",
+        ));
+    }
+
+    let dst_width = register_width(dst_register)
+        .ok_or_else(|| String::from("Integer sqrt intrinsic destination must be a register"))?;
+    if dst_width != expected {
+        return Err(format!(
+            "Integer sqrt intrinsic destination must be {}-bit, found {}-bit register",
+            expected.bits(),
+            dst_width.bits()
+        ));
+    }
+
+    if matches!(dst_register.as_str(), "ah" | "bh" | "ch" | "dh") {
+        return Err(String::from(
+            "Integer sqrt intrinsic destination cannot use a high-byte register",
+        ));
+    }
+
+    validate_integer_min_max_operand(
+        "Integer sqrt intrinsic operand",
+        src,
+        expected,
+        strings,
+        label_name,
+        stack,
+    )?;
+
+    if let Some(value) = immediate_value(src, strings, label_name, stack) {
+        let maximum = if is_signed_integer_width(width) {
+            signed_width_max(expected)
+        } else {
+            unsigned_width_max(expected)
+        };
+        if value < 0 || value > maximum {
+            return Err(if is_signed_integer_width(width) {
+                String::from("Integer sqrt intrinsic signed operand must be non-negative")
+            } else {
+                String::from("Integer sqrt intrinsic operand must fit the unsigned width")
+            });
+        }
+    }
+
+    let mut scratch = ["r10", "r11", "r8", "r9"]
+        .into_iter()
+        .filter(|register| !same_register_family(register, dst_register));
+    let narrow_destination = matches!(expected, Width::Bits8 | Width::Bits16);
+    let accumulator = if narrow_destination {
+        scratch.next().ok_or_else(|| {
+            String::from("Integer sqrt intrinsic has no accumulator scratch register")
+        })?
+    } else {
+        dst_register.as_str()
+    };
+    let base = scratch
+        .next()
+        .ok_or_else(|| String::from("Integer sqrt intrinsic has no base scratch register"))?;
+    let bit = scratch
+        .next()
+        .ok_or_else(|| String::from("Integer sqrt intrinsic has no bit scratch register"))?;
+    let sum = scratch
+        .next()
+        .ok_or_else(|| String::from("Integer sqrt intrinsic has no temporary scratch register"))?;
+
+    emit_integer_sqrt_source_load(asm, base, src, expected, strings, label_name, stack)?;
+
+    let dst_accumulator = register_alias(accumulator, Width::Bits64)?;
+    let bit_value = 1u64 << (expected.bits() - 2);
+    let loop_label = format!(".L.__subsea.{label_name}.sqrt_{}_loop", asm.len());
+    let find_bit_label = format!(".L.__subsea.{label_name}.sqrt_{}_find_bit", asm.len());
+    let no_subtract_label = format!(".L.__subsea.{label_name}.sqrt_{}_no_subtract", asm.len());
+    let negative_label = format!(".L.__subsea.{label_name}.sqrt_{}_negative", asm.len());
+    let after_negative_label =
+        format!(".L.__subsea.{label_name}.sqrt_{}_after_negative", asm.len());
+    let done_label = format!(".L.__subsea.{label_name}.sqrt_{}_done", asm.len());
+
+    if is_signed_integer_width(width) {
+        asm.push_str(&format!("  bt {base}, {}\n", expected.bits() - 1));
+        asm.push_str(&format!("  jc {negative_label}\n"));
+    }
+    asm.push_str(&format!("  xor {dst_accumulator}, {dst_accumulator}\n"));
+    asm.push_str(&format!("  mov {bit}, {bit_value}\n"));
+    asm.push_str(&format!("{find_bit_label}:\n"));
+    asm.push_str(&format!("  cmp {base}, {bit}\n"));
+    asm.push_str(&format!("  jae {loop_label}\n"));
+    asm.push_str(&format!("  shr {bit}, 2\n"));
+    asm.push_str(&format!("  test {bit}, {bit}\n"));
+    asm.push_str(&format!("  jne {find_bit_label}\n"));
+    asm.push_str(&format!("  jmp {done_label}\n"));
+    asm.push_str(&format!("{loop_label}:\n"));
+    asm.push_str(&format!("  test {bit}, {bit}\n"));
+    asm.push_str(&format!("  je {done_label}\n"));
+    asm.push_str(&format!("  lea {sum}, [{dst_accumulator} + {bit}]\n"));
+    asm.push_str(&format!("  cmp {base}, {sum}\n"));
+    asm.push_str(&format!("  jb {no_subtract_label}\n"));
+    asm.push_str(&format!("  sub {base}, {sum}\n"));
+    asm.push_str(&format!("  shr {dst_accumulator}, 1\n"));
+    asm.push_str(&format!("  add {dst_accumulator}, {bit}\n"));
+    asm.push_str(&format!("  shr {bit}, 2\n"));
+    asm.push_str(&format!("  jmp {loop_label}\n"));
+    asm.push_str(&format!("{no_subtract_label}:\n"));
+    asm.push_str(&format!("  shr {dst_accumulator}, 1\n"));
+    asm.push_str(&format!("  shr {bit}, 2\n"));
+    asm.push_str(&format!("  jmp {loop_label}\n"));
+    asm.push_str(&format!("{done_label}:\n"));
+
+    if narrow_destination {
+        let result = register_alias(&dst_accumulator, expected)?;
+        asm.push_str(&format!("  mov {dst_register}, {result}\n"));
+    }
+    if is_signed_integer_width(width) {
+        asm.push_str(&format!("  jmp {after_negative_label}\n"));
+        asm.push_str(&format!("{negative_label}:\n"));
+        asm.push_str("  ud2\n");
+        asm.push_str(&format!("{after_negative_label}:\n"));
+    }
+
+    Ok(())
+}
+
+fn emit_integer_sqrt_source_load(
+    asm: &mut String,
+    base: &str,
+    src: &Operand,
+    width: Width,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if operand_uses_high_byte_register(src) {
+        return Err(String::from(
+            "Integer sqrt intrinsic cannot combine high-byte registers with extended scratch registers",
+        ));
+    }
+
+    let emitted = emit_operand(src, strings, label_name, stack)?;
+    match width {
+        Width::Bits64 => asm.push_str(&format!("  mov {base}, {emitted}\n")),
+        Width::Bits32 => {
+            let source = match src {
+                Operand::Register(register) => register_alias(register, Width::Bits32)?,
+                _ => emitted,
+            };
+            asm.push_str(&format!("  mov {base}d, {source}\n"));
+        }
+        Width::Bits16 | Width::Bits8 => {
+            if immediate_value(src, strings, label_name, stack).is_some() {
+                asm.push_str(&format!("  mov {base}, {emitted}\n"));
+            } else {
+                asm.push_str(&format!("  movzx {base}, {emitted}\n"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unsigned_width_max(width: Width) -> i128 {
+    match width {
+        Width::Bits8 => u8::MAX as i128,
+        Width::Bits16 => u16::MAX as i128,
+        Width::Bits32 => u32::MAX as i128,
+        Width::Bits64 => u64::MAX as i128,
+    }
+}
+
+fn signed_width_max(width: Width) -> i128 {
+    match width {
+        Width::Bits8 => i8::MAX as i128,
+        Width::Bits16 => i16::MAX as i128,
+        Width::Bits32 => i32::MAX as i128,
+        Width::Bits64 => i64::MAX as i128,
+    }
+}
+
+fn is_signed_integer_width(width: MemoryWidth) -> bool {
+    matches!(
+        width,
+        MemoryWidth::I8 | MemoryWidth::I16 | MemoryWidth::I32 | MemoryWidth::I64
+    )
 }
 
 fn emit_float_rounding_intrinsic(

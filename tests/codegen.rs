@@ -3193,7 +3193,38 @@ fn emits_integer_typed_intrinsic_calls() {
 }
 
 #[test]
-fn rejects_integer_sqrt_typed_intrinsic_call() {
+fn emits_unsigned_integer_sqrt_typed_intrinsic_calls() {
+    let program = main_program(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("rax")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Sqrt,
+                width: MemoryWidth::U64,
+                args: vec![reg("rbx")],
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("eax")),
+            value: AssignmentValue::IntrinsicCall {
+                op: IntrinsicOp::Sqrt,
+                width: MemoryWidth::U32,
+                args: vec![Operand::Immediate(81)],
+            },
+        },
+    ]);
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r10, rbx\n"));
+    assert!(asm.contains("  mov r11, 4611686018427387904\n"));
+    assert!(asm.contains("  lea r8, [rax + r11]\n"));
+    assert!(asm.contains("  mov r10d, 81\n"));
+    assert!(asm.contains("  mov r11, 1073741824\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_signed_integer_sqrt_typed_intrinsic_call() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
         value: AssignmentValue::IntrinsicCall {
@@ -3203,11 +3234,30 @@ fn rejects_integer_sqrt_typed_intrinsic_call() {
         },
     }]);
 
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  bt r10, 63\n"));
+    assert!(asm.contains("  jc .L.__subsea.main.sqrt_"));
+    assert!(asm.contains("  ud2\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn rejects_negative_signed_integer_sqrt_immediate() {
+    let program = main_program(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("rax")),
+        value: AssignmentValue::IntrinsicCall {
+            op: IntrinsicOp::Sqrt,
+            width: MemoryWidth::I64,
+            args: vec![Operand::Immediate(-1)],
+        },
+    }]);
+
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
 
     assert_eq!(
         error,
-        "sqrt only supports f32 or f64; integer sqrt is not implemented"
+        "Integer sqrt intrinsic signed operand must be non-negative"
     );
 }
 
