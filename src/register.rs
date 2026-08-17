@@ -1,4 +1,4 @@
-use crate::codegen::Width;
+use crate::analysis::Width;
 
 pub(crate) fn width(name: &str) -> Option<Width> {
     Some(match name {
