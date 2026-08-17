@@ -9,6 +9,7 @@ pub mod imports;
 pub mod ir;
 pub mod lexer;
 pub mod lower;
+pub mod machine;
 pub mod parser;
 mod platform;
 pub mod register;

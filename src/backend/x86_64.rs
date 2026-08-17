@@ -1,6 +1,7 @@
+use crate::analysis::StackFrame;
 use crate::analysis::Width;
 use crate::analysis::{
-    StackFrame, StringTable, resolve_memory_width, stack_scalar_slot, stack_string_property_slot,
+    StringTable, resolve_memory_width, stack_scalar_slot, stack_string_property_slot,
     stack_string_slot,
 };
 use crate::ast::StringProperty;
@@ -8,6 +9,7 @@ use crate::ast::{
     Address, AddressOperator, AddressTerm, BitwiseUnaryOp, CompareOp, FloatMathOp, IntrinsicOp,
     MathOp, MemoryWidth, Operand,
 };
+use crate::backend::TargetSpec;
 use crate::ir;
 
 pub(crate) fn width(name: &str) -> Option<Width> {
@@ -533,4 +535,46 @@ pub(crate) fn pair_math_opcodes(op: crate::ast::PairBinaryOp) -> (&'static str, 
         crate::ast::PairBinaryOp::Add => ("add", "adc"),
         crate::ast::PairBinaryOp::Subtract => ("sub", "sbb"),
     }
+}
+
+pub(crate) fn emit_frame_prologue(asm: &mut String, stack: &StackFrame, spec: TargetSpec) {
+    crate::machine::emit(
+        &crate::machine::Instruction::Push {
+            src: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+        },
+        asm,
+    );
+    crate::machine::emit(
+        &crate::machine::Instruction::Move {
+            dst: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+            src: crate::machine::Operand::Register(spec.stack_pointer.to_owned()),
+        },
+        asm,
+    );
+    if stack.size > 0 {
+        crate::machine::emit(
+            &crate::machine::Instruction::StackAdjust {
+                opcode: String::from("sub"),
+                register: spec.stack_pointer.to_owned(),
+                amount: stack.size,
+            },
+            asm,
+        );
+    }
+}
+
+pub(crate) fn emit_frame_epilogue(asm: &mut String, spec: TargetSpec) {
+    crate::machine::emit(
+        &crate::machine::Instruction::Move {
+            dst: crate::machine::Operand::Register(spec.stack_pointer.to_owned()),
+            src: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+        },
+        asm,
+    );
+    crate::machine::emit(
+        &crate::machine::Instruction::Pop {
+            dst: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+        },
+        asm,
+    );
 }

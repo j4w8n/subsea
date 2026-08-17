@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::backend::Target;
+use subsea::backend::{Architecture, Target, aarch64};
 use subsea::codegen::{emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
@@ -279,6 +279,9 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
     }
 
     let source_path = source_path.ok_or_else(|| String::from("Missing build source path"))?;
+    if !linker_provided {
+        linker = target.spec().linker.to_owned();
+    }
     validate_entry_target(target, entry_symbol.as_deref())?;
     validate_linker_script_target(target, linker_script.as_deref())?;
     validate_format_target(target, output_format)?;
@@ -574,8 +577,14 @@ fn compile_to_asm_with_timings(
 
     let codegen_started = Instant::now();
     let entry_symbol = entry_symbol.unwrap_or("_start");
-    let asm = emit_x86_64_asm_with_origins(&program, target, entry_symbol, &loaded.origins)
-        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
+    let asm = if target.spec().architecture == Architecture::AArch64 {
+        let semantic_ir = subsea::lower::lower_program(&program)
+            .map_err(|error| format!("{}:{}: {}", error.label, error.instruction, error.message))?;
+        aarch64::emit(&semantic_ir)?
+    } else {
+        emit_x86_64_asm_with_origins(&program, target, entry_symbol, &loaded.origins)
+            .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?
+    };
     let codegen = codegen_started.elapsed();
 
     Ok(CompilationOutput {

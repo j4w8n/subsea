@@ -11,19 +11,33 @@ pub(crate) mod linux {
     pub(crate) const SYS_EXIT: u64 = 60;
 
     pub(crate) fn emit_syscall(asm: &mut String, number: u64) {
-        asm.push_str(&format!("  mov rax, {number}\n  syscall\n"));
+        crate::machine::emit(&crate::machine::Instruction::Syscall { number }, asm);
     }
 
     pub(crate) fn emit_write_label(asm: &mut String, label: &str, len: usize) {
+        crate::machine::emit(
+            &crate::machine::Instruction::Move {
+                dst: crate::machine::Operand::Register(String::from("rax")),
+                src: crate::machine::Operand::Immediate(SYS_WRITE as i128),
+            },
+            asm,
+        );
         asm.push_str(&format!(
-            "  mov rax, {SYS_WRITE}\n  mov rdi, {STDOUT}\n  lea rsi, [rip + {label}]\n  mov rdx, {len}\n  syscall\n"
+            "  mov rdi, {STDOUT}\n  lea rsi, [rip + {label}]\n  mov rdx, {len}\n"
         ));
+        crate::machine::emit(&crate::machine::Instruction::SyscallTrap, asm);
     }
 
     pub(crate) fn emit_write_registers(asm: &mut String) {
-        asm.push_str(&format!(
-            "  mov rax, {SYS_WRITE}\n  mov rdi, {STDOUT}\n  syscall\n"
-        ));
+        crate::machine::emit(
+            &crate::machine::Instruction::Move {
+                dst: crate::machine::Operand::Register(String::from("rax")),
+                src: crate::machine::Operand::Immediate(SYS_WRITE as i128),
+            },
+            asm,
+        );
+        asm.push_str(&format!("  mov rdi, {STDOUT}\n"));
+        crate::machine::emit(&crate::machine::Instruction::SyscallTrap, asm);
     }
 
     pub(crate) fn emit_read(asm: &mut String) {

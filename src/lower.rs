@@ -31,6 +31,12 @@ pub fn lower_program(program: &crate::ast::Program) -> Result<ir::Program, Lower
 
     Ok(ir::Program {
         entry: program.entry.clone(),
+        data: program.data.iter().map(lower_data_declaration).collect(),
+        memory: program
+            .memory
+            .iter()
+            .map(lower_memory_declaration)
+            .collect(),
         labels,
     })
 }
@@ -83,8 +89,89 @@ fn lower_label(label: &crate::ast::Label) -> Result<ir::Label, LoweringError> {
 
     Ok(ir::Label {
         name: label.name.clone(),
+        stack: lower_stack_layout(label),
         instructions,
     })
+}
+
+fn lower_data_declaration(data: &crate::ast::DataDeclaration) -> ir::DataDeclaration {
+    ir::DataDeclaration {
+        name: data.name.clone(),
+        section: data.section.clone(),
+        align: data.align,
+        export: data.export,
+        keep: data.keep,
+        items: data
+            .items
+            .iter()
+            .map(|item| match item {
+                crate::ast::DataItem::Scalar { width, value } => ir::DataItem::Scalar {
+                    width: *width,
+                    value: *value,
+                },
+                crate::ast::DataItem::Addr { target } => ir::DataItem::Address {
+                    target: target.clone(),
+                },
+                crate::ast::DataItem::Zero { count } => ir::DataItem::Zero { count: *count },
+                crate::ast::DataItem::Label { name } => ir::DataItem::Label { name: name.clone() },
+            })
+            .collect(),
+    }
+}
+
+fn lower_memory_declaration(memory: &crate::ast::MemoryDeclaration) -> ir::MemoryDeclaration {
+    match memory {
+        crate::ast::MemoryDeclaration::Scalar { name, width, value } => {
+            ir::MemoryDeclaration::Scalar {
+                name: name.clone(),
+                width: *width,
+                value: *value,
+            }
+        }
+        crate::ast::MemoryDeclaration::FloatScalar { name, width, value } => {
+            ir::MemoryDeclaration::FloatScalar {
+                name: name.clone(),
+                width: *width,
+                value: value.clone(),
+            }
+        }
+        crate::ast::MemoryDeclaration::Buffer { name, width, count } => {
+            ir::MemoryDeclaration::Buffer {
+                name: name.clone(),
+                width: *width,
+                count: *count,
+            }
+        }
+        crate::ast::MemoryDeclaration::Array {
+            name,
+            width,
+            values,
+        } => ir::MemoryDeclaration::Array {
+            name: name.clone(),
+            width: *width,
+            values: values.iter().map(lower_memory_value).collect(),
+        },
+        crate::ast::MemoryDeclaration::Repeat {
+            name,
+            width,
+            count,
+            value,
+        } => ir::MemoryDeclaration::Repeat {
+            name: name.clone(),
+            width: *width,
+            count: *count,
+            value: lower_memory_value(value),
+        },
+    }
+}
+
+fn lower_memory_value(value: &crate::ast::MemoryValue) -> ir::MemoryValue {
+    match value {
+        crate::ast::MemoryValue::Integer(value) => ir::MemoryValue::Integer(*value),
+        crate::ast::MemoryValue::Addr { target } => ir::MemoryValue::Address {
+            target: target.clone(),
+        },
+    }
 }
 
 fn lower_instruction(

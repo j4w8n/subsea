@@ -46,6 +46,7 @@ pub enum FreestandingOutputFormat {
 }
 
 pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOutput, String> {
+    let toolchain = Target::X86_64.spec();
     let build_dir = Path::new("target").join("subsea").join(unique_build_id()?);
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("Failed to create build dir: {error}"))?;
@@ -68,23 +69,23 @@ pub fn build_executable(asm: &str, output_path: Option<&Path>) -> Result<BuildOu
 
     let assemble_started = Instant::now();
     run_command(
-        Command::new("as")
+        Command::new(toolchain.assembler)
             .arg(&asm_path)
             .arg("-o")
             .arg(&object_path),
         "assembler",
-        "as",
+        toolchain.assembler,
     )?;
     let assemble = assemble_started.elapsed();
 
     let link_started = Instant::now();
     run_command(
-        Command::new("ld")
+        Command::new(toolchain.linker)
             .arg(&object_path)
             .arg("-o")
             .arg(&executable_path),
         "linker",
-        "ld",
+        toolchain.linker,
     )?;
     let link = link_started.elapsed();
 
@@ -123,6 +124,7 @@ pub fn build_freestanding_executable(
     asm: &str,
     options: FreestandingLinkOptions<'_>,
 ) -> Result<BuildOutput, String> {
+    let toolchain = options.target.spec();
     let build_dir = Path::new("target").join("subsea").join(unique_build_id()?);
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("Failed to create build dir: {error}"))?;
@@ -140,12 +142,12 @@ pub fn build_freestanding_executable(
 
     let assemble_started = Instant::now();
     run_command(
-        Command::new("as")
+        Command::new(toolchain.assembler)
             .arg(&asm_path)
             .arg("-o")
             .arg(&object_path),
         "assembler",
-        "as",
+        toolchain.assembler,
     )?;
     let assemble = assemble_started.elapsed();
 
@@ -170,13 +172,13 @@ pub fn build_freestanding_executable(
     let objcopy = if options.output_format == FreestandingOutputFormat::Binary {
         let objcopy_started = Instant::now();
         run_command(
-            Command::new("objcopy")
+            Command::new(toolchain.objcopy)
                 .arg("-O")
                 .arg("binary")
                 .arg(&linked_path)
                 .arg(options.output_path),
             "objcopy",
-            "objcopy",
+            toolchain.objcopy,
         )?;
 
         Some(objcopy_started.elapsed())
@@ -209,6 +211,7 @@ struct AssembledObject {
 }
 
 fn assemble_to_output_object(asm: &str, object_path: &Path) -> Result<AssembledObject, String> {
+    let toolchain = Target::X86_64.spec();
     let build_dir = Path::new("target").join("subsea").join(unique_build_id()?);
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("Failed to create build dir: {error}"))?;
@@ -222,12 +225,12 @@ fn assemble_to_output_object(asm: &str, object_path: &Path) -> Result<AssembledO
 
     let assemble_started = Instant::now();
     run_command(
-        Command::new("as")
+        Command::new(toolchain.assembler)
             .arg(&asm_path)
             .arg("-o")
             .arg(&object_path),
         "assembler",
-        "as",
+        toolchain.assembler,
     )?;
     let assemble = assemble_started.elapsed();
 

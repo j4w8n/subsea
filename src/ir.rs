@@ -5,13 +5,70 @@ use crate::ast::{
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub entry: String,
+    pub data: Vec<DataDeclaration>,
+    pub memory: Vec<MemoryDeclaration>,
     pub labels: Vec<Label>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Label {
     pub name: String,
+    pub stack: StackLayout,
     pub instructions: Vec<Instruction>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct DataDeclaration {
+    pub name: String,
+    pub section: String,
+    pub align: Option<usize>,
+    pub export: bool,
+    pub keep: bool,
+    pub items: Vec<DataItem>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum DataItem {
+    Scalar { width: MemoryWidth, value: i128 },
+    Address { target: String },
+    Zero { count: usize },
+    Label { name: String },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MemoryDeclaration {
+    Scalar {
+        name: String,
+        width: MemoryWidth,
+        value: i128,
+    },
+    FloatScalar {
+        name: String,
+        width: MemoryWidth,
+        value: String,
+    },
+    Buffer {
+        name: String,
+        width: MemoryWidth,
+        count: usize,
+    },
+    Array {
+        name: String,
+        width: MemoryWidth,
+        values: Vec<MemoryValue>,
+    },
+    Repeat {
+        name: String,
+        width: MemoryWidth,
+        count: usize,
+        value: MemoryValue,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MemoryValue {
+    Integer(i128),
+    Address { target: String },
 }
 
 #[derive(Debug, PartialEq, Clone)]
