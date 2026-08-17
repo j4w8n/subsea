@@ -2,6 +2,16 @@ use crate::ast::{CompareOp, MathOp};
 use crate::ir;
 use std::collections::HashMap;
 
+pub fn is_register(name: &str) -> bool {
+    matches!(name, "sp" | "wsp")
+        || (name.len() >= 2
+            && matches!(&name[..1], "x" | "w" | "v" | "q" | "d" | "s" | "h" | "b")
+            && name[1..].parse::<u8>().is_ok_and(|index| match &name[..1] {
+                "x" | "w" => index <= 30,
+                _ => index <= 31,
+            }))
+}
+
 pub fn emit(program: &ir::Program) -> Result<String, String> {
     let mut asm = String::new();
     emit_data(&mut asm, program)?;

@@ -81,6 +81,9 @@ fn aarch64_linux_target_describes_the_initial_cross_backend_contract() {
     assert_eq!(spec.float_return_register, "v0");
     assert_eq!(spec.runtime_call_convention, "aapcs64");
     assert!(Target::parse("aarch").is_ok());
+    for register in ["x0", "x30", "w0", "sp", "wsp", "v0", "q31"] {
+        assert!(subsea::backend::aarch64::is_register(register));
+    }
 }
 
 #[test]

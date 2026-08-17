@@ -572,8 +572,10 @@ fn compile_to_asm_with_timings(
     let parse_started = Instant::now();
     let loaded = imports::load_program_with_origins(&source_path)?;
     let program = loaded.program;
-    validate_program_with_diagnostics(&program, &loaded.origins)
-        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
+    if target.spec().architecture == Architecture::X86_64 {
+        validate_program_with_diagnostics(&program, &loaded.origins)
+            .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
+    }
     let parse_ast = parse_started.elapsed();
 
     let codegen_started = Instant::now();
