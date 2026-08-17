@@ -5,19 +5,38 @@ use crate::ast::{
     MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
     Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
+use crate::diagnostic::{Diagnostic, ProgramOrigins, Span};
 use crate::grammar::Token;
+use crate::lexer::SpannedToken;
 use std::collections::HashSet;
 
 pub struct Parser {
     tokens: Vec<Token>,
+    spans: Option<Vec<Span>>,
     position: usize,
+    origins: ProgramOrigins,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens,
+            spans: None,
             position: 0,
+            origins: ProgramOrigins::default(),
+        }
+    }
+
+    pub fn new_spanned(tokens: Vec<SpannedToken>) -> Self {
+        let (tokens, spans): (Vec<_>, Vec<_>) = tokens
+            .into_iter()
+            .map(|token| (token.token, token.span))
+            .unzip();
+        Self {
+            tokens,
+            spans: Some(spans),
+            position: 0,
+            origins: ProgramOrigins::default(),
         }
     }
 
@@ -27,6 +46,34 @@ impl Parser {
 
     pub fn parse_library(&mut self) -> Result<Program, String> {
         self.parse_program_with_options(false)
+    }
+
+    pub fn parse_program_with_diagnostics(&mut self) -> Result<Program, Diagnostic> {
+        self.parse_program()
+            .map_err(|message| self.diagnostic(message))
+    }
+
+    pub fn parse_library_with_diagnostics(&mut self) -> Result<Program, Diagnostic> {
+        self.parse_library()
+            .map_err(|message| self.diagnostic(message))
+    }
+
+    pub fn take_origins(&mut self) -> ProgramOrigins {
+        std::mem::take(&mut self.origins)
+    }
+
+    fn diagnostic(&self, message: String) -> Diagnostic {
+        let Some(spans) = &self.spans else {
+            return Diagnostic::new(message);
+        };
+        if spans.is_empty() {
+            return Diagnostic::new(message);
+        }
+        let index = self
+            .position
+            .saturating_sub(1)
+            .min(spans.len().saturating_sub(1));
+        Diagnostic::new(message).at(spans[index])
     }
 
     fn parse_program_with_options(&mut self, require_main: bool) -> Result<Program, String> {
@@ -265,7 +312,9 @@ impl Parser {
                 return Err(format!("Expected '}}' to close label '{name}'"));
             }
 
+            let start = self.position;
             instructions.push(self.parse_instruction(&name)?);
+            self.record_instruction_span(&name, start);
         }
 
         self.expect(Token::RBrace, "Expected '}' after label block")?;
@@ -307,12 +356,29 @@ impl Parser {
                 return Err(format!("Expected '}}' to close exported function '{name}'"));
             }
 
+            let start = self.position;
             instructions.push(self.parse_instruction(&name)?);
+            self.record_instruction_span(&name, start);
         }
 
         self.expect(Token::RBrace, "Expected '}' after exported function block")?;
 
         Ok(Label { name, instructions })
+    }
+
+    fn record_instruction_span(&mut self, label: &str, start: usize) {
+        let Some(spans) = &self.spans else {
+            return;
+        };
+        let Some(first) = spans.get(start) else {
+            return;
+        };
+        let end = self
+            .position
+            .saturating_sub(1)
+            .min(spans.len().saturating_sub(1));
+        self.origins
+            .record_instruction(label, Span::new(first.source, first.start, spans[end].end));
     }
 
     fn parse_memory_declaration(&mut self) -> Result<MemoryDeclaration, String> {

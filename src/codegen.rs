@@ -12,6 +12,8 @@ use crate::ast::{
     MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource, RegisterPair,
     StringInitializer, StringProperty, WidthConversion,
 };
+use crate::diagnostic::{Diagnostic, ProgramOrigins};
+use crate::parser::validate_program_symbols;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -62,6 +64,32 @@ pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     emit_x86_64_asm(program, Target::X86_64)
 }
 
+/// Runs semantic validation with the best available source location while the
+/// public AST remains span-free.
+pub fn validate_program_with_diagnostics(
+    program: &Program,
+    origins: &ProgramOrigins,
+) -> Result<(), Diagnostic> {
+    validate_program_symbols(program).map_err(Diagnostic::new)?;
+
+    let top_level_labels: HashSet<&str> = program
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
+    for label in &program.labels {
+        let stack = build_stack_frame(label);
+        validate_label(label, &top_level_labels, &stack).map_err(|message| {
+            let diagnostic = Diagnostic::new(message);
+            origins
+                .instruction_span(&label.name, 0)
+                .map_or(diagnostic.clone(), |span| diagnostic.at(span))
+        })?;
+    }
+
+    Ok(())
+}
+
 pub fn emit_x86_64_asm(program: &Program, target: Target) -> Result<String, String> {
     emit_x86_64_asm_with_entry_symbol(program, target, "_start")
 }
@@ -70,6 +98,40 @@ pub fn emit_x86_64_asm_with_entry_symbol(
     program: &Program,
     target: Target,
     entry_symbol: &str,
+) -> Result<String, String> {
+    emit_x86_64_asm_impl(program, target, entry_symbol, None)
+}
+
+pub fn emit_x86_64_asm_with_origins(
+    program: &Program,
+    target: Target,
+    entry_symbol: &str,
+    origins: &ProgramOrigins,
+) -> Result<String, Diagnostic> {
+    validate_program_with_diagnostics(program, origins)?;
+    emit_x86_64_asm_impl(program, target, entry_symbol, Some(origins)).map_err(|message| {
+        let Some((label, index, message)) =
+            message
+                .strip_prefix("__SUBSEA_CODEGEN__")
+                .and_then(|value| {
+                    let mut parts = value.splitn(3, '\0');
+                    Some((parts.next()?, parts.next()?.parse().ok()?, parts.next()?))
+                })
+        else {
+            return Diagnostic::new(message);
+        };
+        let diagnostic = Diagnostic::new(message.to_owned());
+        origins
+            .instruction_span(label, index)
+            .map_or(diagnostic.clone(), |span| diagnostic.at(span))
+    })
+}
+
+fn emit_x86_64_asm_impl(
+    program: &Program,
+    target: Target,
+    entry_symbol: &str,
+    origins: Option<&ProgramOrigins>,
 ) -> Result<String, String> {
     let strings = collect_string_bindings(program)?;
     let mut literal_indexes = HashMap::new();
@@ -106,126 +168,142 @@ pub fn emit_x86_64_asm_with_entry_symbol(
         let mut runtime_print_index = 0;
         let mut conditional_jump_index = 0;
 
-        for instruction in &label.instructions {
-            match instruction {
-                Instruction::Assign { dst, value } => {
-                    if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
-                        return Err(String::from("reserve is only supported for target x86_64"));
-                    }
+        for (instruction_index, instruction) in label.instructions.iter().enumerate() {
+            let result: Result<(), String> = (|| {
+                match instruction {
+                    Instruction::Assign { dst, value } => {
+                        if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
+                            return Err(String::from(
+                                "reserve is only supported for target x86_64",
+                            ));
+                        }
 
-                    emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
-                }
-                Instruction::AssignIf {
-                    dst,
-                    value,
-                    condition,
-                } => {
-                    if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
-                        return Err(String::from("reserve is only supported for target x86_64"));
+                        emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
                     }
-
-                    conditional_jump_index += 1;
-                    let skip_label = format!(
-                        ".L.__subsea.{}.assign_if_{}_skip",
-                        label.name, conditional_jump_index
-                    );
-                    emit_condition_jump(
-                        &mut asm,
-                        &skip_label,
-                        condition,
-                        false,
-                        &strings,
-                        &label.name,
-                        &stack,
-                        conditional_jump_index,
-                    )?;
-                    emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
-                    asm.push_str(&format!("{skip_label}:\n"));
-                }
-                Instruction::Call { target } => {
-                    emit_call_instruction(
-                        &mut asm,
-                        target,
-                        &labels,
-                        &strings,
-                        &label.name,
-                        &stack,
-                    )?;
-                }
-                Instruction::Exit { code } => {
-                    if target.is_freestanding() {
-                        return Err(String::from(
-                            "exit is only supported for target x86_64; use hlt or an explicit loop for x86_64-free",
-                        ));
-                    }
-
-                    asm.push_str("  mov rax, 60\n");
-                    asm.push_str(&format!("  mov rdi, {code}\n"));
-                    asm.push_str("  syscall\n");
-                }
-                Instruction::InlineAsm { text } => {
-                    asm.push_str(&format!("  {text}\n"));
-                }
-                Instruction::Jmp { target, condition } => {
-                    conditional_jump_index += usize::from(condition.is_some());
-                    emit_jmp_instruction(
-                        &mut asm,
-                        target,
-                        condition.as_ref(),
-                        &labels,
-                        &strings,
-                        &label.name,
-                        &stack,
-                        conditional_jump_index,
-                    )?;
-                }
-                Instruction::Label { name } => {
-                    asm.push_str(&format!("{name}:\n"));
-                }
-                Instruction::Nop => {
-                    asm.push_str("  nop\n");
-                }
-                Instruction::Const { .. } | Instruction::Stack { .. } => {}
-                Instruction::StackString { name, value } => {
-                    emit_stack_string_initializer(
-                        &mut asm,
-                        name,
+                    Instruction::AssignIf {
+                        dst,
                         value,
-                        &strings,
-                        &label.name,
-                        &stack,
-                    )?;
-                }
-                Instruction::Print { parts } => {
-                    if target.is_freestanding() {
-                        return Err(String::from("print is only supported for target x86_64"));
-                    }
+                        condition,
+                    } => {
+                        if target.is_freestanding() && assignment_value_uses_linux_reserve(value) {
+                            return Err(String::from(
+                                "reserve is only supported for target x86_64",
+                            ));
+                        }
 
-                    for part in parts {
-                        match part {
-                            PrintPart::Binding(name) => {
-                                if let Some(slot) = stack.slots.get(name) {
-                                    runtime_print_index += 1;
-                                    match slot {
-                                        StackSlot::Scalar { width, .. } => {
-                                            let format = infer_print_format_for_width(*width);
-                                            emit_print_operand_instruction(
-                                                &mut asm,
-                                                &Operand::Ident(name.clone()),
-                                                format,
-                                                &strings,
-                                                &label.name,
-                                                &stack,
-                                                runtime_print_index,
-                                            )?;
+                        conditional_jump_index += 1;
+                        let skip_label = format!(
+                            ".L.__subsea.{}.assign_if_{}_skip",
+                            label.name, conditional_jump_index
+                        );
+                        emit_condition_jump(
+                            &mut asm,
+                            &skip_label,
+                            condition,
+                            false,
+                            &strings,
+                            &label.name,
+                            &stack,
+                            conditional_jump_index,
+                        )?;
+                        emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
+                        asm.push_str(&format!("{skip_label}:\n"));
+                    }
+                    Instruction::Call { target } => {
+                        emit_call_instruction(
+                            &mut asm,
+                            target,
+                            &labels,
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
+                    }
+                    Instruction::Exit { code } => {
+                        if target.is_freestanding() {
+                            return Err(String::from(
+                                "exit is only supported for target x86_64; use hlt or an explicit loop for x86_64-free",
+                            ));
+                        }
+
+                        asm.push_str("  mov rax, 60\n");
+                        asm.push_str(&format!("  mov rdi, {code}\n"));
+                        asm.push_str("  syscall\n");
+                    }
+                    Instruction::InlineAsm { text } => {
+                        asm.push_str(&format!("  {text}\n"));
+                    }
+                    Instruction::Jmp { target, condition } => {
+                        conditional_jump_index += usize::from(condition.is_some());
+                        emit_jmp_instruction(
+                            &mut asm,
+                            target,
+                            condition.as_ref(),
+                            &labels,
+                            &strings,
+                            &label.name,
+                            &stack,
+                            conditional_jump_index,
+                        )?;
+                    }
+                    Instruction::Label { name } => {
+                        asm.push_str(&format!("{name}:\n"));
+                    }
+                    Instruction::Nop => {
+                        asm.push_str("  nop\n");
+                    }
+                    Instruction::Const { .. } | Instruction::Stack { .. } => {}
+                    Instruction::StackString { name, value } => {
+                        emit_stack_string_initializer(
+                            &mut asm,
+                            name,
+                            value,
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
+                    }
+                    Instruction::Print { parts } => {
+                        if target.is_freestanding() {
+                            return Err(String::from("print is only supported for target x86_64"));
+                        }
+
+                        for part in parts {
+                            match part {
+                                PrintPart::Binding(name) => {
+                                    if let Some(slot) = stack.slots.get(name) {
+                                        runtime_print_index += 1;
+                                        match slot {
+                                            StackSlot::Scalar { width, .. } => {
+                                                let format = infer_print_format_for_width(*width);
+                                                emit_print_operand_instruction(
+                                                    &mut asm,
+                                                    &Operand::Ident(name.clone()),
+                                                    format,
+                                                    &strings,
+                                                    &label.name,
+                                                    &stack,
+                                                    runtime_print_index,
+                                                )?;
+                                            }
+                                            StackSlot::String { .. } => {
+                                                emit_print_stack_string_instruction(
+                                                    &mut asm, name, &stack,
+                                                )?;
+                                            }
                                         }
-                                        StackSlot::String { .. } => {
-                                            emit_print_stack_string_instruction(
-                                                &mut asm, name, &stack,
-                                            )?;
-                                        }
+                                    } else {
+                                        let string = resolve_print_part(
+                                            &strings,
+                                            &mut literal_indexes,
+                                            &label.name,
+                                            part,
+                                        )?;
+
+                                        emit_print_string_instruction(&mut asm, string);
                                     }
-                                } else {
+                                }
+                                PrintPart::Literal(_) => {
                                     let string = resolve_print_part(
                                         &strings,
                                         &mut literal_indexes,
@@ -235,77 +313,94 @@ pub fn emit_x86_64_asm_with_entry_symbol(
 
                                     emit_print_string_instruction(&mut asm, string);
                                 }
-                            }
-                            PrintPart::Literal(_) => {
-                                let string = resolve_print_part(
-                                    &strings,
-                                    &mut literal_indexes,
-                                    &label.name,
-                                    part,
-                                )?;
-
-                                emit_print_string_instruction(&mut asm, string);
-                            }
-                            PrintPart::Operand(operand) => {
-                                runtime_print_index += 1;
-                                emit_print_operand_instruction(
-                                    &mut asm,
-                                    operand,
-                                    PrintFormat::SignedDecimal(MemoryWidth::I64),
-                                    &strings,
-                                    &label.name,
-                                    &stack,
-                                    runtime_print_index,
-                                )?;
-                            }
-                            PrintPart::FormattedOperand { format, operand } => {
-                                runtime_print_index += 1;
-                                emit_print_operand_instruction(
-                                    &mut asm,
-                                    operand,
-                                    *format,
-                                    &strings,
-                                    &label.name,
-                                    &stack,
-                                    runtime_print_index,
-                                )?;
+                                PrintPart::Operand(operand) => {
+                                    runtime_print_index += 1;
+                                    emit_print_operand_instruction(
+                                        &mut asm,
+                                        operand,
+                                        PrintFormat::SignedDecimal(MemoryWidth::I64),
+                                        &strings,
+                                        &label.name,
+                                        &stack,
+                                        runtime_print_index,
+                                    )?;
+                                }
+                                PrintPart::FormattedOperand { format, operand } => {
+                                    runtime_print_index += 1;
+                                    emit_print_operand_instruction(
+                                        &mut asm,
+                                        operand,
+                                        *format,
+                                        &strings,
+                                        &label.name,
+                                        &stack,
+                                        runtime_print_index,
+                                    )?;
+                                }
                             }
                         }
                     }
-                }
-                Instruction::Pop { dst } => {
-                    validate_pop_operand(dst, &strings, &stack)?;
-                    let dst = emit_operand(dst, &strings, &label.name, &stack)?;
-                    asm.push_str(&format!("  pop {dst}\n"));
-                }
-                Instruction::Push { src } => {
-                    validate_push_operand(src, &strings, &label.name, &stack)?;
-                    let src = emit_operand(src, &strings, &label.name, &stack)?;
-                    asm.push_str(&format!("  push {src}\n"));
-                }
-                Instruction::Read { src, dst, len } => {
-                    if target.is_freestanding() {
-                        return Err(String::from("read is only supported for target x86_64"));
+                    Instruction::Pop { dst } => {
+                        validate_pop_operand(dst, &strings, &stack)?;
+                        let dst = emit_operand(dst, &strings, &label.name, &stack)?;
+                        asm.push_str(&format!("  pop {dst}\n"));
                     }
+                    Instruction::Push { src } => {
+                        validate_push_operand(src, &strings, &label.name, &stack)?;
+                        let src = emit_operand(src, &strings, &label.name, &stack)?;
+                        asm.push_str(&format!("  push {src}\n"));
+                    }
+                    Instruction::Read { src, dst, len } => {
+                        if target.is_freestanding() {
+                            return Err(String::from("read is only supported for target x86_64"));
+                        }
 
-                    emit_read_instruction(&mut asm, src, dst, len, &strings, &label.name, &stack)?;
-                }
-                Instruction::Release { ptr, len } => {
-                    if target.is_freestanding() {
-                        return Err(String::from("release is only supported for target x86_64"));
+                        emit_read_instruction(
+                            &mut asm,
+                            src,
+                            dst,
+                            len,
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
                     }
+                    Instruction::Release { ptr, len } => {
+                        if target.is_freestanding() {
+                            return Err(String::from(
+                                "release is only supported for target x86_64",
+                            ));
+                        }
 
-                    emit_release_instruction(&mut asm, ptr, len, &strings, &label.name, &stack)?;
-                }
-                Instruction::Ret => {
-                    if stack.has_slots() {
-                        emit_frame_epilogue(&mut asm);
+                        emit_release_instruction(
+                            &mut asm,
+                            ptr,
+                            len,
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
                     }
-                    asm.push_str("  ret\n");
+                    Instruction::Ret => {
+                        if stack.has_slots() {
+                            emit_frame_epilogue(&mut asm);
+                        }
+                        asm.push_str("  ret\n");
+                    }
+                    Instruction::Syscall => {
+                        asm.push_str("  syscall\n");
+                    }
                 }
-                Instruction::Syscall => {
-                    asm.push_str("  syscall\n");
-                }
+                Ok(())
+            })();
+            if let Err(message) = result {
+                return Err(match origins {
+                    Some(_) => format!(
+                        "__SUBSEA_CODEGEN__{}\0{}\0{}",
+                        label.name, instruction_index, message
+                    ),
+                    None => message,
+                });
             }
         }
 

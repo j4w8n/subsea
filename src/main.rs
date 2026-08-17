@@ -5,13 +5,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::codegen::{Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol};
+use subsea::codegen::{Target, emit_x86_64_asm_with_origins, validate_program_with_diagnostics};
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
     build_freestanding_executable, build_object, run_executable,
 };
 use subsea::imports;
-use subsea::parser::validate_program_symbols;
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
@@ -565,15 +564,16 @@ fn compile_to_asm_with_timings(
     let lex = lex_started.elapsed();
 
     let parse_started = Instant::now();
-    let program = imports::load_program(&source_path)?;
-    validate_program_symbols(&program)?;
+    let loaded = imports::load_program_with_origins(&source_path)?;
+    let program = loaded.program;
+    validate_program_with_diagnostics(&program, &loaded.origins)
+        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
     let parse_ast = parse_started.elapsed();
 
     let codegen_started = Instant::now();
-    let asm = match entry_symbol {
-        Some(entry_symbol) => emit_x86_64_asm_with_entry_symbol(&program, target, entry_symbol)?,
-        None => emit_x86_64_asm(&program, target)?,
-    };
+    let entry_symbol = entry_symbol.unwrap_or("_start");
+    let asm = emit_x86_64_asm_with_origins(&program, target, entry_symbol, &loaded.origins)
+        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
     let codegen = codegen_started.elapsed();
 
     Ok(CompilationOutput {
@@ -605,6 +605,7 @@ fn print_build_timings(
 }
 
 fn exit_with_error(error: String) -> ! {
+    let error = error.strip_prefix("error: ").unwrap_or(&error);
     eprintln!("Error: {error}");
     process::exit(1);
 }

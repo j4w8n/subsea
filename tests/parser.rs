@@ -5,7 +5,9 @@ use subsea::ast::{
     PrintFormat, PrintPart, ReadSource, RegisterPair, StringInitializer, StringProperty,
     WidthConversion,
 };
+use subsea::diagnostic::SourceId;
 use subsea::grammar::Token;
+use subsea::lexer::lex_with_spans;
 use subsea::parser::{Parser, validate_program_symbols};
 
 fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
@@ -14,6 +16,20 @@ fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
 
 fn s(value: &str) -> String {
     value.to_string()
+}
+
+#[test]
+fn records_instruction_origins_without_changing_ast() {
+    let source = "main: {\n  nop\n}\n";
+    let tokens = lex_with_spans(source, SourceId(7)).unwrap();
+    let mut parser = Parser::new_spanned(tokens);
+    let program = parser.parse_program().unwrap();
+    let origins = parser.take_origins();
+
+    assert_eq!(program.labels[0].instructions.len(), 1);
+    let span = origins.instruction_span("main", 0).unwrap();
+    assert_eq!(span.source, SourceId(7));
+    assert_eq!(&source[span.start..span.end], "nop");
 }
 
 fn cmp(condition: Condition) -> ConditionExpr {

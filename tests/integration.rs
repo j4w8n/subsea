@@ -418,6 +418,56 @@ fn freestanding_target_rejects_linux_helpers() {
 }
 
 #[test]
+fn codegen_diagnostic_points_to_failing_instruction() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "-t",
+            "x86_64-free",
+            "tests/fixtures/diagnostic_reserve.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(!stderr.contains("Error: error:"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("diagnostic_reserve.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("rax = linux.reserve(4096)"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("reserve is only supported"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn semantic_diagnostic_includes_source_location() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/diagnostic_stack_register.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("diagnostic_stack_register.ss:2:3"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("declares stack variables"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn freestanding_build_writes_object_file() {
     let _guard = CLI_LOCK.lock().unwrap();
     let before = build_dirs();

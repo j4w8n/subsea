@@ -1,5 +1,6 @@
+use subsea::diagnostic::{SourceId, SourceMap, Span};
 use subsea::grammar::Token;
-use subsea::lexer::get_next_token;
+use subsea::lexer::{get_next_token, lex_with_spans};
 
 fn lex_one(source: &str) -> Result<Option<Token>, String> {
     get_next_token(&mut source.chars().peekable())
@@ -40,6 +41,46 @@ fn rejects_non_ascii_identifier_start() {
     let error = lex_one("étiquette").unwrap_err();
 
     assert_eq!(error, "Unknown character 'é'");
+}
+
+#[test]
+fn tracks_token_spans() {
+    let tokens = lex_with_spans("rax = rdx", SourceId(0)).unwrap();
+
+    assert_eq!(tokens[0].token, Token::Register(s("rax")));
+    assert_eq!(tokens[0].span, Span::new(SourceId(0), 0, 3));
+    assert_eq!(tokens[1].token, Token::Equals);
+    assert_eq!(tokens[1].span, Span::new(SourceId(0), 4, 5));
+    assert_eq!(tokens[2].token, Token::Register(s("rdx")));
+    assert_eq!(tokens[2].span, Span::new(SourceId(0), 6, 9));
+}
+
+#[test]
+fn renders_a_source_diagnostic() {
+    let mut sources = SourceMap::default();
+    let source = "rax = sqrt(9:u64\n";
+    let source_id = sources.add("main.ss", source);
+    let diagnostic = subsea::diagnostic::Diagnostic::new("expected ')' after intrinsic argument")
+        .at(Span::new(source_id, 15, 15));
+
+    assert_eq!(
+        diagnostic.render(&sources),
+        "error: expected ')' after intrinsic argument\n --> main.ss:1:16\n  |\n1 | rax = sqrt(9:u64\n  |                ^"
+    );
+}
+
+#[test]
+fn renders_unicode_columns_and_multiline_spans_safely() {
+    let mut sources = SourceMap::default();
+    let source = "// café\nrax = rdx\n";
+    let source_id = sources.add("main.ss", source);
+    let diagnostic =
+        subsea::diagnostic::Diagnostic::new("invalid instruction").at(Span::new(source_id, 9, 18));
+
+    assert_eq!(
+        diagnostic.render(&sources),
+        "error: invalid instruction\n --> main.ss:2:1\n  |\n2 | rax = rdx\n  | ^~~~~~~~~"
+    );
 }
 
 #[test]

@@ -2,14 +2,23 @@ use crate::ast::{
     AddressTerm, ControlTarget, DataItem, ImportDeclaration, Instruction, MemoryDeclaration,
     MemoryValue, Operand, Program,
 };
-use crate::grammar::Token;
-use crate::lexer::get_next_token;
+use crate::diagnostic::{ProgramOrigins, SourceMap};
+use crate::lexer::lex_with_spans;
 use crate::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn load_program(path: &Path) -> Result<Program, String> {
+    Ok(load_program_with_origins(path)?.program)
+}
+
+pub struct LoadedProgram {
+    pub program: Program,
+    pub origins: ProgramOrigins,
+}
+
+pub fn load_program_with_origins(path: &Path) -> Result<LoadedProgram, String> {
     let mut resolver = ImportResolver::new();
     resolver.load_root(path)
 }
@@ -24,6 +33,7 @@ struct ImportResolver {
 struct ResolvedModule {
     program: Program,
     module_id: usize,
+    origins: ProgramOrigins,
 }
 
 impl ImportResolver {
@@ -35,16 +45,17 @@ impl ImportResolver {
         }
     }
 
-    fn load_root(&mut self, path: &Path) -> Result<Program, String> {
+    fn load_root(&mut self, path: &Path) -> Result<LoadedProgram, String> {
         let path = canonical_path(path)?;
-        let mut program = parse_file(&path, true, &mut self.loading)?;
-        self.resolve_imports_into_root(&mut program, &path)?;
-        Ok(program)
+        let (mut program, mut origins) = parse_file(&path, true, &mut self.loading)?;
+        self.resolve_imports_into_root(&mut program, &mut origins, &path)?;
+        Ok(LoadedProgram { program, origins })
     }
 
     fn resolve_imports_into_root(
         &mut self,
         program: &mut Program,
+        origins: &mut ProgramOrigins,
         source_path: &Path,
     ) -> Result<(), String> {
         let imports = std::mem::take(&mut program.imports);
@@ -63,7 +74,13 @@ impl ImportResolver {
             validate_import(&module.program, &import, &local_labels, &mut imported_names)?;
 
             if merged_modules.insert(import_path) {
-                merge_module(program, &module.program, module.module_id);
+                merge_module(
+                    program,
+                    origins,
+                    &module.program,
+                    &module.origins,
+                    module.module_id,
+                );
             }
         }
 
@@ -79,9 +96,13 @@ impl ImportResolver {
         let module_id = self.next_module_id;
         self.next_module_id += 1;
 
-        let mut program = parse_file(&path, false, &mut self.loading)?;
-        self.resolve_module_imports(&mut program, &path)?;
-        let module = ResolvedModule { program, module_id };
+        let (mut program, mut origins) = parse_file(&path, false, &mut self.loading)?;
+        self.resolve_module_imports(&mut program, &mut origins, &path)?;
+        let module = ResolvedModule {
+            program,
+            module_id,
+            origins,
+        };
         self.modules.insert(path, module.clone());
 
         Ok(module)
@@ -90,6 +111,7 @@ impl ImportResolver {
     fn resolve_module_imports(
         &mut self,
         program: &mut Program,
+        origins: &mut ProgramOrigins,
         source_path: &Path,
     ) -> Result<(), String> {
         let imports = std::mem::take(&mut program.imports);
@@ -108,7 +130,13 @@ impl ImportResolver {
             validate_import(&module.program, &import, &local_labels, &mut imported_names)?;
 
             if merged_modules.insert(import_path) {
-                merge_module(program, &module.program, module.module_id);
+                merge_module(
+                    program,
+                    origins,
+                    &module.program,
+                    &module.origins,
+                    module.module_id,
+                );
             }
         }
 
@@ -120,7 +148,7 @@ fn parse_file(
     path: &Path,
     require_main: bool,
     loading: &mut Vec<PathBuf>,
-) -> Result<Program, String> {
+) -> Result<(Program, ProgramOrigins), String> {
     let path = canonical_path(path)?;
     if loading.contains(&path) {
         return Err(format!("Import cycle involving {}", path.display()));
@@ -129,16 +157,24 @@ fn parse_file(
     loading.push(path.clone());
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("Failed to read {:?}: {error}", path.display().to_string()))?;
-    let tokens = lex_source(&source)?;
-    let mut parser = Parser::new(tokens);
+    let mut sources = SourceMap::default();
+    let source_id = sources.add(path.display().to_string(), source.clone());
+    let tokens =
+        lex_with_spans(&source, source_id).map_err(|diagnostic| diagnostic.render(&sources))?;
+    let mut parser = Parser::new_spanned(tokens);
     let program = if require_main {
-        parser.parse_program()?
+        parser
+            .parse_program_with_diagnostics()
+            .map_err(|diagnostic| diagnostic.render(&sources))?
     } else {
-        parser.parse_library()?
+        parser
+            .parse_library_with_diagnostics()
+            .map_err(|diagnostic| diagnostic.render(&sources))?
     };
     loading.pop();
 
-    Ok(program)
+    let origins = parser.take_origins().with_sources(sources);
+    Ok((program, origins))
 }
 
 fn validate_import(
@@ -166,8 +202,15 @@ fn validate_import(
     Ok(())
 }
 
-fn merge_module(program: &mut Program, imported: &Program, module_id: usize) {
+fn merge_module(
+    program: &mut Program,
+    origins: &mut ProgramOrigins,
+    imported: &Program,
+    imported_origins: &ProgramOrigins,
+    module_id: usize,
+) {
     let symbol_map = build_symbol_map(imported, module_id);
+    origins.merge_label_origins(imported_origins, &symbol_map);
 
     for declaration in &imported.data {
         let mut declaration = declaration.clone();
@@ -332,17 +375,6 @@ fn rewrite_symbol_name(name: &str, symbol_map: &HashMap<String, String>) -> Stri
 
 fn private_import_name(module_id: usize, name: &str) -> String {
     format!("__import_{module_id}_{name}")
-}
-
-fn lex_source(source: &str) -> Result<Vec<Token>, String> {
-    let mut tokens = Vec::new();
-    let mut chars = source.chars().peekable();
-
-    while let Some(token) = get_next_token(&mut chars)? {
-        tokens.push(token);
-    }
-
-    Ok(tokens)
 }
 
 fn canonical_path(path: &Path) -> Result<PathBuf, String> {

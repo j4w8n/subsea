@@ -1,6 +1,7 @@
 mod analysis;
 pub mod ast;
 pub mod codegen;
+pub mod diagnostic;
 pub mod driver;
 pub mod grammar;
 pub mod imports;

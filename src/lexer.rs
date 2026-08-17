@@ -1,3 +1,4 @@
+use crate::diagnostic::{Diagnostic, SourceId, Span};
 use crate::grammar::Token;
 use std::iter::Peekable;
 use std::str::Chars;
@@ -217,6 +218,72 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
     };
 
     Ok(token)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
+}
+
+pub fn lex_with_spans(source: &str, source_id: SourceId) -> Result<Vec<SpannedToken>, Diagnostic> {
+    let mut offset = 0;
+    let mut tokens = Vec::new();
+
+    while offset < source.len() {
+        let slice = &source[offset..];
+        let leading_ignored = leading_ignored_len(slice);
+        let mut chars = slice.chars().peekable();
+        let token = get_next_token(&mut chars).map_err(|error| {
+            Diagnostic::new(error).at(Span::new(source_id, offset, (offset + 1).min(source.len())))
+        })?;
+
+        let remaining: usize = chars.clone().map(char::len_utf8).sum();
+        let consumed = slice.len().saturating_sub(remaining);
+        if consumed == 0 {
+            break;
+        }
+        offset += consumed;
+
+        if let Some(token) = token {
+            tokens.push(SpannedToken {
+                token,
+                span: Span::new(source_id, offset - consumed + leading_ignored, offset),
+            });
+        }
+    }
+
+    Ok(tokens)
+}
+
+fn leading_ignored_len(source: &str) -> usize {
+    let mut offset = 0;
+
+    loop {
+        while let Some(character) = source[offset..].chars().next()
+            && character.is_whitespace()
+        {
+            offset += character.len_utf8();
+        }
+
+        let remaining = &source[offset..];
+        if remaining.starts_with("//") {
+            offset += remaining.find('\n').unwrap_or(remaining.len());
+        } else if remaining.starts_with("/*") {
+            let Some(end) = remaining.find("*/") else {
+                return source.len();
+            };
+            offset += end + 2;
+        } else {
+            break;
+        }
+
+        if offset >= source.len() {
+            break;
+        }
+    }
+
+    offset
 }
 
 fn is_ident_start(c: char) -> bool {
