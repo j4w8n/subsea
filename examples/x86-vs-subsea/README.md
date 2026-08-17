@@ -11,7 +11,8 @@ The goal is not only fewer lines of code. The goal is to show where Subsea keeps
 | Hello | `01_hello.asm` | `01_hello.ss` | Linux `write` and `exit` |
 | Arithmetic | `02_arithmetic.asm` | `02_arithmetic.ss` | registers, expressions, comparisons, branches |
 | Array sum | `03_array_sum.asm` | `03_array_sum.ss` | memory, indexed loads, loops, formatted output |
-| Dispatch table | `04_dispatch_table.asm` | `04_dispatch_table.ss` | functions, function pointers, indirect calls |
+| Function comparison | `04_function_compare.asm` | `04_function_compare.ss` | functions, explicit result registers, basic addition |
+| Dispatch table | `05_dispatch_table.asm` | `05_dispatch_table.ss` | functions, function pointers, indirect calls |
 
 ## Try The Subsea Versions
 
@@ -21,7 +22,8 @@ From the repository root:
 subsea run examples/x86-vs-subsea/01_hello.ss
 subsea run examples/x86-vs-subsea/02_arithmetic.ss
 subsea run examples/x86-vs-subsea/03_array_sum.ss
-subsea run examples/x86-vs-subsea/04_dispatch_table.ss
+subsea run examples/x86-vs-subsea/04_function_compare.ss
+subsea run examples/x86-vs-subsea/05_dispatch_table.ss
 ```
 
 If you are developing Subsea from this checkout, use Cargo:
@@ -36,3 +38,4 @@ cargo run -- run examples/x86-vs-subsea/01_hello.ss
 - The `.ss` files intentionally keep registers visible. Subsea is still low-level; it just replaces common instruction sequences with direct assignment, typed memory, `linux.print`, `linux.exit`, and explicit signed/unsigned operators.
 - Assembly needs manual string lengths, syscall register setup, and formatting helpers. Subsea can still use raw syscalls, but these examples use its higher-level Linux conveniences where they improve readability.
 - Subsea comparisons require signedness for ordered integer checks, such as `i>` or `u>=`, making intent explicit where assembly uses condition-code mnemonics like `jg` or `jae`.
+- Functions can choose an explicit result register. In `04_function_compare`, `add` stores its result in `rcx`, and the caller uses that register after `call`.
