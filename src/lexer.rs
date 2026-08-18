@@ -196,7 +196,6 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "stack" => Some(Token::Stack),
                 "stdin" => Some(Token::Stdin),
                 "syscall" => Some(Token::Syscall),
-                "x86" => Some(Token::X86),
                 "zero" => Some(Token::Zero),
                 "u" => prefixed_integer_operator(
                     chars,
@@ -209,7 +208,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Token::UPercent,
                 )
                 .or_else(|| Some(Token::Ident(s))),
-                register if is_register(register) => Some(Token::Register(s)),
+                register if is_lexical_register(register) => Some(Token::Register(s)),
                 _ => Some(Token::Ident(s)),
             }
         }
@@ -490,6 +489,6 @@ fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> Result<Token, Str
     Ok(Token::NumberLiteral(num_str))
 }
 
-fn is_register(s: &str) -> bool {
-    crate::register::is_register(s)
+fn is_lexical_register(s: &str) -> bool {
+    crate::register::is_lexical_register(s)
 }

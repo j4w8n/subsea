@@ -1,8 +1,8 @@
 main: {
   al = 83  // S
-  x86 "out 0xe9, al"
+  asm.x86 "out 0xe9, al"
 
 .hang:
-  x86 "hlt"
+  asm.x86 "hlt"
   jmp .hang
 }

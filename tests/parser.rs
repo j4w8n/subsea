@@ -1,9 +1,9 @@
 use subsea::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
-    ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp, Instruction,
-    IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp,
-    PrintFormat, PrintPart, ReadSource, RegisterPair, StringInitializer, StringProperty,
-    WidthConversion,
+    ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
+    InlineAsmArchitecture, Instruction, IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue,
+    MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, ReadSource, RegisterPair,
+    StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::diagnostic::SourceId;
 use subsea::grammar::Token;
@@ -1382,21 +1382,24 @@ fn parses_nop() {
 #[test]
 fn parses_hlt() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::X86, text("hlt")]);
+    tokens.extend([tid("asm"), tlocal("x86"), text("hlt")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
     assert_eq!(
         program.labels[0].instructions,
-        vec![Instruction::InlineAsm { text: s("hlt") }]
+        vec![Instruction::InlineAsm {
+            architecture: InlineAsmArchitecture::X86_64,
+            text: s("hlt"),
+        }]
     );
 }
 
 #[test]
 fn parses_port_io() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::X86, text("out 0x80, al")]);
-    tokens.extend([Token::X86, text("in al, dx")]);
+    tokens.extend([tid("asm"), tlocal("x86"), text("out 0x80, al")]);
+    tokens.extend([tid("asm"), tlocal("x86"), text("in al, dx")]);
 
     let program = parse(finish_label(tokens)).unwrap();
 
@@ -1404,9 +1407,11 @@ fn parses_port_io() {
         program.labels[0].instructions,
         vec![
             Instruction::InlineAsm {
+                architecture: InlineAsmArchitecture::X86_64,
                 text: s("out 0x80, al"),
             },
             Instruction::InlineAsm {
+                architecture: InlineAsmArchitecture::X86_64,
                 text: s("in al, dx"),
             },
         ]
@@ -1416,11 +1421,11 @@ fn parses_port_io() {
 #[test]
 fn rejects_multiline_x86_assembly() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::X86, text("hlt\nnop")]);
+    tokens.extend([tid("asm"), tlocal("x86"), text("hlt\nnop")]);
 
     let error = parse(finish_label(tokens)).unwrap_err();
 
-    assert_eq!(error, "x86 assembly must be a single line");
+    assert_eq!(error, "Inline assembly must be a single line");
 }
 
 #[test]
@@ -1585,15 +1590,15 @@ fn rejects_unqualified_target_specific_instructions_with_suggestions() {
         ),
         (
             Token::Halt,
-            "Unknown instruction \"hlt\"; use x86 \"hlt\" for raw x86 assembly",
+            "Unknown instruction \"hlt\"; use asm.x86 \"hlt\" for raw x86 assembly",
         ),
         (
             Token::In,
-            "Unknown instruction \"in\"; use x86 \"in\" for raw x86 assembly",
+            "Unknown instruction \"in\"; use asm.x86 \"in\" for raw x86 assembly",
         ),
         (
             Token::Out,
-            "Unknown instruction \"out\"; use x86 \"out\" for raw x86 assembly",
+            "Unknown instruction \"out\"; use asm.x86 \"out\" for raw x86 assembly",
         ),
     ] {
         let mut tokens = empty_main_prefix();
@@ -1606,11 +1611,11 @@ fn rejects_unqualified_target_specific_instructions_with_suggestions() {
 #[test]
 fn rejects_unknown_namespaced_instruction() {
     let mut tokens = empty_main_prefix();
-    tokens.extend([Token::X86, tlocal("print")]);
+    tokens.extend([tid("asm"), tlocal("x86"), tlocal("print")]);
 
     assert_eq!(
         parse(finish_label(tokens)).unwrap_err(),
-        "Expected string literal after x86, found LocalIdent(\"print\")"
+        "Expected string literal after asm.x86, found LocalIdent(\"print\")"
     );
 }
 
@@ -2354,7 +2359,7 @@ fn rejects_xmm_register_as_memory_address() {
 
     assert_eq!(
         error,
-        "XMM register xmm1 cannot be used as a memory address"
+        "Vector register xmm1 cannot be used as a memory address"
     );
 }
 

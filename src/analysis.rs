@@ -507,7 +507,7 @@ pub(crate) fn memory_width_bits(width: MemoryWidth) -> Width {
 }
 
 pub(crate) fn register_width(name: &str) -> Option<Width> {
-    crate::register::width(name)
+    crate::backend::x86_64::width(name)
 }
 
 pub(crate) fn float_memory_width(
@@ -643,14 +643,16 @@ pub(crate) fn validate_label(
     top_level_labels: &HashSet<&str>,
     stack: &StackFrame,
     frame_pointer: &str,
+    exit_syscall: Option<(u64, &str, &str)>,
 ) -> Result<(), String> {
     validate_stack_register_use(label, stack, frame_pointer)?;
-    validate_label_control_flow(label, top_level_labels)
+    validate_label_control_flow(label, top_level_labels, exit_syscall)
 }
 
 fn validate_label_control_flow(
     label: &Label,
     top_level_labels: &HashSet<&str>,
+    exit_syscall: Option<(u64, &str, &str)>,
 ) -> Result<(), String> {
     let label_positions: HashMap<&str, usize> = label
         .instructions
@@ -722,7 +724,9 @@ fn validate_label_control_flow(
             }
             Instruction::Exit { .. } => {}
             Instruction::Syscall
-                if previous_instructions_set_exit_syscall(&label.instructions, index) => {}
+                if exit_syscall.is_some_and(|exit| {
+                    previous_instructions_set_exit_syscall(&label.instructions, index, exit)
+                }) => {}
             Instruction::Jmp { target, condition } => {
                 match target {
                     ControlTarget::Label(target) => {
@@ -769,9 +773,10 @@ fn validate_label_control_flow(
 fn previous_instructions_set_exit_syscall(
     instructions: &[Instruction],
     syscall_index: usize,
+    (exit_number, number_register, status_register): (u64, &str, &str),
 ) -> bool {
-    let mut rax_is_exit = false;
-    let mut rdi_is_set = false;
+    let mut syscall_is_exit = false;
+    let mut status_is_set = false;
 
     for instruction in &instructions[..syscall_index] {
         if let Instruction::Assign {
@@ -780,16 +785,20 @@ fn previous_instructions_set_exit_syscall(
         } = instruction
         {
             match register.as_str() {
-                "rax" => {
-                    rax_is_exit = matches!(value, AssignmentValue::Operand(Operand::Immediate(60)));
+                register if register == number_register => {
+                    syscall_is_exit = matches!(
+                        value,
+                        AssignmentValue::Operand(Operand::Immediate(value))
+                            if *value == i128::from(exit_number)
+                    );
                 }
-                "rdi" => rdi_is_set = true,
+                register if register == status_register => status_is_set = true,
                 _ => {}
             }
         }
     }
 
-    rax_is_exit && rdi_is_set
+    syscall_is_exit && status_is_set
 }
 
 fn validate_stack_register_use(

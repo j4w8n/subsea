@@ -1,4 +1,4 @@
 main: {
-  x86 "nop"
+  asm.x86 "nop"
   linux.exit 0
 }

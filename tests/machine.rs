@@ -1,4 +1,4 @@
-use subsea::machine::{self, Instruction, Operand};
+use subsea::backend::x86_64_machine::{self as machine, Instruction, Operand};
 
 #[test]
 fn emits_machine_move_without_assembly_selection_in_the_caller() {

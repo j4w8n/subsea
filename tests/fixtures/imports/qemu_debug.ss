@@ -13,6 +13,6 @@ export debug_write: {
 
 debug_write_byte: {
   al = [rsi]:u8
-  x86 "out 0xe9, al"
+  asm.x86 "out 0xe9, al"
   ret
 }

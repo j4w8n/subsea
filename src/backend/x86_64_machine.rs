@@ -1,4 +1,4 @@
-//! Small target-machine IR used between semantic lowering and assembly text.
+//! x86-64 machine IR used between semantic lowering and assembly text.
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {

@@ -1,4 +1,5 @@
 use crate::ast::{CompareOp, MathOp};
+use crate::backend::{BackendError, RuntimeEmitter};
 use crate::ir;
 use std::collections::HashMap;
 
@@ -12,7 +13,13 @@ pub fn is_register(name: &str) -> bool {
             }))
 }
 
-pub fn emit(program: &ir::Program) -> Result<String, String> {
+pub(crate) fn is_vector(name: &str) -> bool {
+    name.len() >= 2
+        && matches!(&name[..1], "v" | "q" | "d" | "s" | "h" | "b")
+        && name[1..].parse::<u8>().is_ok_and(|index| index <= 31)
+}
+
+pub fn emit(program: &ir::Program) -> Result<String, BackendError> {
     let mut asm = String::new();
     emit_data(&mut asm, program)?;
     asm.push_str(".text\n.global _start\n\n");
@@ -32,9 +39,8 @@ pub fn emit(program: &ir::Program) -> Result<String, String> {
             asm.push_str(&format!("  sub sp, sp, #{frame_size}\n"));
         }
         for (index, instruction) in label.instructions.iter().enumerate() {
-            emit_instruction(&mut asm, instruction, &slots, frame_size).map_err(|message| {
-                format!("__SUBSEA_AARCH__{}\0{}\0{message}", label.name, index)
-            })?;
+            emit_instruction(&mut asm, instruction, &slots, frame_size)
+                .map_err(|message| BackendError::new(message).at(&label.name, index))?;
         }
         if frame_size > 0
             && !label
@@ -192,10 +198,9 @@ fn emit_instruction(
             }
             Ok(())
         }
-        ir::Instruction::Exit { code } => {
-            asm.push_str(&format!("  mov x0, #{code}\n  mov x8, #93\n  svc #0\n"));
-            Ok(())
-        }
+        ir::Instruction::Exit { code } => AArch64RuntimeEmitter
+            .emit_exit(asm, *code)
+            .map_err(|error| error.message),
         ir::Instruction::Jmp { target, condition } => {
             let ir::ControlTarget::Label(target) = target else {
                 return unsupported("indirect jumps");
@@ -215,7 +220,9 @@ fn emit_instruction(
             asm.push_str("  nop\n");
             Ok(())
         }
-        ir::Instruction::Runtime(operation) => emit_runtime(asm, operation),
+        ir::Instruction::Runtime(operation) => AArch64RuntimeEmitter
+            .emit_runtime(asm, operation)
+            .map_err(|error| error.message),
         ir::Instruction::Ret => {
             if frame_size > 0 {
                 asm.push_str(&format!("  add sp, sp, #{frame_size}\n"));
@@ -232,7 +239,38 @@ fn emit_instruction(
     }
 }
 
-fn emit_runtime(asm: &mut String, operation: &ir::RuntimeOperation) -> Result<(), String> {
+struct AArch64RuntimeEmitter;
+
+impl RuntimeEmitter for AArch64RuntimeEmitter {
+    fn emit_runtime(
+        &mut self,
+        asm: &mut String,
+        operation: &ir::RuntimeOperation,
+    ) -> Result<(), BackendError> {
+        emit_runtime_operation(asm, operation).map_err(BackendError::from)
+    }
+
+    fn emit_exit(&mut self, asm: &mut String, code: u8) -> Result<(), BackendError> {
+        asm.push_str(&format!("  mov x0, #{code}\n  mov x8, #93\n  svc #0\n"));
+        Ok(())
+    }
+
+    fn emit_reserve(
+        &mut self,
+        _asm: &mut String,
+        _dst: &ir::Operand,
+        _len: &ir::Operand,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::new(
+            "AArch64 backend does not support runtime memory reserve yet",
+        ))
+    }
+}
+
+fn emit_runtime_operation(
+    asm: &mut String,
+    operation: &ir::RuntimeOperation,
+) -> Result<(), String> {
     match operation {
         ir::RuntimeOperation::Print { parts } => {
             for part in parts {
@@ -323,6 +361,9 @@ fn emit_assignment(
             let opcode = integer_opcode(*op)?;
             asm.push_str(&format!("  {opcode} {dst}, {lhs}, {rhs}\n"));
         }
+        ir::Value::PlatformReserve { len } => AArch64RuntimeEmitter
+            .emit_reserve(asm, &ir::Operand::TargetRegister(dst.clone()), len)
+            .map_err(|error| error.message)?,
         _ => return unsupported("assignment value"),
     }
     Ok(())

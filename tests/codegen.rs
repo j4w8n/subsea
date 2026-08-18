@@ -3,9 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use subsea::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, Instruction, IntrinsicOp, Label, MathOp, MemoryDeclaration,
-    MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource,
-    RegisterPair, StringInitializer, StringProperty, WidthConversion,
+    Expression, FloatMathOp, InlineAsmArchitecture, Instruction, IntrinsicOp, Label, MathOp,
+    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
+    Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
     Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
@@ -2149,7 +2149,10 @@ fn rejects_narrow_indirect_call_target() {
 
 #[test]
 fn emits_hlt() {
-    let program = main_program(vec![Instruction::InlineAsm { text: s("hlt") }]);
+    let program = main_program(vec![Instruction::InlineAsm {
+        architecture: InlineAsmArchitecture::X86_64,
+        text: s("hlt"),
+    }]);
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
@@ -2170,9 +2173,11 @@ fn emits_nop() {
 fn emits_port_io() {
     let program = main_program(vec![
         Instruction::InlineAsm {
+            architecture: InlineAsmArchitecture::X86_64,
             text: s("out 0x80, al"),
         },
         Instruction::InlineAsm {
+            architecture: InlineAsmArchitecture::X86_64,
             text: s("in al, dx"),
         },
     ]);
@@ -2341,7 +2346,10 @@ fn emits_custom_entry_symbol() {
                 Instruction::Label {
                     name: s(".L.main.hang"),
                 },
-                Instruction::InlineAsm { text: s("hlt") },
+                Instruction::InlineAsm {
+                    architecture: InlineAsmArchitecture::X86_64,
+                    text: s("hlt"),
+                },
                 Instruction::Jmp {
                     target: ControlTarget::Label(s(".L.main.hang")),
                     condition: None,

@@ -92,6 +92,7 @@ pub enum Instruction {
         code: u8,
     },
     InlineAsm {
+        architecture: InlineAsmArchitecture,
         text: String,
     },
     Jmp {
@@ -135,6 +136,11 @@ pub enum Instruction {
         value: StringInitializer,
     },
     Syscall,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum InlineAsmArchitecture {
+    X86_64,
 }
 
 impl Instruction {

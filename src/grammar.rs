@@ -71,8 +71,6 @@ pub enum Token {
     ULess,
     ULessEquals,
     UStar,
-    X86,
-
     Ampersand,
     Call,
     Comma,

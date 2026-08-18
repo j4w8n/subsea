@@ -585,29 +585,33 @@ impl Parser {
                 "linux.reserve(size) returns a pointer; assign it to a destination",
             )),
             ("linux", "syscall") => Ok(Instruction::Syscall),
-            ("x86", operation) => Err(format!(
-                "Unknown instruction \"x86.{operation}\"; use x86 \"{operation}\" for raw x86 assembly"
+            ("asm", "x86") => self.parse_inline_asm(crate::ast::InlineAsmArchitecture::X86_64),
+            ("asm", operation) => Err(format!(
+                "Unknown assembly architecture \"asm.{operation}\"; expected asm.x86"
             )),
             _ => Err(format!("Unknown instruction \"{namespace}.{operation}\"")),
         }
     }
 
-    fn parse_inline_x86(&mut self) -> Result<Instruction, String> {
+    fn parse_inline_asm(
+        &mut self,
+        architecture: crate::ast::InlineAsmArchitecture,
+    ) -> Result<Instruction, String> {
         match self.advance() {
             Some(Token::Text(text)) => {
                 if text.contains(['\n', '\r']) {
-                    Err(String::from("x86 assembly must be a single line"))
+                    Err(String::from("Inline assembly must be a single line"))
                 } else if text.trim().is_empty() {
-                    Err(String::from("x86 assembly cannot be empty"))
+                    Err(String::from("Inline assembly cannot be empty"))
                 } else {
-                    Ok(Instruction::InlineAsm { text })
+                    Ok(Instruction::InlineAsm { architecture, text })
                 }
             }
             Some(token) => Err(format!(
-                "Expected string literal after x86, found {token:?}"
+                "Expected string literal after asm.x86, found {token:?}"
             )),
             None => Err(String::from(
-                "Expected string literal after x86, found end of input",
+                "Expected string literal after asm.x86, found end of input",
             )),
         }
     }
@@ -704,7 +708,6 @@ impl Parser {
             Some(Token::Ret) => Ok(Instruction::Ret),
             Some(Token::Stack) => self.parse_stack_declaration(),
             Some(Token::Syscall) => Err(suggest_namespaced_instruction("syscall", "linux.syscall")),
-            Some(Token::X86) => self.parse_inline_x86(),
             Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is only supported on the right side of assignment",
             )),
@@ -993,7 +996,7 @@ impl Parser {
                 if matches!(op, AssignmentOp::UnsupportedDivision) {
                     self.advance();
                     return Err(String::from(
-                        "Use rdx:rax = lhs u/ rhs or rdx:rax = lhs i/ rhs for division",
+                        "Widened division requires a register-pair destination; use `high:low = lhs u/ rhs` or `high:low = lhs i/ rhs`",
                     ));
                 }
                 self.advance();
@@ -1139,7 +1142,7 @@ impl Parser {
         let lhs = self.parse_operand()?;
         let Some(op) = self.peek().and_then(assignment_op) else {
             return Err(String::from(
-                "Register-pair assignment needs a widened operator after the left operand; e.g. `rdx:rax = lhs u* rhs`",
+                "Register-pair assignment needs a widened operator after the left operand; e.g. `high:low = lhs u* rhs`",
             ));
         };
 
@@ -1686,9 +1689,9 @@ impl Parser {
                 "Float literal {value} is not valid inside a memory operand"
             )),
             Some(Token::Register(name)) => {
-                if is_xmm_register_name(&name) {
+                if is_vector_register_name(&name) {
                     return Err(format!(
-                        "XMM register {name} cannot be used as a memory address"
+                        "Vector register {name} cannot be used as a memory address"
                     ));
                 }
 
@@ -2076,7 +2079,9 @@ fn suggest_namespaced_instruction(instruction: &str, suggestion: &str) -> String
 }
 
 fn suggest_raw_x86_instruction(instruction: &str) -> String {
-    format!("Unknown instruction \"{instruction}\"; use x86 \"{instruction}\" for raw x86 assembly")
+    format!(
+        "Unknown instruction \"{instruction}\"; use asm.x86 \"{instruction}\" for raw x86 assembly"
+    )
 }
 
 fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(), String> {
@@ -2690,9 +2695,9 @@ fn split_format_literal(value: &str) -> Result<Vec<FormatSegment>, String> {
 }
 
 fn is_register_name(s: &str) -> bool {
-    crate::register::is_register(s)
+    crate::register::is_lexical_register(s)
 }
 
-fn is_xmm_register_name(s: &str) -> bool {
-    crate::register::is_xmm(s)
+fn is_vector_register_name(s: &str) -> bool {
+    crate::register::is_lexical_vector_register(s)
 }

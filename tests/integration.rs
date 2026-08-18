@@ -94,7 +94,7 @@ fn aarch_diagnostic_rejects_x86_inline_assembly_with_source_location() {
         stderr.contains("aarch_inline_x86.ss:2:3"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains("x86 inline assembly is not available on target aarch"));
+    assert!(stderr.contains("x86 inline assembly cannot be used with target aarch"));
 }
 
 #[test]

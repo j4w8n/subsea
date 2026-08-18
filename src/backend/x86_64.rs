@@ -10,7 +10,9 @@ use crate::ast::{
     MathOp, MemoryWidth, Operand,
 };
 use crate::backend::TargetSpec;
+use crate::backend::x86_64_machine as machine;
 use crate::ir;
+use crate::platform::linux;
 
 pub(crate) fn width(name: &str) -> Option<Width> {
     Some(match name {
@@ -50,6 +52,10 @@ pub(crate) fn is_xmm(name: &str) -> bool {
             | "xmm14"
             | "xmm15"
     )
+}
+
+pub(crate) fn is_vector(name: &str) -> bool {
+    is_xmm(name)
 }
 
 pub(crate) fn family(name: &str) -> Option<&'static str> {
@@ -538,22 +544,22 @@ pub(crate) fn pair_math_opcodes(op: crate::ast::PairBinaryOp) -> (&'static str, 
 }
 
 pub(crate) fn emit_frame_prologue(asm: &mut String, stack: &StackFrame, spec: TargetSpec) {
-    crate::machine::emit(
-        &crate::machine::Instruction::Push {
-            src: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+    machine::emit(
+        &machine::Instruction::Push {
+            src: machine::Operand::Register(spec.frame_pointer.to_owned()),
         },
         asm,
     );
-    crate::machine::emit(
-        &crate::machine::Instruction::Move {
-            dst: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
-            src: crate::machine::Operand::Register(spec.stack_pointer.to_owned()),
+    machine::emit(
+        &machine::Instruction::Move {
+            dst: machine::Operand::Register(spec.frame_pointer.to_owned()),
+            src: machine::Operand::Register(spec.stack_pointer.to_owned()),
         },
         asm,
     );
     if stack.size > 0 {
-        crate::machine::emit(
-            &crate::machine::Instruction::StackAdjust {
+        machine::emit(
+            &machine::Instruction::StackAdjust {
                 opcode: String::from("sub"),
                 register: spec.stack_pointer.to_owned(),
                 amount: stack.size,
@@ -564,17 +570,60 @@ pub(crate) fn emit_frame_prologue(asm: &mut String, stack: &StackFrame, spec: Ta
 }
 
 pub(crate) fn emit_frame_epilogue(asm: &mut String, spec: TargetSpec) {
-    crate::machine::emit(
-        &crate::machine::Instruction::Move {
-            dst: crate::machine::Operand::Register(spec.stack_pointer.to_owned()),
-            src: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+    machine::emit(
+        &machine::Instruction::Move {
+            dst: machine::Operand::Register(spec.stack_pointer.to_owned()),
+            src: machine::Operand::Register(spec.frame_pointer.to_owned()),
         },
         asm,
     );
-    crate::machine::emit(
-        &crate::machine::Instruction::Pop {
-            dst: crate::machine::Operand::Register(spec.frame_pointer.to_owned()),
+    machine::emit(
+        &machine::Instruction::Pop {
+            dst: machine::Operand::Register(spec.frame_pointer.to_owned()),
         },
         asm,
     );
+}
+
+pub(crate) fn emit_linux_syscall(asm: &mut String, number: u64) {
+    machine::emit(&machine::Instruction::Syscall { number }, asm);
+}
+
+pub(crate) fn emit_linux_write_label(asm: &mut String, label: &str, len: usize) {
+    machine::emit(
+        &machine::Instruction::Move {
+            dst: machine::Operand::Register(String::from("rax")),
+            src: machine::Operand::Immediate(linux::SYS_WRITE as i128),
+        },
+        asm,
+    );
+    asm.push_str(&format!(
+        "  mov rdi, {}\n  lea rsi, [rip + {label}]\n  mov rdx, {len}\n",
+        linux::STDOUT
+    ));
+    machine::emit(&machine::Instruction::SyscallTrap, asm);
+}
+
+pub(crate) fn emit_linux_write_registers(asm: &mut String) {
+    machine::emit(
+        &machine::Instruction::Move {
+            dst: machine::Operand::Register(String::from("rax")),
+            src: machine::Operand::Immediate(linux::SYS_WRITE as i128),
+        },
+        asm,
+    );
+    asm.push_str(&format!("  mov rdi, {}\n", linux::STDOUT));
+    machine::emit(&machine::Instruction::SyscallTrap, asm);
+}
+
+pub(crate) fn emit_linux_read(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_READ);
+}
+
+pub(crate) fn emit_linux_mmap(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_MMAP);
+}
+
+pub(crate) fn emit_linux_munmap(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_MUNMAP);
 }

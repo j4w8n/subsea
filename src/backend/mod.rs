@@ -1,5 +1,7 @@
 pub mod aarch64;
 pub(crate) mod x86_64;
+pub(crate) mod x86_64_codegen;
+pub mod x86_64_machine;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Architecture {
@@ -48,6 +50,7 @@ pub struct TargetSpec {
     pub frame_pointer_policy: FramePointerPolicy,
     pub entry_convention: EntryConvention,
     pub runtime_call_convention: &'static str,
+    pub exit_syscall: Option<(u64, &'static str, &'static str)>,
     pub integer_argument_registers: &'static [&'static str],
     pub integer_return_register: &'static str,
     pub float_argument_registers: &'static [&'static str],
@@ -63,6 +66,60 @@ pub enum Target {
     X86_64Free,
     AArch64Linux,
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct BackendError {
+    pub message: String,
+    pub label: Option<String>,
+    pub instruction: Option<usize>,
+}
+
+impl BackendError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            label: None,
+            instruction: None,
+        }
+    }
+
+    pub fn at(mut self, label: impl Into<String>, instruction: usize) -> Self {
+        self.label = Some(label.into());
+        self.instruction = Some(instruction);
+        self
+    }
+}
+
+impl From<String> for BackendError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+pub(crate) trait RuntimeEmitter {
+    fn emit_runtime(
+        &mut self,
+        asm: &mut String,
+        operation: &crate::ir::RuntimeOperation,
+    ) -> Result<(), BackendError>;
+
+    fn emit_exit(&mut self, asm: &mut String, code: u8) -> Result<(), BackendError>;
+
+    fn emit_reserve(
+        &mut self,
+        asm: &mut String,
+        dst: &crate::ir::Operand,
+        len: &crate::ir::Operand,
+    ) -> Result<(), BackendError>;
+}
+
+const LINUX_RUNTIME_OPERATIONS: &[RuntimeOperation] = &[
+    RuntimeOperation::Exit,
+    RuntimeOperation::Read,
+    RuntimeOperation::Write,
+    RuntimeOperation::Reserve,
+    RuntimeOperation::Release,
+];
 
 impl Target {
     pub fn parse(name: &str) -> Result<Self, String> {
@@ -85,92 +142,10 @@ impl Target {
     }
 
     pub fn spec(self) -> TargetSpec {
-        if self == Self::AArch64Linux {
-            return TargetSpec {
-                architecture: Architecture::AArch64,
-                environment: Environment::Linux,
-                pointer_width: 64,
-                pointer_alignment: 8,
-                linker_emulation: "aarch64elf",
-                assembler: "aarch64-linux-gnu-as",
-                linker: "aarch64-linux-gnu-ld",
-                objcopy: "aarch64-linux-gnu-objcopy",
-                stack_alignment: 16,
-                stack_pointer: "sp",
-                frame_pointer: "x29",
-                frame_pointer_policy: FramePointerPolicy::Required,
-                entry_convention: EntryConvention::ProcessEntry,
-                runtime_call_convention: "aapcs64",
-                integer_argument_registers: &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
-                integer_return_register: "x0",
-                float_argument_registers: &["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
-                float_return_register: "v0",
-                caller_saved_registers: &[
-                    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
-                    "x12", "x13", "x14", "x15", "x16", "x17", "x18", "v0", "v1", "v2", "v3", "v4",
-                    "v5", "v6", "v7",
-                ],
-                callee_saved_registers: &[
-                    "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
-                ],
-                runtime_operations: &[
-                    RuntimeOperation::Exit,
-                    RuntimeOperation::Read,
-                    RuntimeOperation::Write,
-                    RuntimeOperation::Reserve,
-                    RuntimeOperation::Release,
-                ],
-            };
-        }
-
-        TargetSpec {
-            architecture: Architecture::X86_64,
-            environment: match self {
-                Self::X86_64 => Environment::Linux,
-                Self::X86_64Free => Environment::Freestanding,
-                Self::AArch64Linux => Environment::Linux,
-            },
-            pointer_width: 64,
-            pointer_alignment: 8,
-            linker_emulation: "elf_x86_64",
-            assembler: "as",
-            linker: "ld",
-            objcopy: "objcopy",
-            stack_alignment: 16,
-            stack_pointer: "rsp",
-            frame_pointer: "rbp",
-            frame_pointer_policy: FramePointerPolicy::Required,
-            entry_convention: EntryConvention::ProcessEntry,
-            runtime_call_convention: "sysv_amd64",
-            integer_argument_registers: &["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
-            integer_return_register: "rax",
-            float_argument_registers: &[
-                "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
-            ],
-            float_return_register: "xmm0",
-            caller_saved_registers: &[
-                "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1",
-                "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
-                "xmm12", "xmm13", "xmm14", "xmm15",
-            ],
-            callee_saved_registers: &["rbx", "rbp", "r12", "r13", "r14", "r15"],
-            runtime_operations: match self {
-                Self::X86_64 => &[
-                    RuntimeOperation::Exit,
-                    RuntimeOperation::Read,
-                    RuntimeOperation::Write,
-                    RuntimeOperation::Reserve,
-                    RuntimeOperation::Release,
-                ],
-                Self::X86_64Free => &[],
-                Self::AArch64Linux => &[
-                    RuntimeOperation::Exit,
-                    RuntimeOperation::Read,
-                    RuntimeOperation::Write,
-                    RuntimeOperation::Reserve,
-                    RuntimeOperation::Release,
-                ],
-            },
+        match self {
+            Self::X86_64 => x86_64_spec(Environment::Linux, LINUX_RUNTIME_OPERATIONS),
+            Self::X86_64Free => x86_64_spec(Environment::Freestanding, &[]),
+            Self::AArch64Linux => aarch64_linux_spec(),
         }
     }
 
@@ -183,9 +158,78 @@ impl Target {
     }
 
     pub(crate) fn is_register(self, name: &str) -> bool {
+        // Unlike lexical register recognition, this is target legality.
         match self.spec().architecture {
             Architecture::X86_64 => x86_64::is_register(name),
             Architecture::AArch64 => aarch64::is_register(name),
         }
+    }
+}
+
+fn x86_64_spec(
+    environment: Environment,
+    runtime_operations: &'static [RuntimeOperation],
+) -> TargetSpec {
+    TargetSpec {
+        architecture: Architecture::X86_64,
+        environment,
+        pointer_width: 64,
+        pointer_alignment: 8,
+        linker_emulation: "elf_x86_64",
+        assembler: "as",
+        linker: "ld",
+        objcopy: "objcopy",
+        stack_alignment: 16,
+        stack_pointer: "rsp",
+        frame_pointer: "rbp",
+        frame_pointer_policy: FramePointerPolicy::Required,
+        entry_convention: EntryConvention::ProcessEntry,
+        runtime_call_convention: "sysv_amd64",
+        exit_syscall: Some((60, "rax", "rdi")),
+        integer_argument_registers: &["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        integer_return_register: "rax",
+        float_argument_registers: &[
+            "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+        ],
+        float_return_register: "xmm0",
+        caller_saved_registers: &[
+            "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2",
+            "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12",
+            "xmm13", "xmm14", "xmm15",
+        ],
+        callee_saved_registers: &["rbx", "rbp", "r12", "r13", "r14", "r15"],
+        runtime_operations,
+    }
+}
+
+fn aarch64_linux_spec() -> TargetSpec {
+    TargetSpec {
+        architecture: Architecture::AArch64,
+        environment: Environment::Linux,
+        pointer_width: 64,
+        pointer_alignment: 8,
+        linker_emulation: "aarch64elf",
+        assembler: "aarch64-linux-gnu-as",
+        linker: "aarch64-linux-gnu-ld",
+        objcopy: "aarch64-linux-gnu-objcopy",
+        stack_alignment: 16,
+        stack_pointer: "sp",
+        frame_pointer: "x29",
+        frame_pointer_policy: FramePointerPolicy::Required,
+        entry_convention: EntryConvention::ProcessEntry,
+        runtime_call_convention: "aapcs64",
+        exit_syscall: None,
+        integer_argument_registers: &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
+        integer_return_register: "x0",
+        float_argument_registers: &["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+        float_return_register: "v0",
+        caller_saved_registers: &[
+            "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+            "x14", "x15", "x16", "x17", "x18", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7",
+        ],
+        callee_saved_registers: &[
+            "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
+        ],
+        runtime_operations: LINUX_RUNTIME_OPERATIONS,
     }
 }

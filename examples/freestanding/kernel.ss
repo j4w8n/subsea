@@ -1,5 +1,5 @@
 main: {
 .hang:
-  x86 "hlt"
+  asm.x86 "hlt"
   jmp .hang
 }
