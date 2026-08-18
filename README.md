@@ -4,7 +4,9 @@ A readable, learnable alternative to Assembly, with the same power to directly w
 
 Checkout our Subsea vs Assembly comparisons in the [examples](examples/x86-vs-subsea/README.md)
 
-Status: working, but early development. If you'd like to play with subsea, you'll need an x86-64 linux system with Rust and `binutils` installed.
+All examples currently use x86_64 registers, but aarch64 registers are also supported.
+
+Status: working, but early development. If you'd like to play with subsea, you'll need an x86-64 or aarch64 linux system with Rust and appropriate "as" and "ld" binaries.
 
 ## Quickstart
 
@@ -1259,7 +1261,7 @@ rax = 2147483648
 ```sh
 subsea run main.ss        // Build and execute the program
 subsea build main.ss      // Compile, assemble, and link an executable
-subsea emit-asm main.ss   // Compile to x86-64 assembly and print it
+subsea emit-asm main.ss   // Compile to target assembly and print it
 ```
 
 > `run` exits with the compiled program's exit code.
@@ -1267,6 +1269,13 @@ subsea emit-asm main.ss   // Compile to x86-64 assembly and print it
 ### targets
 
 The default target is `x86`, which means x86-64 Linux userland. This target supports Linux helpers such as `linux.print`, `linux.read(stdin, ...)`, and `linux.exit`.
+
+Subsea also supports AArch64 Linux with the `aarch` target. The language features are target-independent where possible, including integer and floating-point operations, control flow, stack strings, memory operations, formatted output, and Linux runtime helpers. AArch64 output uses the AArch64 Linux toolchain and can be selected with `--target aarch` or `-t aarch`.
+
+```sh
+subsea emit-asm --target aarch main.ss
+subsea build --target aarch main.ss
+```
 
 Use `x86-free` for freestanding x86-64 assembly. This target still emits x86-64 instructions, but it rejects Linux-only helpers because there may be no Linux process, stdout, stdin, or process exit:
 
