@@ -493,7 +493,7 @@ export debug_write: {
   jmp .done if rdx == 0
 
   al = [rsi]:u8
-  x86 "out 0xe9, al"
+  asm.x86 "out 0xe9, al"
 
   rsi = rsi + 1
   rdx = rdx - 1
@@ -995,14 +995,14 @@ xmm6 = trunc(xmm7):f32
 
 ## Freestanding And Raw X86
 
-`x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
+`asm.x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
 
 Freestanding halt loop:
 
 ```ss
 main: {
 .hang:
-  x86 "hlt"
+  asm.x86 "hlt"
   jmp .hang
 }
 ```
@@ -1012,12 +1012,12 @@ Port I/O can be written as raw x86 assembly. The examples below use byte-sized `
 ```ss
 main: {
   al = 72
-  x86 "out 0x80, al"
+  asm.x86 "out 0x80, al"
 
-  x86 "in al, dx"
+  asm.x86 "in al, dx"
 
 .hang:
-  x86 "hlt"
+  asm.x86 "hlt"
   jmp .hang
 }
 ```
@@ -1037,7 +1037,7 @@ main: {
   call debug_write
 
 .hang:
-  x86 "hlt"
+  asm.x86 "hlt"
   jmp .hang
 }
 ```
@@ -1342,7 +1342,7 @@ Run it in QEMU with the debug console connected to port `0xe9`:
 qemu-system-x86_64 -M q35 -m 256M -cdrom subsea.iso -debugcon stdio -global isa-debugcon.iobase=0xe9
 ```
 
-If `kernel.ss` writes bytes with `x86 "out 0xe9, al"`, they appear in the terminal where QEMU is running. The QEMU display window may stay blank because this example does not write to the framebuffer.
+If `kernel.ss` writes bytes with `asm.x86 "out 0xe9, al"`, they appear in the terminal where QEMU is running. The QEMU display window may stay blank because this example does not write to the framebuffer.
 
 ### build flags
 
