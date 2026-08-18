@@ -116,7 +116,7 @@ fn aarch_lowering_diagnostic_includes_source_location() {
         stderr.contains("aarch_unsupported.ss:2:3"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains("push is not represented in the target-neutral IR yet"));
+    assert!(stderr.contains("raw syscalls is not represented in the target-neutral IR yet"));
 }
 
 #[test]
@@ -135,10 +135,14 @@ fn aarch_backend_diagnostic_includes_source_location() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(
-        stderr.contains("aarch_unsupported_backend.ss:2:3"),
+        stderr.contains("aarch_unsupported_backend.ss:3:3"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains("AArch64 backend does not support stack strings yet"));
+    assert!(
+        stderr.contains(
+            "AArch64 backend does not support inferred runtime printing yet"
+        )
+    );
 }
 
 #[test]

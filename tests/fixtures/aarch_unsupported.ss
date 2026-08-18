@@ -1,4 +1,4 @@
 main: {
-  push x0
+  linux.syscall
   linux.exit 0
 }

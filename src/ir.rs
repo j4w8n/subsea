@@ -1,5 +1,5 @@
 use crate::ast::{
-    BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth,
+    BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth, PairBinaryOp,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -93,6 +93,12 @@ pub enum Instruction {
         value: Value,
         condition: Condition,
     },
+    PairAssign {
+        dst: RegisterPair,
+        op: PairBinaryOp,
+        lhs: RegisterPair,
+        rhs: RegisterPair,
+    },
     Const {
         name: String,
         value: ConstValue,
@@ -121,7 +127,19 @@ pub enum Instruction {
         name: String,
         value: StringInitializer,
     },
+    Push {
+        src: Operand,
+    },
+    Pop {
+        dst: Operand,
+    },
     Runtime(RuntimeOperation),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RegisterPair {
+    pub high: String,
+    pub low: String,
 }
 
 #[derive(Debug, PartialEq, Clone)]

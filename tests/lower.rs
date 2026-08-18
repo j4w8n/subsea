@@ -155,14 +155,14 @@ fn reports_target_specific_instructions_at_their_source_location() {
         },
     ]);
 
-    let error = lower_program(&source).unwrap_err();
+    let lowered = lower_program(&source).unwrap();
 
-    assert_eq!(error.label, "main");
-    assert_eq!(error.instruction, 1);
-    assert_eq!(
-        error.message,
-        "push is not represented in the target-neutral IR yet"
-    );
+    assert!(matches!(
+        lowered.labels[0].instructions.get(1),
+        Some(ir::Instruction::Push {
+            src: ir::Operand::Immediate(1)
+        })
+    ));
 }
 
 #[test]

@@ -180,10 +180,20 @@ fn lower_instruction(
     instruction: &Instruction,
 ) -> Result<ir::Instruction, LoweringError> {
     match instruction {
-        Instruction::Assign { dst, value } => Ok(ir::Instruction::Assign {
-            dst: lower_target(dst, label, index)?,
-            value: lower_value(value, label, index)?,
-        }),
+        Instruction::Assign { dst, value } => match (dst, value) {
+            (AssignmentTarget::RegisterPair(dst), AssignmentValue::PairBinary { op, lhs, rhs }) => {
+                Ok(ir::Instruction::PairAssign {
+                    dst: lower_pair(dst),
+                    op: *op,
+                    lhs: lower_pair(lhs),
+                    rhs: lower_pair(rhs),
+                })
+            }
+            (dst, value) => Ok(ir::Instruction::Assign {
+                dst: lower_target(dst, label, index)?,
+                value: lower_value(value, label, index)?,
+            }),
+        },
         Instruction::AssignIf {
             dst,
             value,
@@ -238,8 +248,12 @@ fn lower_instruction(
         Instruction::InlineAsm { .. } => {
             Err(LoweringError::unsupported(label, index, "inline assembly"))
         }
-        Instruction::Pop { .. } => Err(LoweringError::unsupported(label, index, "pop")),
-        Instruction::Push { .. } => Err(LoweringError::unsupported(label, index, "push")),
+        Instruction::Pop { dst } => Ok(ir::Instruction::Pop {
+            dst: lower_operand(dst),
+        }),
+        Instruction::Push { src } => Ok(ir::Instruction::Push {
+            src: lower_operand(src),
+        }),
         Instruction::Syscall => Err(LoweringError::unsupported(label, index, "raw syscalls")),
     }
 }
@@ -325,6 +339,13 @@ fn lower_value(
             index,
             "target-specific assignment",
         )),
+    }
+}
+
+fn lower_pair(pair: &crate::ast::RegisterPair) -> ir::RegisterPair {
+    ir::RegisterPair {
+        high: pair.high.clone(),
+        low: pair.low.clone(),
     }
 }
 

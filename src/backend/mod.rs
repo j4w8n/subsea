@@ -218,7 +218,7 @@ fn aarch64_linux_spec() -> TargetSpec {
         frame_pointer_policy: FramePointerPolicy::Required,
         entry_convention: EntryConvention::ProcessEntry,
         runtime_call_convention: "aapcs64",
-        exit_syscall: None,
+        exit_syscall: Some((93, "x8", "x0")),
         integer_argument_registers: &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
         integer_return_register: "x0",
         float_argument_registers: &["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
