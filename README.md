@@ -248,7 +248,7 @@ Bitwise-and conditions must compare against `0` with `==` or `!=`. Subsea lowers
 
 Some features can use the following registers as scratch storage. Unless an operation explicitly documents preservation, do not rely on these registers retaining their values across the operation.
 
-### `r8`, `r9`, `r10`, `r11`
+### x86-64 `r8`, `r9`, `r10`, `r11`
 
 - Arithmetic expression lowering may use these registers as temporaries, preferring `r10` and `r11` when available.
 - Integer `min` and `max` assigned to memory may use one of these registers for the result before storing it.
@@ -257,23 +257,42 @@ Some features can use the following registers as scratch storage. Unless an oper
 - Widened multiply and divide may use `r10` or `r11` for an immediate or otherwise conflicting right operand.
 - Power-of uses `r10` for the mutable base and `r11` for the mutable exponent.
 
-### `rax`, `rdx`
+### x86-64 `rax`, `rdx`
 
 - Low-result signed or unsigned division and modulo use the hardware `rax`/`rdx` dividend and result registers.
 - Widened signed or unsigned multiply and divide use the hardware `rdx:rax` result pair.
 - `linux.syscall` uses `rax` for the syscall number and return value.
 
-### `xmm15`
+### x86-64 `xmm15`
 
 - Floating-point `sqrt`, `min`, `max`, `round`, `floor`, `ceil`, and `trunc` assigned to memory use `xmm15` as the result temporary.
 - Do not rely on `xmm15` being preserved across floating-point intrinsic assignments to memory.
 
+### AArch64 Scratch Ranges
+
+- General AArch64 code generation uses `x16` as its primary temporary, including stack-string initialization, memory moves, address materialization, and integer-to-float conversions.
+- Integer expression lowering uses `x16` and expands to `x17` for a second operand or intermediate value.
+- Division and modulo use `x16` and `x17`, and modulo uses `x18` for the quotient while calculating the remainder.
+- Power expressions use `x16` for the mutable base, `x17` for the mutable exponent, and `x18` for the accumulator.
+- Numeric runtime formatting uses `x16` through `x21`: `x16` is the value, `x17` is the output pointer, `x18` is the radix, `x19` is the quotient, `x20` is the output digit, and `x21` is the buffer end.
+- Floating-point operations and intrinsics use `v16` and `v17` (or their `s`/`d` scalar views) for intermediate operands; `x16` is also used to materialize floating-point literals.
+- Linux runtime syscalls use `x0` through `x5` for arguments and `x8` for the syscall number; these registers may be clobbered by runtime operations.
+- Do not rely on these AArch64 scratch registers being preserved across arithmetic, floating-point operations, formatted output, memory runtime operations, or Linux syscalls.
+
 ### Registers Temporarily Used By `linux.print`
+
+#### x86-64
 
 - Runtime printing temporarily uses `rax`, `rbx`, `rcx`, `rdi`, `rsi`, `rdx`, and `r11` while preparing syscalls and formatting values.
 - `linux.print` saves and restores these general-purpose registers for each print part, so they are preserved after the operation.
 
-### Raw `syscall`
+#### AArch64
+
+- Runtime printing uses `x16` through `x21` for formatting state and output-buffer management.
+- The Linux `write` syscall uses `x0` through `x2` for its arguments and `x8` for the syscall number.
+- These registers are not currently preserved across AArch64 `linux.print` operations.
+
+### x86-64 Raw `syscall`
 
 - The raw `syscall` instruction clobbers `rcx` and `r11` according to the x86-64 instruction contract.
 - The syscall number, arguments, and return value use the Linux syscall register convention; Subsea does not automatically preserve those registers for a raw `syscall`.
@@ -346,10 +365,10 @@ Supported string escapes:
 
 Print clobbers:
 
-`linux.print` lowers to the Linux x86-64 `write` syscall. Runtime integer formatting uses scratch registers internally, but preserves general-purpose registers across each print part.
+On x86-64, `linux.print` lowers to the Linux `write` syscall. Runtime integer formatting uses scratch registers internally, but preserves general-purpose registers across each print part. AArch64 print clobbers are documented above.
 
 ```text
-// linux.print preserves general-purpose registers
+// x86-64 linux.print preserves general-purpose registers
 rax rbx rcx rdx rdi rsi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15
 ```
 
@@ -1073,7 +1092,9 @@ Supported data items are fixed-width integer scalars (`u8`, `u16`, `u32`, `u64`,
 
 ## Registers
 
-Subsea uses real x86-64 register names.
+Subsea uses real target register names.
+
+### x86-64 Registers
 
 Supported 64-bit registers:
 
@@ -1109,6 +1130,26 @@ Supported XMM registers:
 xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7
 xmm8 xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15
 ```
+
+### AArch64 Registers
+
+Supports the general-purpose AArch64 registers and their 32-bit aliases:
+
+```text
+x0 x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15
+x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30
+w0 w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15
+w16 w17 w18 w19 w20 w21 w22 w23 w24 w25 w26 w27 w28 w29 w30
+sp wsp
+```
+
+It also supports the AArch64 SIMD/scalar register names:
+
+```text
+v0-v31   q0-q31   d0-d31   s0-s31   h0-h31   b0-b31
+```
+
+The `v` and `q` forms name 128-bit SIMD registers; `d`, `s`, `h`, and `b` select scalar views of those registers.
 
 ## Operands
 
