@@ -130,12 +130,14 @@ fn inline_asm_matches_target(architecture: InlineAsmArchitecture, target: Target
     matches!(
         (architecture, target.spec().architecture),
         (InlineAsmArchitecture::X86_64, Architecture::X86_64)
+            | (InlineAsmArchitecture::AArch64, Architecture::AArch64)
     )
 }
 
 fn inline_asm_name(architecture: InlineAsmArchitecture) -> &'static str {
     match architecture {
         InlineAsmArchitecture::X86_64 => "x86",
+        InlineAsmArchitecture::AArch64 => "AArch64",
     }
 }
 
@@ -159,7 +161,7 @@ pub fn emit_target_asm_with_origins(
     validate_program_with_diagnostics_for_target(program, origins, target)?;
 
     match target.spec().architecture {
-        Architecture::X86_64 => crate::backend::x86_64_codegen::emit_x86_64_asm_with_origins(
+        Architecture::X86_64 => crate::backend::x86_64::codegen::emit_x86_64_asm_with_origins(
             program,
             target,
             entry_symbol,
@@ -176,7 +178,7 @@ pub fn emit_target_asm_with_origins(
                 )
             })?;
 
-            crate::backend::aarch64::emit(&semantic_ir)
+            crate::backend::aarch64::emit_for_target_with_entry(&semantic_ir, target, entry_symbol)
                 .map_err(|error| render_backend_diagnostic(&error, origins))
         }
     }
@@ -195,7 +197,7 @@ fn render_backend_diagnostic(
 }
 
 pub fn emit_x86_64_asm(program: &Program, target: Target) -> Result<String, String> {
-    crate::backend::x86_64_codegen::emit_x86_64_asm(program, target)
+    crate::backend::x86_64::codegen::emit_x86_64_asm(program, target)
 }
 
 pub fn emit_x86_64_asm_with_entry_symbol(
@@ -203,7 +205,11 @@ pub fn emit_x86_64_asm_with_entry_symbol(
     target: Target,
     entry_symbol: &str,
 ) -> Result<String, String> {
-    crate::backend::x86_64_codegen::emit_x86_64_asm_with_entry_symbol(program, target, entry_symbol)
+    crate::backend::x86_64::codegen::emit_x86_64_asm_with_entry_symbol(
+        program,
+        target,
+        entry_symbol,
+    )
 }
 
 pub fn emit_x86_64_asm_with_origins(
@@ -213,7 +219,7 @@ pub fn emit_x86_64_asm_with_origins(
     origins: &ProgramOrigins,
 ) -> Result<String, Diagnostic> {
     validate_program_with_diagnostics_for_target(program, origins, target)?;
-    crate::backend::x86_64_codegen::emit_x86_64_asm_with_origins(
+    crate::backend::x86_64::codegen::emit_x86_64_asm_with_origins(
         program,
         target,
         entry_symbol,

@@ -1,7 +1,6 @@
 pub mod aarch64;
 pub(crate) mod x86_64;
-pub(crate) mod x86_64_codegen;
-pub mod x86_64_machine;
+pub use x86_64::machine as x86_64_machine;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Architecture {
@@ -65,6 +64,7 @@ pub enum Target {
     X86_64,
     X86_64Free,
     AArch64Linux,
+    AArch64Free,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -127,8 +127,9 @@ impl Target {
             "x86" => Ok(Self::X86_64),
             "x86-free" => Ok(Self::X86_64Free),
             "aarch" => Ok(Self::AArch64Linux),
+            "aarch-free" => Ok(Self::AArch64Free),
             _ => Err(format!(
-                "Unknown target {name:?}; expected x86, x86-free, or aarch"
+                "Unknown target {name:?}; expected x86, x86-free, aarch, or aarch-free"
             )),
         }
     }
@@ -138,6 +139,7 @@ impl Target {
             Self::X86_64 => "x86",
             Self::X86_64Free => "x86-free",
             Self::AArch64Linux => "aarch",
+            Self::AArch64Free => "aarch-free",
         }
     }
 
@@ -146,6 +148,7 @@ impl Target {
             Self::X86_64 => x86_64_spec(Environment::Linux, LINUX_RUNTIME_OPERATIONS),
             Self::X86_64Free => x86_64_spec(Environment::Freestanding, &[]),
             Self::AArch64Linux => aarch64_linux_spec(),
+            Self::AArch64Free => aarch64_spec(Environment::Freestanding, &[]),
         }
     }
 
@@ -203,9 +206,16 @@ fn x86_64_spec(
 }
 
 fn aarch64_linux_spec() -> TargetSpec {
+    aarch64_spec(Environment::Linux, LINUX_RUNTIME_OPERATIONS)
+}
+
+fn aarch64_spec(
+    environment: Environment,
+    runtime_operations: &'static [RuntimeOperation],
+) -> TargetSpec {
     TargetSpec {
         architecture: Architecture::AArch64,
-        environment: Environment::Linux,
+        environment,
         pointer_width: 64,
         pointer_alignment: 8,
         linker_emulation: "aarch64elf",
@@ -230,6 +240,6 @@ fn aarch64_linux_spec() -> TargetSpec {
         callee_saved_registers: &[
             "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28",
         ],
-        runtime_operations: LINUX_RUNTIME_OPERATIONS,
+        runtime_operations,
     }
 }

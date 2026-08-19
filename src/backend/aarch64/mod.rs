@@ -8,36 +8,72 @@ mod registers;
 pub use registers::is_register;
 pub(crate) use registers::is_vector;
 
+#[derive(Clone, Copy)]
+enum StackSlotKind {
+    Scalar(crate::ast::MemoryWidth),
+    String,
+}
+
 pub fn emit(program: &ir::Program) -> Result<String, BackendError> {
+    emit_for_target_with_entry(program, crate::backend::Target::AArch64Linux, "_start")
+}
+
+pub fn emit_for_target(
+    program: &ir::Program,
+    target: crate::backend::Target,
+) -> Result<String, BackendError> {
+    emit_for_target_with_entry(program, target, "_start")
+}
+
+pub fn emit_for_target_with_entry(
+    program: &ir::Program,
+    target: crate::backend::Target,
+    entry_symbol: &str,
+) -> Result<String, BackendError> {
+    const FRAME_PREFIX: usize = 48;
     let mut asm = String::new();
     emit_data(&mut asm, program)?;
-    asm.push_str(".text\n.global _start\n\n");
+    asm.push_str(&format!(".text\n.global {entry_symbol}\n\n"));
 
     for label in &program.labels {
-        let slots = stack_slots(&label.stack);
-        let frame_size = stack_frame_size(&label.stack);
+        let slots = stack_slots(&label.stack, FRAME_PREFIX);
+        let slot_kinds = stack_slot_kinds(&label.stack);
+        let frame_size = stack_frame_size(&label.stack) + FRAME_PREFIX;
+        let mut constants = HashMap::new();
         asm.push_str(&format!(
             "{}:\n",
             if label.name == program.entry {
-                "_start"
+                entry_symbol
             } else {
                 &label.name
             }
         ));
-        if frame_size > 0 {
-            asm.push_str(&format!("  sub sp, sp, #{frame_size}\n"));
-        }
+        asm.push_str(&format!(
+            "  sub sp, sp, #{frame_size}\n  stp x29, x30, [sp]\n  mov x29, sp\n  stp x19, x20, [sp, #16]\n  str x21, [sp, #32]\n"
+        ));
         for (index, instruction) in label.instructions.iter().enumerate() {
-            emit_instruction(&mut asm, instruction, &slots, frame_size)
-                .map_err(|message| BackendError::new(message).at(&label.name, index))?;
+            if let ir::Instruction::Const { name, value } = instruction {
+                constants.insert(name.clone(), value.clone());
+            }
+            emit_instruction(
+                &mut asm,
+                instruction,
+                &slots,
+                &slot_kinds,
+                &constants,
+                frame_size,
+                target,
+            )
+            .map_err(|message| BackendError::new(message).at(&label.name, index))?;
         }
-        if frame_size > 0
-            && !label
-                .instructions
-                .iter()
-                .any(|instruction| matches!(instruction, ir::Instruction::Ret))
+        if !label
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, ir::Instruction::Ret))
         {
-            asm.push_str(&format!("  add sp, sp, #{frame_size}\n"));
+            asm.push_str(&format!(
+                "  ldp x19, x20, [sp, #16]\n  ldr x21, [sp, #32]\n  ldp x29, x30, [sp]\n  add sp, sp, #{frame_size}\n"
+            ));
         }
     }
 
@@ -83,6 +119,10 @@ fn emit_data(asm: &mut String, program: &ir::Program) -> Result<(), String> {
                 asm.push_str(".section .data\n");
                 asm.push_str(&format!("{name}:\n  {} {value}\n", data_directive(*width)?));
             }
+            ir::MemoryDeclaration::FloatScalar { name, width, value } => {
+                asm.push_str(".section .data\n");
+                asm.push_str(&format!("{name}:\n  {} {value}\n", data_directive(*width)?));
+            }
             ir::MemoryDeclaration::Array {
                 name,
                 width,
@@ -105,9 +145,6 @@ fn emit_data(asm: &mut String, program: &ir::Program) -> Result<(), String> {
                 for _ in 0..*count {
                     emit_memory_value(asm, *width, value)?;
                 }
-            }
-            ir::MemoryDeclaration::FloatScalar { .. } => {
-                return unsupported("floating-point static data");
             }
         }
     }
@@ -136,7 +173,8 @@ fn data_directive(width: crate::ast::MemoryWidth) -> Result<&'static str, String
         crate::ast::MemoryWidth::I64
         | crate::ast::MemoryWidth::U64
         | crate::ast::MemoryWidth::Ptr => Ok(".quad"),
-        _ => unsupported("floating-point data directive"),
+        crate::ast::MemoryWidth::F32 => Ok(".float"),
+        crate::ast::MemoryWidth::F64 => Ok(".double"),
     }
 }
 
@@ -144,7 +182,9 @@ fn width_size(width: crate::ast::MemoryWidth) -> usize {
     match width {
         crate::ast::MemoryWidth::I8 | crate::ast::MemoryWidth::U8 => 1,
         crate::ast::MemoryWidth::I16 | crate::ast::MemoryWidth::U16 => 2,
-        crate::ast::MemoryWidth::I32 | crate::ast::MemoryWidth::U32 => 4,
+        crate::ast::MemoryWidth::I32
+        | crate::ast::MemoryWidth::U32
+        | crate::ast::MemoryWidth::F32 => 4,
         _ => 8,
     }
 }
@@ -153,10 +193,15 @@ fn emit_instruction(
     asm: &mut String,
     instruction: &ir::Instruction,
     slots: &HashMap<String, usize>,
+    slot_kinds: &HashMap<String, StackSlotKind>,
+    constants: &HashMap<String, ir::ConstValue>,
     frame_size: usize,
+    target: crate::backend::Target,
 ) -> Result<(), String> {
     match instruction {
-        ir::Instruction::Assign { dst, value } => emit_assignment(asm, dst, value, slots),
+        ir::Instruction::Assign { dst, value } => {
+            emit_assignment(asm, dst, value, slots, slot_kinds, constants, target)
+        }
         ir::Instruction::PairAssign { dst, op, lhs, rhs } => {
             let (first, second) = match op {
                 crate::ast::PairBinaryOp::Add => ("adds", "adc"),
@@ -168,48 +213,76 @@ fn emit_instruction(
             ));
             Ok(())
         }
+        ir::Instruction::WideAssign {
+            dst,
+            signed,
+            division,
+            lhs,
+            rhs,
+        } => {
+            if dst.high != "x1" || dst.low != "x0" {
+                return Err(format!(
+                    "AArch64 widened math destination must be x1:x0, found {}:{}",
+                    dst.high, dst.low
+                ));
+            }
+            emit_value(asm, "x16", lhs, slots)?;
+            emit_value(asm, "x17", rhs, slots)?;
+            if *division {
+                asm.push_str(&format!(
+                    "  {} x0, x16, x17\n  msub x1, x0, x17, x16\n",
+                    if *signed { "sdiv" } else { "udiv" }
+                ));
+            } else {
+                asm.push_str(&format!(
+                    "  mul x0, x16, x17\n  {} x1, x16, x17\n",
+                    if *signed { "smulh" } else { "umulh" }
+                ));
+            }
+            Ok(())
+        }
         ir::Instruction::AssignIf {
             dst,
             value,
             condition,
         } => {
-            let ir::Operand::TargetRegister(dst) = dst else {
-                return unsupported("conditional assignment destination");
-            };
-            let ir::Value::Operand(value) = value else {
-                return unsupported("conditional assignment value");
-            };
-            let ir::Operand::Immediate(value) = value else {
-                return unsupported("conditional assignment value");
-            };
-            let skip = ".L.__subsea.aarch64.assign_if_skip";
-            emit_condition_branch(asm, condition, skip, false, slots)?;
-            asm.push_str(&format!("  mov {dst}, #{value}\n"));
+            let skip = format!(".L.__subsea.aarch64.assign_if_skip_{}", asm.len());
+            emit_condition_branch(asm, condition, &skip, false, slots)?;
+            emit_assignment(asm, dst, value, slots, slot_kinds, constants, target)?;
             asm.push_str(&format!("{skip}:\n"));
             Ok(())
         }
         ir::Instruction::Call { target } => {
             match target {
                 ir::ControlTarget::Label(target) => asm.push_str(&format!("  bl {target}\n")),
-                ir::ControlTarget::Operand(ir::Operand::TargetRegister(register)) => {
-                    asm.push_str(&format!("  blr {register}\n"));
+                ir::ControlTarget::Operand(target) => {
+                    emit_value(asm, "x16", target, slots)?;
+                    asm.push_str("  blr x16\n");
                 }
-                _ => return unsupported("indirect calls"),
             }
             Ok(())
         }
-        ir::Instruction::Exit { code } => AArch64RuntimeEmitter { slots }
+        ir::Instruction::Exit { code } => {
+            if !target.supports_runtime(crate::backend::RuntimeOperation::Exit) {
+                return unsupported("linux.exit on freestanding target");
+            }
+            AArch64RuntimeEmitter {
+                slots,
+                slot_kinds,
+                constants,
+            }
             .emit_exit(asm, *code)
-            .map_err(|error| error.message),
+            .map_err(|error| error.message)
+        }
         ir::Instruction::Jmp { target, condition } => {
-            let ir::ControlTarget::Label(target) = target else {
-                return unsupported("indirect jumps");
-            };
             if let Some(condition) = condition {
-                emit_condition_branch(asm, condition, target, true, slots)
-            } else {
-                asm.push_str(&format!("  b {target}\n"));
+                let skip = format!(".L.__subsea.aarch64.jmp_skip_{}", asm.len());
+                emit_condition_branch(asm, condition, &skip, false, slots)?;
+                emit_control_target(asm, target, slots)?;
+                asm.push_str(&format!("{skip}:\n"));
                 Ok(())
+            } else {
+                emit_control_target(asm, target, slots)
             }
         }
         ir::Instruction::Label { name } => {
@@ -220,19 +293,41 @@ fn emit_instruction(
             asm.push_str("  nop\n");
             Ok(())
         }
-        ir::Instruction::Runtime(operation) => AArch64RuntimeEmitter { slots }
-            .emit_runtime(asm, operation)
-            .map_err(|error| error.message),
-        ir::Instruction::Ret => {
-            if frame_size > 0 {
-                asm.push_str(&format!("  add sp, sp, #{frame_size}\n"));
+        ir::Instruction::Runtime(operation) => {
+            let runtime = match operation {
+                ir::RuntimeOperation::Print { .. } => crate::backend::RuntimeOperation::Write,
+                ir::RuntimeOperation::Read { .. } => crate::backend::RuntimeOperation::Read,
+                ir::RuntimeOperation::Release { .. } => crate::backend::RuntimeOperation::Release,
+            };
+            if !target.supports_runtime(runtime) {
+                return unsupported("Linux runtime operation on freestanding target");
             }
+            AArch64RuntimeEmitter {
+                slots,
+                slot_kinds,
+                constants,
+            }
+            .emit_runtime(asm, operation)
+            .map_err(|error| error.message)
+        }
+        ir::Instruction::Ret => {
+            asm.push_str(&format!(
+                "  ldp x19, x20, [sp, #16]\n  ldr x21, [sp, #32]\n  ldp x29, x30, [sp]\n  add sp, sp, #{frame_size}\n"
+            ));
             asm.push_str("  ret\n");
             Ok(())
         }
         ir::Instruction::Stack { name, width, value } => {
             let dst = stack_operand(name, Some(*width), slots)?;
-            emit_assignment(asm, &dst, &ir::Value::Operand(value.clone()), slots)
+            emit_assignment(
+                asm,
+                &dst,
+                &ir::Value::Operand(value.clone()),
+                slots,
+                slot_kinds,
+                constants,
+                target,
+            )
         }
         ir::Instruction::Const { .. } => Ok(()),
         ir::Instruction::StackString { name, value } => emit_stack_string(asm, name, value, slots),
@@ -248,11 +343,27 @@ fn emit_instruction(
             asm.push_str(&format!("  ldr {dst}, [sp], #16\n"));
             Ok(())
         }
+        ir::Instruction::Syscall => {
+            asm.push_str("  svc #0\n");
+            Ok(())
+        }
+        ir::Instruction::InlineAsm {
+            architecture: crate::ast::InlineAsmArchitecture::AArch64,
+            text,
+        } => {
+            asm.push_str("  ");
+            asm.push_str(text);
+            asm.push('\n');
+            Ok(())
+        }
+        ir::Instruction::InlineAsm { .. } => unsupported("inline assembly architecture"),
     }
 }
 
 struct AArch64RuntimeEmitter<'a> {
     slots: &'a HashMap<String, usize>,
+    slot_kinds: &'a HashMap<String, StackSlotKind>,
+    constants: &'a HashMap<String, ir::ConstValue>,
 }
 
 impl RuntimeEmitter for AArch64RuntimeEmitter<'_> {
@@ -261,7 +372,8 @@ impl RuntimeEmitter for AArch64RuntimeEmitter<'_> {
         asm: &mut String,
         operation: &ir::RuntimeOperation,
     ) -> Result<(), BackendError> {
-        emit_runtime_operation(asm, operation, self.slots).map_err(BackendError::from)
+        emit_runtime_operation(asm, operation, self.slots, self.slot_kinds, self.constants)
+            .map_err(BackendError::from)
     }
 
     fn emit_exit(&mut self, asm: &mut String, code: u8) -> Result<(), BackendError> {
@@ -275,7 +387,7 @@ impl RuntimeEmitter for AArch64RuntimeEmitter<'_> {
         dst: &ir::Operand,
         len: &ir::Operand,
     ) -> Result<(), BackendError> {
-        emit_linux_reserve(asm, dst, len).map_err(BackendError::from)
+        emit_linux_reserve(asm, dst, len, self.slots).map_err(BackendError::from)
     }
 }
 
@@ -283,6 +395,8 @@ fn emit_runtime_operation(
     asm: &mut String,
     operation: &ir::RuntimeOperation,
     slots: &HashMap<String, usize>,
+    slot_kinds: &HashMap<String, StackSlotKind>,
+    constants: &HashMap<String, ir::ConstValue>,
 ) -> Result<(), String> {
     match operation {
         ir::RuntimeOperation::Print { parts } => {
@@ -290,13 +404,43 @@ fn emit_runtime_operation(
                 match part {
                     ir::PrintPart::Literal(value) => emit_literal_write(asm, value),
                     ir::PrintPart::Binding(name) => {
-                        let offset = *slots
-                            .get(name)
-                            .ok_or_else(|| format!("Unknown print binding {name:?}"))?;
-                        asm.push_str(&format!(
-                            "  mov x0, #1\n  ldr x1, [sp, #{offset}]\n  ldr x2, [sp, #{}]\n  mov x8, #64\n  svc #0\n",
-                            offset + 8
-                        ));
+                        if let Some(offset) = slots.get(name) {
+                            match slot_kinds.get(name) {
+                            Some(StackSlotKind::String) => asm.push_str(&format!(
+                                "  mov x0, #1\n  ldr x1, [x29, #{offset}]\n  ldr x2, [x29, #{}]\n  mov x8, #64\n  svc #0\n",
+                                offset + 8
+                            )),
+                            Some(StackSlotKind::Scalar(width)) => emit_integer_print(
+                                asm,
+                                &ir::Operand::Name(name.clone()),
+                                print_format_for_width(*width),
+                                slots,
+                                slot_kinds,
+                            )?,
+                            None => return Err(format!("Unknown print binding {name:?}")),
+                            }
+                        } else {
+                            match constants.get(name) {
+                                Some(ir::ConstValue::String(value)) => {
+                                    emit_literal_write(asm, value)
+                                }
+                                Some(ir::ConstValue::Integer { value, width }) => {
+                                    emit_integer_print(
+                                        asm,
+                                        &ir::Operand::Immediate(*value),
+                                        print_format_for_width(
+                                            width.unwrap_or(crate::ast::MemoryWidth::I64),
+                                        ),
+                                        slots,
+                                        slot_kinds,
+                                    )?;
+                                }
+                                Some(ir::ConstValue::Float { value, .. }) => {
+                                    emit_literal_write(asm, value);
+                                }
+                                None => return Err(format!("Unknown print binding {name:?}")),
+                            }
+                        }
                     }
                     ir::PrintPart::Operand(operand) => {
                         emit_integer_print(
@@ -304,10 +448,11 @@ fn emit_runtime_operation(
                             operand,
                             ir::PrintFormat::SignedDecimal(crate::ast::MemoryWidth::I64),
                             slots,
+                            slot_kinds,
                         )?;
                     }
                     ir::PrintPart::FormattedOperand { format, operand } => {
-                        emit_integer_print(asm, operand, *format, slots)?;
+                        emit_integer_print(asm, operand, *format, slots, slot_kinds)?;
                     }
                 }
             }
@@ -319,14 +464,14 @@ fn emit_runtime_operation(
             len,
         } => {
             asm.push_str("  mov x0, #0\n");
-            emit_address_or_value(asm, "x1", dst, &HashMap::new())?;
-            emit_value(asm, "x2", len, &HashMap::new())?;
+            emit_address_or_value(asm, "x1", dst, slots)?;
+            emit_value(asm, "x2", len, slots)?;
             asm.push_str("  mov x8, #63\n  svc #0\n");
             Ok(())
         }
         ir::RuntimeOperation::Release { ptr, len } => {
-            emit_value(asm, "x0", ptr, &HashMap::new())?;
-            emit_value(asm, "x1", len, &HashMap::new())?;
+            emit_value(asm, "x0", ptr, slots)?;
+            emit_value(asm, "x1", len, slots)?;
             asm.push_str("  mov x8, #215\n  svc #0\n");
             Ok(())
         }
@@ -354,7 +499,13 @@ fn emit_integer_print(
     source: &ir::Operand,
     format: ir::PrintFormat,
     slots: &HashMap<String, usize>,
+    slot_kinds: &HashMap<String, StackSlotKind>,
 ) -> Result<(), String> {
+    let format = if matches!(format, ir::PrintFormat::Infer) {
+        infer_print_format(source, slot_kinds)?
+    } else {
+        format
+    };
     let signed = matches!(format, ir::PrintFormat::SignedDecimal(_));
     let (base, prefix) = match format {
         ir::PrintFormat::SignedDecimal(_) | ir::PrintFormat::UnsignedDecimal(_) => (10, ""),
@@ -406,12 +557,57 @@ fn emit_integer_print(
     Ok(())
 }
 
+fn infer_print_format(
+    source: &ir::Operand,
+    slot_kinds: &HashMap<String, StackSlotKind>,
+) -> Result<ir::PrintFormat, String> {
+    match source {
+        ir::Operand::Immediate(_) => {
+            Ok(ir::PrintFormat::SignedDecimal(crate::ast::MemoryWidth::I64))
+        }
+        ir::Operand::Memory { width, .. } => match width {
+            Some(width) if is_signed_integer_width(*width) => {
+                Ok(ir::PrintFormat::SignedDecimal(*width))
+            }
+            Some(crate::ast::MemoryWidth::U8)
+            | Some(crate::ast::MemoryWidth::U16)
+            | Some(crate::ast::MemoryWidth::U32)
+            | Some(crate::ast::MemoryWidth::U64) => {
+                Ok(ir::PrintFormat::UnsignedDecimal(width.unwrap()))
+            }
+            Some(crate::ast::MemoryWidth::Ptr) => Ok(ir::PrintFormat::Pointer),
+            _ => unsupported("inferred runtime printing"),
+        },
+        ir::Operand::Name(name) => match slot_kinds.get(name) {
+            Some(StackSlotKind::Scalar(width)) => Ok(print_format_for_width(*width)),
+            _ => unsupported("inferred runtime printing for string or unknown binding"),
+        },
+        _ => unsupported("inferred runtime printing for register or binding"),
+    }
+}
+
+fn print_format_for_width(width: crate::ast::MemoryWidth) -> ir::PrintFormat {
+    match width {
+        crate::ast::MemoryWidth::I8
+        | crate::ast::MemoryWidth::I16
+        | crate::ast::MemoryWidth::I32
+        | crate::ast::MemoryWidth::I64 => ir::PrintFormat::SignedDecimal(width),
+        crate::ast::MemoryWidth::U8
+        | crate::ast::MemoryWidth::U16
+        | crate::ast::MemoryWidth::U32
+        | crate::ast::MemoryWidth::U64 => ir::PrintFormat::UnsignedDecimal(width),
+        crate::ast::MemoryWidth::Ptr => ir::PrintFormat::Pointer,
+        _ => ir::PrintFormat::Infer,
+    }
+}
+
 fn emit_linux_reserve(
     asm: &mut String,
     dst: &ir::Operand,
     len: &ir::Operand,
+    slots: &HashMap<String, usize>,
 ) -> Result<(), String> {
-    emit_value(asm, "x0", len, &HashMap::new())?;
+    emit_value(asm, "x0", len, slots)?;
     asm.push_str(
         "  mov x1, #0\n  mov x2, #3\n  mov x3, #34\n  mov x4, #-1\n  mov x5, #0\n  mov x8, #222\n  svc #0\n",
     );
@@ -423,6 +619,21 @@ fn emit_linux_reserve(
     } else {
         unsupported("memory reserve destination")
     }
+}
+
+fn emit_control_target(
+    asm: &mut String,
+    target: &ir::ControlTarget,
+    slots: &HashMap<String, usize>,
+) -> Result<(), String> {
+    match target {
+        ir::ControlTarget::Label(target) => asm.push_str(&format!("  b {target}\n")),
+        ir::ControlTarget::Operand(target) => {
+            emit_value(asm, "x16", target, slots)?;
+            asm.push_str("  br x16\n");
+        }
+    }
+    Ok(())
 }
 
 fn emit_value(
@@ -440,11 +651,20 @@ fn emit_value(
                 asm.push_str(&format!("  mov {destination}, {register}\n"));
             }
         }
-        ir::Operand::Memory { address, .. } => {
-            asm.push_str(&format!(
-                "  ldr {destination}, {}\n",
-                memory_address(address)?
-            ));
+        ir::Operand::Memory { address, width } => {
+            if width.is_some() {
+                asm.push_str(&format!(
+                    "  {} {}, {}\n",
+                    integer_load_opcode(*width)?,
+                    memory_register(destination, *width),
+                    memory_address(address)?
+                ));
+            } else {
+                asm.push_str(&format!(
+                    "  ldr {destination}, {}\n",
+                    memory_address(address)?
+                ));
+            }
         }
         ir::Operand::Name(name) => {
             let slot = stack_operand(name, None, slots)?;
@@ -459,7 +679,7 @@ fn emit_value(
                 } else {
                     0
                 };
-            asm.push_str(&format!("  ldr {destination}, [sp, #{offset}]\n"));
+            asm.push_str(&format!("  ldr {destination}, [x29, #{offset}]\n"));
         }
         ir::Operand::Pointer(name) => {
             asm.push_str(&format!(
@@ -526,8 +746,80 @@ fn emit_assignment(
     dst: &ir::Operand,
     value: &ir::Value,
     slots: &HashMap<String, usize>,
+    slot_kinds: &HashMap<String, StackSlotKind>,
+    constants: &HashMap<String, ir::ConstValue>,
+    target: crate::backend::Target,
 ) -> Result<(), String> {
     if let ir::Operand::Memory { address, width } = dst {
+        if let ir::Value::FloatBinary {
+            width: value_width,
+            op,
+            lhs,
+            rhs,
+        } = value
+        {
+            if width != &Some(*value_width) {
+                return unsupported("floating-point memory width mismatch");
+            }
+            let suffix = match value_width {
+                crate::ast::MemoryWidth::F32 => "s",
+                crate::ast::MemoryWidth::F64 => "d",
+                _ => return unsupported("floating-point memory width"),
+            };
+            emit_float_binary(asm, "v16", *value_width, *op, lhs, rhs, slots)?;
+            asm.push_str(&format!("  str {suffix}16, {}\n", memory_address(address)?));
+            return Ok(());
+        }
+        if let ir::Value::IntrinsicCall {
+            op,
+            width: value_width,
+            args,
+        } = value
+        {
+            if width != &Some(*value_width) {
+                return unsupported("intrinsic memory width mismatch");
+            }
+            let is_float = matches!(
+                value_width,
+                crate::ast::MemoryWidth::F32 | crate::ast::MemoryWidth::F64
+            );
+            let temp = if is_float { "v16" } else { "x16" };
+            emit_intrinsic(asm, temp, *op, *value_width, args, slots)?;
+            let register = if is_float {
+                if matches!(value_width, crate::ast::MemoryWidth::F32) {
+                    "s16".to_owned()
+                } else {
+                    "d16".to_owned()
+                }
+            } else {
+                integer_register_for_width("x16", *value_width)
+            };
+            let opcode = if is_float {
+                "str"
+            } else {
+                integer_store_opcode(Some(*value_width))?
+            };
+            asm.push_str(&format!(
+                "  {opcode} {register}, {}\n",
+                memory_address(address)?
+            ));
+            return Ok(());
+        }
+        if let ir::Value::StringBytes { value } = value {
+            if value.is_empty() {
+                return Ok(());
+            }
+            emit_address(asm, "x16", address)?;
+            for (index, byte) in value.as_bytes().iter().enumerate() {
+                asm.push_str(&format!("  mov w17, #{byte}\n"));
+                if index == 0 {
+                    asm.push_str("  strb w17, [x16]\n");
+                } else {
+                    asm.push_str(&format!("  strb w17, [x16, #{index}]\n"));
+                }
+            }
+            return Ok(());
+        }
         let address = memory_address(address)?;
         let ir::Value::Operand(src) = value else {
             return unsupported("memory assignment value");
@@ -536,12 +828,14 @@ fn emit_assignment(
         if src.starts_with('#') {
             asm.push_str(&format!("  mov x16, {src}\n"));
             asm.push_str(&format!(
-                "  str {}, {address}\n",
+                "  {} {}, {address}\n",
+                integer_store_opcode(*width)?,
                 narrow_register("x16", *width)
             ));
         } else {
             asm.push_str(&format!(
-                "  str {}, {address}\n",
+                "  {} {}, {address}\n",
+                integer_store_opcode(*width)?,
                 narrow_register(&src, *width)
             ));
         }
@@ -561,8 +855,9 @@ fn emit_assignment(
         }
         ir::Value::Operand(ir::Operand::Memory { address, width }) => {
             asm.push_str(&format!(
-                "  ldr {}, {}\n",
-                narrow_register(dst, *width),
+                "  {} {}, {}\n",
+                integer_load_opcode(*width)?,
+                memory_register(dst, *width),
                 memory_address(address)?
             ));
         }
@@ -593,7 +888,7 @@ fn emit_assignment(
             emit_intrinsic(asm, dst, *op, *width, args, slots)?;
         }
         ir::Value::Operand(ir::Operand::Cast { operand, width }) => {
-            emit_cast(asm, dst, operand, *width, slots)?;
+            emit_cast(asm, dst, operand, *width, slots, slot_kinds)?;
         }
         ir::Value::Operand(ir::Operand::Converted {
             operand,
@@ -606,9 +901,26 @@ fn emit_assignment(
             };
             asm.push_str(&format!("  {opcode} {dst}, w16\n"));
         }
-        ir::Value::PlatformReserve { len } => AArch64RuntimeEmitter { slots }
+        ir::Value::Condition(condition) => {
+            let true_label = format!(".L.__subsea.aarch64.condition_true_{}", asm.len());
+            let done_label = format!(".L.__subsea.aarch64.condition_done_{}", asm.len());
+            emit_condition_branch(asm, condition, &true_label, true, slots)?;
+            asm.push_str(&format!(
+                "  mov {dst}, #0\n  b {done_label}\n{true_label}:\n  mov {dst}, #1\n{done_label}:\n"
+            ));
+        }
+        ir::Value::PlatformReserve { len } => {
+            if !target.supports_runtime(crate::backend::RuntimeOperation::Reserve) {
+                return unsupported("linux.reserve on freestanding target");
+            }
+            AArch64RuntimeEmitter {
+                slots,
+                slot_kinds,
+                constants,
+            }
             .emit_reserve(asm, &ir::Operand::TargetRegister(dst.clone()), len)
-            .map_err(|error| error.message)?,
+            .map_err(|error| error.message)?
+        }
         _ => return unsupported("assignment value"),
     }
     Ok(())
@@ -752,6 +1064,73 @@ fn emit_intrinsic(
     args: &[ir::Operand],
     slots: &HashMap<String, usize>,
 ) -> Result<(), String> {
+    if matches!(op, crate::ast::IntrinsicOp::Sqrt)
+        && !matches!(
+            width,
+            crate::ast::MemoryWidth::F32 | crate::ast::MemoryWidth::F64
+        )
+    {
+        let source = args.first().ok_or("sqrt requires an operand")?;
+        emit_value(asm, "x16", source, slots)?;
+        let bits = integer_width_bits(width)?;
+        let register = integer_register_for_width("x16", width);
+        let result = integer_register_for_width(destination, width);
+        let id = asm.len();
+        let negative = format!(".L.__subsea.aarch64.sqrt_negative_{id}");
+        if is_signed_integer_width(width) {
+            asm.push_str(&format!("  tbnz {register}, #{}, {negative}\n", bits - 1));
+        }
+        let align = format!(".L.__subsea.aarch64.sqrt_align_{id}");
+        let loop_label = format!(".L.__subsea.aarch64.sqrt_loop_{id}");
+        let skip = format!(".L.__subsea.aarch64.sqrt_skip_{id}");
+        let done = format!(".L.__subsea.aarch64.sqrt_done_{id}");
+        asm.push_str(&format!(
+            "  mov {r2}, #0\n  mov {r3}, #1\n  lsl {r3}, {r3}, #{}\n{align}:\n  cmp {r3}, {r}\n  bls {loop_label}\n  lsr {r3}, {r3}, #2\n  b {align}\n{loop_label}:\n  cbz {r3}, {done}\n  add {r4}, {r2}, {r3}\n  cmp {r}, {r4}\n  blo {skip}\n  sub {r}, {r}, {r4}\n  lsr {r2}, {r2}, #1\n  add {r2}, {r2}, {r3}\n  lsr {r3}, {r3}, #2\n  b {loop_label}\n{skip}:\n  lsr {r2}, {r2}, #1\n  lsr {r3}, {r3}, #2\n  b {loop_label}\n{done}:\n  mov {result}, {r2}\n",
+            bits - 2,
+            r = register,
+            r2 = integer_register_for_width("x17", width),
+            r3 = integer_register_for_width("x18", width),
+            r4 = integer_register_for_width("x19", width),
+            result = result,
+        ));
+        if is_signed_integer_width(width) {
+            asm.push_str(&format!("{negative}:\n  brk #0\n"));
+        }
+        return Ok(());
+    }
+    if matches!(
+        op,
+        crate::ast::IntrinsicOp::Min | crate::ast::IntrinsicOp::Max
+    ) && !matches!(
+        width,
+        crate::ast::MemoryWidth::F32 | crate::ast::MemoryWidth::F64
+    ) {
+        let lhs = args.first().ok_or("min/max requires two operands")?;
+        let rhs = args.get(1).ok_or("min/max requires two operands")?;
+        emit_value(asm, "x16", lhs, slots)?;
+        emit_value(asm, "x17", rhs, slots)?;
+        let lhs_register = integer_register_for_width("x16", width);
+        let rhs_register = integer_register_for_width("x17", width);
+        asm.push_str(&format!("  cmp {lhs_register}, {rhs_register}\n"));
+        let condition = if matches!(op, crate::ast::IntrinsicOp::Min) {
+            if is_signed_integer_width(width) {
+                "lt"
+            } else {
+                "lo"
+            }
+        } else if is_signed_integer_width(width) {
+            "gt"
+        } else {
+            "hi"
+        };
+        let lhs = lhs_register;
+        let rhs = rhs_register;
+        let destination = integer_register_for_width(destination, width);
+        asm.push_str(&format!(
+            "  csel {destination}, {lhs}, {rhs}, {condition}\n"
+        ));
+        return Ok(());
+    }
     let suffix = match width {
         crate::ast::MemoryWidth::F32 => "s",
         crate::ast::MemoryWidth::F64 => "d",
@@ -789,12 +1168,50 @@ fn emit_intrinsic(
     Ok(())
 }
 
+fn is_signed_integer_width(width: crate::ast::MemoryWidth) -> bool {
+    matches!(
+        width,
+        crate::ast::MemoryWidth::I8
+            | crate::ast::MemoryWidth::I16
+            | crate::ast::MemoryWidth::I32
+            | crate::ast::MemoryWidth::I64
+    )
+}
+
+fn integer_width_bits(width: crate::ast::MemoryWidth) -> Result<u32, String> {
+    match width {
+        crate::ast::MemoryWidth::I8 | crate::ast::MemoryWidth::U8 => Ok(8),
+        crate::ast::MemoryWidth::I16 | crate::ast::MemoryWidth::U16 => Ok(16),
+        crate::ast::MemoryWidth::I32 | crate::ast::MemoryWidth::U32 => Ok(32),
+        crate::ast::MemoryWidth::I64 | crate::ast::MemoryWidth::U64 => Ok(64),
+        _ => unsupported("integer width"),
+    }
+}
+
+fn integer_register_for_width(register: &str, width: crate::ast::MemoryWidth) -> String {
+    if matches!(
+        width,
+        crate::ast::MemoryWidth::I8
+            | crate::ast::MemoryWidth::U8
+            | crate::ast::MemoryWidth::I16
+            | crate::ast::MemoryWidth::U16
+            | crate::ast::MemoryWidth::I32
+            | crate::ast::MemoryWidth::U32
+    ) {
+        if let Some(index) = register.strip_prefix('x') {
+            return format!("w{index}");
+        }
+    }
+    register.to_owned()
+}
+
 fn emit_cast(
     asm: &mut String,
     destination: &str,
     source: &ir::Operand,
     width: crate::ast::MemoryWidth,
     slots: &HashMap<String, usize>,
+    slot_kinds: &HashMap<String, StackSlotKind>,
 ) -> Result<(), String> {
     let floating_destination = matches!(
         width,
@@ -807,16 +1224,48 @@ fn emit_cast(
             "d"
         };
         let destination = float_register(destination, suffix)?;
-        emit_value(asm, "x16", source, slots)?;
-        asm.push_str(&format!("  scvtf {destination}, x16\n"));
-    } else {
-        emit_float_operand(asm, "v16", "d", source, slots)?;
-        let destination = if destination.starts_with('x') {
-            destination.to_owned()
-        } else {
-            format!("x{destination}")
+        let source_register = match source {
+            ir::Operand::TargetRegister(register) if register.starts_with('w') => "w16",
+            ir::Operand::Memory {
+                width: Some(width), ..
+            } if matches!(
+                width,
+                crate::ast::MemoryWidth::I8
+                    | crate::ast::MemoryWidth::U8
+                    | crate::ast::MemoryWidth::I16
+                    | crate::ast::MemoryWidth::U16
+                    | crate::ast::MemoryWidth::I32
+                    | crate::ast::MemoryWidth::U32
+            ) =>
+            {
+                "w16"
+            }
+            _ => "x16",
         };
-        asm.push_str(&format!("  fcvtzs {destination}, d16\n"));
+        emit_value(asm, source_register, source, slots)?;
+        asm.push_str(&format!("  scvtf {destination}, {source_register}\n"));
+    } else {
+        let suffix = match source {
+            ir::Operand::TargetRegister(register) if register.starts_with('s') => "s",
+            ir::Operand::TargetRegister(register) if register.starts_with('d') => "d",
+            ir::Operand::Memory {
+                width: Some(crate::ast::MemoryWidth::F32),
+                ..
+            } => "s",
+            ir::Operand::Memory {
+                width: Some(crate::ast::MemoryWidth::F64),
+                ..
+            } => "d",
+            ir::Operand::Name(name) => match slot_kinds.get(name) {
+                Some(StackSlotKind::Scalar(crate::ast::MemoryWidth::F32)) => "s",
+                Some(StackSlotKind::Scalar(crate::ast::MemoryWidth::F64)) => "d",
+                _ => return unsupported("floating-point cast source width"),
+            },
+            _ => return unsupported("floating-point cast source width"),
+        };
+        emit_float_operand(asm, "v16", suffix, source, slots)?;
+        let destination = integer_register_for_width(destination, width);
+        asm.push_str(&format!("  fcvtzs {destination}, {suffix}16\n"));
     }
     Ok(())
 }
@@ -828,8 +1277,19 @@ fn emit_condition_branch(
     branch_when_true: bool,
     slots: &HashMap<String, usize>,
 ) -> Result<(), String> {
+    if let ir::Condition::BitwiseAndZero { lhs, rhs, op } = condition {
+        emit_value(asm, "x16", lhs, slots)?;
+        emit_value(asm, "x17", rhs, slots)?;
+        asm.push_str("  and x16, x16, x17\n");
+        let zero = matches!(op, crate::ast::CompareOp::Equal) == branch_when_true;
+        asm.push_str(&format!(
+            "  {} x16, {target}\n",
+            if zero { "cbz" } else { "cbnz" }
+        ));
+        return Ok(());
+    }
     let ir::Condition::Compare { lhs, op, rhs } = condition else {
-        return unsupported("bitwise conditions");
+        return unsupported("condition");
     };
     if is_float_operand(lhs) || is_float_operand(rhs) {
         let suffix = float_operand_suffix(lhs)
@@ -910,15 +1370,15 @@ fn operand(operand: &ir::Operand, slots: &HashMap<String, usize>) -> Result<Stri
                 } else {
                     0
                 };
-            Ok(format!("[sp, #{offset}]"))
+            Ok(format!("[x29, #{offset}]"))
         }
         ir::Operand::Pointer(name) => Ok(name.clone()),
         _ => unsupported("operand"),
     }
 }
 
-fn stack_slots(layout: &ir::StackLayout) -> HashMap<String, usize> {
-    let mut offset = 0;
+fn stack_slots(layout: &ir::StackLayout, base: usize) -> HashMap<String, usize> {
+    let mut offset = base;
     let mut slots = HashMap::new();
     for slot in &layout.slots {
         let name = match slot {
@@ -932,6 +1392,17 @@ fn stack_slots(layout: &ir::StackLayout) -> HashMap<String, usize> {
         };
     }
     slots
+}
+
+fn stack_slot_kinds(layout: &ir::StackLayout) -> HashMap<String, StackSlotKind> {
+    layout
+        .slots
+        .iter()
+        .map(|slot| match slot {
+            ir::StackSlot::Scalar { name, width } => (name.clone(), StackSlotKind::Scalar(*width)),
+            ir::StackSlot::String { name } => (name.clone(), StackSlotKind::String),
+        })
+        .collect()
 }
 
 fn stack_frame_size(layout: &ir::StackLayout) -> usize {
@@ -956,7 +1427,7 @@ fn stack_operand(
         .ok_or_else(|| format!("Unknown stack slot {name:?}"))?;
     Ok(ir::Operand::Memory {
         address: ir::Address {
-            first: ir::AddressTerm::TargetRegister(String::from("sp")),
+            first: ir::AddressTerm::TargetRegister(String::from("x29")),
             rest: if offset == 0 {
                 Vec::new()
             } else {
@@ -991,16 +1462,16 @@ fn emit_stack_string(
             asm.push_str(".section .rodata\n");
             asm.push_str(&format!("{label}:\n  .byte {bytes}\n.text\n"));
             asm.push_str(&format!(
-                "  adrp x16, {label}\n  add x16, x16, :lo12:{label}\n  str x16, [sp, #{offset}]\n  mov x16, #{}\n  str x16, [sp, #{}]\n",
+                "  adrp x16, {label}\n  add x16, x16, :lo12:{label}\n  str x16, [x29, #{offset}]\n  mov x16, #{}\n  str x16, [x29, #{}]\n",
                 value.len(),
                 offset + 8
             ));
         }
         ir::StringInitializer::Slice { ptr, len } => {
             emit_address_or_value(asm, "x16", ptr, slots)?;
-            asm.push_str(&format!("  str x16, [sp, #{offset}]\n"));
+            asm.push_str(&format!("  str x16, [x29, #{offset}]\n"));
             emit_value(asm, "x16", len, slots)?;
-            asm.push_str(&format!("  str x16, [sp, #{}]\n", offset + 8));
+            asm.push_str(&format!("  str x16, [x29, #{}]\n", offset + 8));
         }
     }
     Ok(())
@@ -1060,6 +1531,53 @@ fn narrow_register(register: &str, width: Option<crate::ast::MemoryWidth>) -> St
         format!("w{}", &register[1..])
     } else {
         register.to_owned()
+    }
+}
+
+fn integer_store_opcode(width: Option<crate::ast::MemoryWidth>) -> Result<&'static str, String> {
+    match width {
+        Some(crate::ast::MemoryWidth::I8 | crate::ast::MemoryWidth::U8) => Ok("strb"),
+        Some(crate::ast::MemoryWidth::I16 | crate::ast::MemoryWidth::U16) => Ok("strh"),
+        Some(crate::ast::MemoryWidth::I32 | crate::ast::MemoryWidth::U32) => Ok("str"),
+        Some(
+            crate::ast::MemoryWidth::I64
+            | crate::ast::MemoryWidth::U64
+            | crate::ast::MemoryWidth::Ptr,
+        ) => Ok("str"),
+        _ => unsupported("integer memory store width"),
+    }
+}
+
+fn integer_load_opcode(width: Option<crate::ast::MemoryWidth>) -> Result<&'static str, String> {
+    match width {
+        Some(crate::ast::MemoryWidth::I8) => Ok("ldrsb"),
+        Some(crate::ast::MemoryWidth::U8) => Ok("ldrb"),
+        Some(crate::ast::MemoryWidth::I16) => Ok("ldrsh"),
+        Some(crate::ast::MemoryWidth::U16) => Ok("ldrh"),
+        Some(crate::ast::MemoryWidth::I32) => Ok("ldrsw"),
+        Some(crate::ast::MemoryWidth::U32) => Ok("ldr"),
+        Some(
+            crate::ast::MemoryWidth::I64
+            | crate::ast::MemoryWidth::U64
+            | crate::ast::MemoryWidth::Ptr,
+        ) => Ok("ldr"),
+        _ => unsupported("integer memory load width"),
+    }
+}
+
+fn memory_register(register: &str, width: Option<crate::ast::MemoryWidth>) -> String {
+    if width.is_some_and(|width| {
+        matches!(
+            width,
+            crate::ast::MemoryWidth::I8
+                | crate::ast::MemoryWidth::I16
+                | crate::ast::MemoryWidth::I32
+        )
+    }) && register.starts_with('x')
+    {
+        register.to_owned()
+    } else {
+        narrow_register(register, width)
     }
 }
 

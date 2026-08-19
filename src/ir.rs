@@ -1,5 +1,6 @@
 use crate::ast::{
-    BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth, PairBinaryOp,
+    BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, InlineAsmArchitecture, IntrinsicOp, MathOp,
+    MemoryWidth, PairBinaryOp,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -99,6 +100,13 @@ pub enum Instruction {
         lhs: RegisterPair,
         rhs: RegisterPair,
     },
+    WideAssign {
+        dst: RegisterPair,
+        signed: bool,
+        division: bool,
+        lhs: Operand,
+        rhs: Operand,
+    },
     Const {
         name: String,
         value: ConstValue,
@@ -132,6 +140,11 @@ pub enum Instruction {
     },
     Pop {
         dst: Operand,
+    },
+    Syscall,
+    InlineAsm {
+        architecture: InlineAsmArchitecture,
+        text: String,
     },
     Runtime(RuntimeOperation),
 }

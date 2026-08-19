@@ -1589,10 +1589,6 @@ fn rejects_unqualified_target_specific_instructions_with_suggestions() {
             "Unknown instruction \"syscall\"; did you mean linux.syscall?",
         ),
         (
-            Token::Halt,
-            "Unknown instruction \"hlt\"; use asm.x86 \"hlt\" for raw x86 assembly",
-        ),
-        (
             Token::In,
             "Unknown instruction \"in\"; use asm.x86 \"in\" for raw x86 assembly",
         ),
@@ -1615,7 +1611,7 @@ fn rejects_unknown_namespaced_instruction() {
 
     assert_eq!(
         parse(finish_label(tokens)).unwrap_err(),
-        "Expected string literal after asm.x86, found LocalIdent(\"print\")"
+        "Expected string literal after asm architecture, found LocalIdent(\"print\")"
     );
 }
 

@@ -13,6 +13,7 @@ use crate::ast::{
     StringInitializer, StringProperty, WidthConversion,
 };
 use crate::backend::x86_64;
+use crate::backend::x86_64::machine;
 use crate::backend::x86_64::{
     bitwise_unary_opcode, compare_jump_opcode, compare_set_opcode, division_opcode,
     emit_address as emit_x86_address, emit_ir_operand as emit_x86_ir_operand,
@@ -23,7 +24,6 @@ use crate::backend::x86_64::{
     is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, pair_math_opcodes,
     wide_math_opcode, width as register_width,
 };
-use crate::backend::x86_64_machine as machine;
 use crate::backend::{
     Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target, TargetSpec,
 };
@@ -307,7 +307,7 @@ fn emit_x86_64_asm_impl(
                     Instruction::Exit { code } => {
                         if !target.supports_runtime(RuntimeOperation::Exit) {
                             return Err(BackendError::new(
-                                "exit is only supported for target x86; use hlt or an explicit loop for x86-free",
+                                "exit is only supported for target x86; use asm.x86 \"hlt\" or an explicit loop for x86-free",
                             ));
                         }
 

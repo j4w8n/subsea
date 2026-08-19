@@ -586,8 +586,9 @@ impl Parser {
             )),
             ("linux", "syscall") => Ok(Instruction::Syscall),
             ("asm", "x86") => self.parse_inline_asm(crate::ast::InlineAsmArchitecture::X86_64),
+            ("asm", "aarch64") => self.parse_inline_asm(crate::ast::InlineAsmArchitecture::AArch64),
             ("asm", operation) => Err(format!(
-                "Unknown assembly architecture \"asm.{operation}\"; expected asm.x86"
+                "Unknown assembly architecture \"asm.{operation}\"; expected asm.x86 or asm.aarch64"
             )),
             _ => Err(format!("Unknown instruction \"{namespace}.{operation}\"")),
         }
@@ -608,10 +609,10 @@ impl Parser {
                 }
             }
             Some(token) => Err(format!(
-                "Expected string literal after asm.x86, found {token:?}"
+                "Expected string literal after asm architecture, found {token:?}"
             )),
             None => Err(String::from(
-                "Expected string literal after asm.x86, found end of input",
+                "Expected string literal after asm architecture, found end of input",
             )),
         }
     }
@@ -690,7 +691,6 @@ impl Parser {
                 Ok(Instruction::Jmp { target, condition })
             }
             Some(Token::Exit) => Err(suggest_namespaced_instruction("exit", "linux.exit")),
-            Some(Token::Halt) => Err(suggest_raw_x86_instruction("hlt")),
             Some(Token::In) => Err(suggest_raw_x86_instruction("in")),
             Some(Token::Const) => self.parse_const_declaration(),
             Some(Token::Print) => Err(suggest_namespaced_instruction("print", "linux.print")),

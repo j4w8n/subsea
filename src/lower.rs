@@ -189,6 +189,26 @@ fn lower_instruction(
                     rhs: lower_pair(rhs),
                 })
             }
+            (
+                AssignmentTarget::RegisterPair(dst),
+                AssignmentValue::WideMultiply { signed, lhs, rhs },
+            ) => Ok(ir::Instruction::WideAssign {
+                dst: lower_pair(dst),
+                signed: *signed,
+                division: false,
+                lhs: lower_operand(lhs),
+                rhs: lower_operand(rhs),
+            }),
+            (
+                AssignmentTarget::RegisterPair(dst),
+                AssignmentValue::WideDivide { signed, lhs, rhs },
+            ) => Ok(ir::Instruction::WideAssign {
+                dst: lower_pair(dst),
+                signed: *signed,
+                division: true,
+                lhs: lower_operand(lhs),
+                rhs: lower_operand(rhs),
+            }),
             (dst, value) => Ok(ir::Instruction::Assign {
                 dst: lower_target(dst, label, index)?,
                 value: lower_value(value, label, index)?,
@@ -245,16 +265,17 @@ fn lower_instruction(
                 len: lower_operand(len),
             }))
         }
-        Instruction::InlineAsm { .. } => {
-            Err(LoweringError::unsupported(label, index, "inline assembly"))
-        }
+        Instruction::InlineAsm { architecture, text } => Ok(ir::Instruction::InlineAsm {
+            architecture: *architecture,
+            text: text.clone(),
+        }),
         Instruction::Pop { dst } => Ok(ir::Instruction::Pop {
             dst: lower_operand(dst),
         }),
         Instruction::Push { src } => Ok(ir::Instruction::Push {
             src: lower_operand(src),
         }),
-        Instruction::Syscall => Err(LoweringError::unsupported(label, index, "raw syscalls")),
+        Instruction::Syscall => Ok(ir::Instruction::Syscall),
     }
 }
 

@@ -116,7 +116,7 @@ fn aarch_lowering_diagnostic_includes_source_location() {
         stderr.contains("aarch_unsupported.ss:2:3"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains("raw syscalls is not represented in the target-neutral IR yet"));
+    assert!(stderr.contains("x86 inline assembly cannot be used with target aarch"));
 }
 
 #[test]
@@ -138,11 +138,9 @@ fn aarch_backend_diagnostic_includes_source_location() {
         stderr.contains("aarch_unsupported_backend.ss:3:3"),
         "stderr:\n{stderr}"
     );
-    assert!(
-        stderr.contains(
-            "AArch64 backend does not support inferred runtime printing yet"
-        )
-    );
+    assert!(stderr.contains(
+        "AArch64 backend does not support inferred runtime printing for register or binding yet"
+    ));
 }
 
 #[test]
@@ -482,6 +480,50 @@ fn emit_asm_accepts_freestanding_target() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("  hlt\n"));
+}
+
+#[test]
+fn aarch64_freestanding_target_rejects_linux_helpers() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch-free",
+            "tests/fixtures/aarch_core.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("AArch64 backend does not support linux.exit on freestanding target"));
+}
+
+#[test]
+fn aarch64_freestanding_target_emits_core_code_and_custom_entry() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--target",
+            "aarch-free",
+            "--entry",
+            "kernel_entry",
+            "tests/fixtures/aarch_free.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(".global kernel_entry\n"));
+    assert!(stdout.contains("kernel_entry:\n"));
+    assert!(stdout.contains("  nop\n"));
 }
 
 #[test]

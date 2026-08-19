@@ -191,7 +191,7 @@ fn lexes_storage_and_cleanup_keywords() {
     for (source, token) in [
         ("const", Token::Const),
         ("from", Token::From),
-        ("hlt", Token::Halt),
+        ("hlt", Token::Ident(String::from("hlt"))),
         ("in", Token::In),
         ("import", Token::Import),
         ("nop", Token::Nop),

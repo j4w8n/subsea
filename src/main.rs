@@ -367,7 +367,7 @@ fn parse_source_target_and_entry(
 fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(), String> {
     if entry_symbol.is_some() && !target.is_freestanding() {
         return Err(String::from(
-            "--entry is only supported for target x86-free",
+            "--entry is only supported for freestanding targets",
         ));
     }
 
@@ -380,7 +380,7 @@ fn validate_linker_script_target(
 ) -> Result<(), String> {
     if linker_script.is_some() && !target.is_freestanding() {
         return Err(String::from(
-            "--linker-script/-T is only supported for target x86-free",
+            "--linker-script/-T is only supported for freestanding targets",
         ));
     }
 
@@ -390,7 +390,7 @@ fn validate_linker_script_target(
 fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> Result<(), String> {
     if output_format == BuildOutputFormat::Binary && !target.is_freestanding() {
         return Err(String::from(
-            "--format binary is only supported for target x86-free",
+            "--format binary is only supported for freestanding targets",
         ));
     }
 
@@ -400,7 +400,7 @@ fn validate_format_target(target: Target, output_format: BuildOutputFormat) -> R
 fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), String> {
     if linker_provided && !target.is_freestanding() {
         return Err(String::from(
-            "--linker is only supported for target x86-free",
+            "--linker is only supported for freestanding targets",
         ));
     }
 
@@ -410,7 +410,7 @@ fn validate_linker_target(target: Target, linker_provided: bool) -> Result<(), S
 fn validate_link_inputs_target(target: Target, link_inputs: &[PathBuf]) -> Result<(), String> {
     if !link_inputs.is_empty() && !target.is_freestanding() {
         return Err(String::from(
-            "--link-input is only supported for target x86-free",
+            "--link-input is only supported for freestanding targets",
         ));
     }
 
@@ -423,7 +423,7 @@ fn validate_link_inputs_require_linker_script(
 ) -> Result<(), String> {
     if !link_inputs.is_empty() && linker_script.is_none() {
         return Err(String::from(
-            "--link-input requires --linker-script/-T for target x86-free",
+            "--link-input requires --linker-script/-T for a freestanding target",
         ));
     }
 
@@ -436,7 +436,7 @@ fn validate_binary_requires_linker_script(
 ) -> Result<(), String> {
     if output_format == BuildOutputFormat::Binary && linker_script.is_none() {
         return Err(String::from(
-            "--format binary requires --linker-script/-T for target x86-free",
+            "--format binary requires --linker-script/-T for a freestanding target",
         ));
     }
 

@@ -26,7 +26,6 @@ pub enum Token {
     From,
     Greater,
     GreaterEquals,
-    Halt,
     Ident(String),
     If,
     Import,

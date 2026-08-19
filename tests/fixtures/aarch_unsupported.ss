@@ -1,4 +1,4 @@
 main: {
-  linux.syscall
+  asm.x86 "nop"
   linux.exit 0
 }

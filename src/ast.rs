@@ -141,6 +141,7 @@ pub enum Instruction {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum InlineAsmArchitecture {
     X86_64,
+    AArch64,
 }
 
 impl Instruction {
