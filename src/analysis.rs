@@ -244,6 +244,215 @@ pub(crate) fn collect_string_bindings(
     })
 }
 
+pub(crate) fn collect_ir_string_bindings(
+    program: &crate::ir::Program,
+) -> Result<StringTable, String> {
+    let mut all = Vec::new();
+    let mut bindings = HashMap::new();
+    let mut float_bindings = HashMap::new();
+    let mut float_literals = HashMap::new();
+    let mut floats = Vec::new();
+    let mut integers = HashMap::new();
+    let mut literals = HashMap::new();
+    let mut stack_strings = HashMap::new();
+    let mut literal_indexes = HashMap::new();
+    let memory_widths = program
+        .memory
+        .iter()
+        .map(|declaration| {
+            let (name, width) = match declaration {
+                crate::ir::MemoryDeclaration::Scalar { name, width, .. }
+                | crate::ir::MemoryDeclaration::FloatScalar { name, width, .. }
+                | crate::ir::MemoryDeclaration::Buffer { name, width, .. }
+                | crate::ir::MemoryDeclaration::Array { name, width, .. }
+                | crate::ir::MemoryDeclaration::Repeat { name, width, .. } => (name, width),
+            };
+            (name.clone(), *width)
+        })
+        .collect();
+
+    for label in &program.labels {
+        for instruction in &label.instructions {
+            match instruction {
+                crate::ir::Instruction::Const { name, value } => {
+                    let key = (label.name.clone(), name.clone());
+                    let (asm_label, printable_value) = match value {
+                        crate::ir::ConstValue::String(value) => {
+                            (format!(".Lstr_{}_{}", label.name, name), value.clone())
+                        }
+                        crate::ir::ConstValue::Integer { value, width } => {
+                            integers.insert(
+                                key.clone(),
+                                IntegerBinding {
+                                    value: *value,
+                                    width: *width,
+                                },
+                            );
+                            (format!(".Lint_{}_{}", label.name, name), value.to_string())
+                        }
+                        crate::ir::ConstValue::Float { value, width } => {
+                            validate_float_width(*width)?;
+                            let float = FloatBinding {
+                                asm_label: format!(".Lfloatval_{}_{}", label.name, name),
+                                value: value.clone(),
+                                width: *width,
+                            };
+                            floats.push(float.clone());
+                            float_bindings.insert(key.clone(), float);
+                            (format!(".Lfloat_{}_{}", label.name, name), value.clone())
+                        }
+                    };
+                    if bindings.contains_key(&key) {
+                        return Err(format!(
+                            "Binding {name:?} is already defined in label {:?}",
+                            label.name
+                        ));
+                    }
+                    let binding = StringBinding {
+                        asm_label,
+                        value: printable_value,
+                    };
+                    all.push(binding.clone());
+                    bindings.insert(key, binding);
+                }
+                crate::ir::Instruction::Runtime(crate::ir::RuntimeOperation::Print { parts }) => {
+                    for part in parts {
+                        if let crate::ir::PrintPart::Literal(value) = part {
+                            let index = literal_indexes.entry(label.name.clone()).or_insert(0);
+                            *index += 1;
+                            let binding = StringBinding {
+                                asm_label: format!(".Lstr_{}_literal_{}", label.name, index),
+                                value: value.clone(),
+                            };
+                            all.push(binding.clone());
+                            literals.insert((label.name.clone(), *index), binding);
+                        }
+                    }
+                }
+                crate::ir::Instruction::StackString { name, value } => {
+                    if let crate::ir::StringInitializer::Literal(value) = value {
+                        let binding = StringBinding {
+                            asm_label: format!(".Lstr_{}_{}", label.name, name),
+                            value: value.clone(),
+                        };
+                        all.push(binding.clone());
+                        stack_strings.insert((label.name.clone(), name.clone()), binding);
+                    }
+                }
+                _ => {}
+            }
+            collect_ir_instruction_float_literals(
+                &mut floats,
+                &mut float_literals,
+                &label.name,
+                instruction,
+            )?;
+        }
+    }
+
+    Ok(StringTable {
+        all,
+        bindings,
+        float_bindings,
+        float_literals,
+        floats,
+        literals,
+        memory_widths,
+        integers,
+        stack_strings,
+    })
+}
+
+fn collect_ir_instruction_float_literals(
+    floats: &mut Vec<FloatBinding>,
+    float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,
+    label_name: &str,
+    instruction: &crate::ir::Instruction,
+) -> Result<(), String> {
+    let mut operands = Vec::new();
+    let mut width = None;
+    match instruction {
+        crate::ir::Instruction::Assign { value, .. }
+        | crate::ir::Instruction::AssignIf { value, .. } => match value {
+            crate::ir::Value::FloatBinary {
+                width: value_width,
+                lhs,
+                rhs,
+                ..
+            } => {
+                width = Some(*value_width);
+                operands.extend([lhs, rhs]);
+            }
+            crate::ir::Value::IntrinsicCall {
+                width: value_width,
+                args,
+                ..
+            } => {
+                width = Some(*value_width);
+                operands.extend(args.iter());
+            }
+            crate::ir::Value::Binary { lhs, rhs, .. } => operands.extend([lhs, rhs]),
+            _ => {}
+        },
+        crate::ir::Instruction::Stack {
+            width: value_width,
+            value,
+            ..
+        } => {
+            width = value_width.is_float().then_some(*value_width);
+            operands.push(value);
+        }
+        crate::ir::Instruction::Jmp {
+            condition: Some(condition),
+            ..
+        } => {
+            collect_ir_condition_float_operands(condition, &mut operands, &mut width);
+        }
+        _ => {}
+    }
+    for operand in operands {
+        if let crate::ir::Operand::FloatLiteral(value) = operand
+            && let Some(width) = width
+        {
+            collect_float_literal_value(floats, float_literals, label_name, width, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_ir_condition_float_operands<'a>(
+    condition: &'a crate::ir::Condition,
+    operands: &mut Vec<&'a crate::ir::Operand>,
+    width: &mut Option<MemoryWidth>,
+) {
+    if let crate::ir::Condition::Compare { lhs, op, rhs } = condition {
+        *width = float_compare_width(*op);
+        operands.extend([lhs, rhs]);
+    }
+}
+
+fn collect_float_literal_value(
+    floats: &mut Vec<FloatBinding>,
+    float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,
+    label_name: &str,
+    width: MemoryWidth,
+    value: &str,
+) -> Result<(), String> {
+    validate_float_literal(value, width)?;
+    let key = (label_name.to_owned(), width, value.to_owned());
+    if float_literals.contains_key(&key) {
+        return Ok(());
+    }
+    let binding = FloatBinding {
+        asm_label: format!(".Lfloatlit_{}_{}", label_name, floats.len() + 1),
+        value: value.to_owned(),
+        width,
+    };
+    floats.push(binding.clone());
+    float_literals.insert(key, binding);
+    Ok(())
+}
+
 fn collect_assignment_value_float_literals(
     floats: &mut Vec<FloatBinding>,
     float_literals: &mut HashMap<(String, MemoryWidth, String), FloatBinding>,

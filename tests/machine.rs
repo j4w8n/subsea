@@ -167,3 +167,44 @@ fn emits_structured_x86_memory_address() {
 
     assert_eq!(asm, "  mov rax, qword ptr [buffer + rcx * 4]\n");
 }
+
+#[test]
+fn direct_asm_helpers_emit_basic_instructions() {
+    let mut asm = String::new();
+
+    machine::mov(
+        &mut asm,
+        Operand::Register("rax".to_owned()),
+        Operand::Immediate(1),
+    );
+    machine::compare(
+        &mut asm,
+        "cmp",
+        Operand::Register("rax".to_owned()),
+        Operand::Immediate(0),
+    );
+    machine::branch(&mut asm, "je", Operand::Address("done".to_owned()));
+    machine::ret(&mut asm);
+
+    assert_eq!(asm, "  mov rax, 1\n  cmp rax, 0\n  je done\n  ret\n");
+}
+
+#[test]
+fn direct_asm_helpers_emit_sections_and_runtime_sequences() {
+    let mut asm = String::new();
+
+    machine::intel_syntax(&mut asm);
+    machine::section(&mut asm, "rodata");
+    machine::global(&mut asm, "message");
+    machine::label(&mut asm, "message");
+    machine::byte(&mut asm, "1, 2, 3");
+    machine::quad(&mut asm, "target");
+    machine::zero(&mut asm, 8);
+    machine::syscall(&mut asm, 60);
+    machine::prepare_division(&mut asm, true);
+
+    assert_eq!(
+        asm,
+        ".intel_syntax noprefix\n.section .rodata\n.global message\nmessage:\n  .byte 1, 2, 3\n  .quad target\n  .zero 8\n  mov rax, 60\n  syscall\n  cqo\n"
+    );
+}

@@ -1,28 +1,20 @@
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
-    build_stack_frame_from_layout, collect_string_bindings, destination_width, float_memory_width,
-    immediate_value, is_float_memory_operand, memory_width_bits, operand_width,
-    resolve_memory_width, stack_scalar_slot, stack_string_slot, validate_float_literal,
-    validate_float_width, validate_label,
+    build_stack_frame_from_layout, collect_ir_string_bindings, destination_width,
+    float_memory_width, immediate_value, is_float_memory_operand, memory_width_bits, operand_width,
+    resolve_memory_width, stack_scalar_slot, stack_string_property_slot, stack_string_slot,
+    validate_float_literal, validate_float_width, validate_label,
 };
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BitwiseUnaryOp,
-    CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, Instruction, IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue,
-    MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, Program, ReadSource, RegisterPair,
-    StringInitializer, StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, ControlTarget, ExprOp, Expression, FloatMathOp,
+    Instruction, IntrinsicOp, MathOp, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
+    Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
-use crate::backend::x86_64;
-use crate::backend::x86_64::machine;
+use crate::backend::x86_64::asm;
 use crate::backend::x86_64::{
-    bitwise_unary_opcode, compare_jump_opcode, compare_set_opcode, division_opcode,
-    emit_address as emit_x86_address, emit_ir_operand as emit_x86_ir_operand,
-    emit_operand as emit_x86_operand, family as register_family, float_compare_jump_opcode,
-    float_compare_opcode, float_math_opcode, float_min_max_opcode,
-    float_move_opcode as float_move_opcode_for_width, float_rounding_mode, float_rounding_opcode,
-    float_sqrt_opcode, integer_math_opcode, is_extended as is_extended_register,
-    is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, pair_math_opcodes,
-    wide_math_opcode, width as register_width,
+    family as register_family, is_extended as is_extended_register,
+    is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, width as register_width,
 };
 use crate::backend::{
     Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target, TargetSpec,
@@ -157,8 +149,12 @@ impl RuntimeEmitter for X86RuntimeEmitter<'_> {
     }
 
     fn emit_exit(&mut self, asm: &mut String, code: u8) -> Result<(), BackendError> {
-        asm.push_str(&format!("  mov rdi, {code}\n"));
-        x86_64::emit_linux_syscall(asm, linux::SYS_EXIT);
+        asm::mov(
+            asm,
+            asm::Operand::Register(String::from("rdi")),
+            asm::Operand::Immediate(code.into()),
+        );
+        emit_linux_syscall(asm, linux::SYS_EXIT);
         Ok(())
     }
 
@@ -197,11 +193,60 @@ pub(crate) fn emit_x86_64_asm_with_origins(
     entry_symbol: &str,
     origins: &ProgramOrigins,
 ) -> Result<String, BackendError> {
-    emit_x86_64_asm_impl(program, target, entry_symbol, Some(origins))
+    let semantic_ir = lower::lower_program(program)
+        .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
+    emit_ir_x86_64_asm_with_origins(&semantic_ir, target, entry_symbol, origins)
 }
 
 fn emit_x86_64_asm_impl(
     program: &Program,
+    target: Target,
+    entry_symbol: &str,
+    origins: Option<&ProgramOrigins>,
+) -> Result<String, BackendError> {
+    let semantic_ir = lower::lower_program(program)
+        .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
+    let assembly = emit_ir_x86_64_asm_impl(&semantic_ir, target, entry_symbol, origins)?;
+    validate_x86_ast_labels(program, target)?;
+    Ok(assembly)
+}
+
+fn validate_x86_ast_labels(program: &Program, target: Target) -> Result<(), BackendError> {
+    let top_level_labels: HashSet<&str> = program
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
+
+    for label in &program.labels {
+        let stack = build_stack_frame_from_layout(
+            &lower::lower_stack_layout(label),
+            target.spec().stack_alignment,
+        );
+        validate_label(
+            label,
+            &top_level_labels,
+            &stack,
+            target.spec().frame_pointer,
+            target.spec().exit_syscall,
+        )
+        .map_err(BackendError::new)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn emit_ir_x86_64_asm_with_origins(
+    program: &ir::Program,
+    target: Target,
+    entry_symbol: &str,
+    origins: &ProgramOrigins,
+) -> Result<String, BackendError> {
+    emit_ir_x86_64_asm_impl(program, target, entry_symbol, Some(origins))
+}
+
+fn emit_ir_x86_64_asm_impl(
+    program: &ir::Program,
     target: Target,
     entry_symbol: &str,
     origins: Option<&ProgramOrigins>,
@@ -213,7 +258,7 @@ fn emit_x86_64_asm_impl(
         )));
     }
 
-    let strings = collect_string_bindings(program)?;
+    let strings = collect_ir_string_bindings(program)?;
     let mut literal_indexes = HashMap::new();
     let mut asm = String::new();
     let labels = LabelSymbols {
@@ -221,29 +266,29 @@ fn emit_x86_64_asm_impl(
         entry_symbol,
     };
 
-    asm.push_str(".intel_syntax noprefix\n");
+    asm::intel_syntax(&mut asm);
     emit_static_data(&mut asm, &program.data, &labels);
     emit_data(&mut asm, &program.memory, &labels);
     emit_bss(&mut asm, &program.memory);
     emit_rodata(&mut asm, &strings.all, &strings.floats);
-    asm.push_str(".section .text\n");
-    asm.push_str(&format!(".global {entry_symbol}\n\n"));
-
-    let top_level_labels: HashSet<&str> = program
-        .labels
-        .iter()
-        .map(|label| label.name.as_str())
-        .collect();
+    asm::text(&mut asm);
+    asm::global(&mut asm, entry_symbol);
+    asm.push('\n');
 
     for label in &program.labels {
-        let stack_layout = lower::lower_stack_layout(label);
-        let stack = build_stack_frame_from_layout(&stack_layout, target.spec().stack_alignment);
+        let stack = build_stack_frame_from_layout(&label.stack, target.spec().stack_alignment);
 
-        asm.push_str(&format!("{}:\n", labels.emit_label(&label.name)));
+        asm::label(&mut asm, labels.emit_label(&label.name));
 
         if stack.has_slots() {
-            x86_64::emit_frame_prologue(&mut asm, &stack, target.spec());
-            emit_stack_initializers(&mut asm, &label.instructions, &strings, &label.name, &stack)?;
+            emit_frame_prologue(&mut asm, &stack, target.spec());
+            emit_ir_stack_initializers(
+                &mut asm,
+                &label.instructions,
+                &strings,
+                &label.name,
+                &stack,
+            )?;
         }
 
         let mut runtime_print_index = 0;
@@ -252,8 +297,8 @@ fn emit_x86_64_asm_impl(
         for (instruction_index, instruction) in label.instructions.iter().enumerate() {
             let result: Result<(), BackendError> = (|| {
                 match instruction {
-                    Instruction::Assign { dst, value } => {
-                        if assignment_value_uses_linux_reserve(value)
+                    ir::Instruction::Assign { value, .. } => {
+                        if ir_value_uses_linux_reserve(value)
                             && !target.supports_runtime(RuntimeOperation::Reserve)
                         {
                             return Err(BackendError::new(
@@ -261,14 +306,14 @@ fn emit_x86_64_asm_impl(
                             ));
                         }
 
-                        emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
+                        emit_ir_assignment(&mut asm, instruction, &strings, &label.name, &stack)?;
                     }
-                    Instruction::AssignIf {
+                    ir::Instruction::AssignIf {
                         dst,
                         value,
                         condition,
                     } => {
-                        if assignment_value_uses_linux_reserve(value)
+                        if ir_value_uses_linux_reserve(value)
                             && !target.supports_runtime(RuntimeOperation::Reserve)
                         {
                             return Err(BackendError::new(
@@ -281,7 +326,7 @@ fn emit_x86_64_asm_impl(
                             ".L.__subsea.{}.assign_if_{}_skip",
                             label.name, conditional_jump_index
                         );
-                        emit_condition_jump(
+                        emit_ir_condition_jump(
                             &mut asm,
                             &skip_label,
                             condition,
@@ -289,13 +334,21 @@ fn emit_x86_64_asm_impl(
                             &strings,
                             &label.name,
                             &stack,
-                            conditional_jump_index,
                         )?;
-                        emit_assignment(&mut asm, dst, value, &strings, &label.name, &stack)?;
-                        asm.push_str(&format!("{skip_label}:\n"));
+                        emit_ir_assignment(
+                            &mut asm,
+                            &ir::Instruction::Assign {
+                                dst: dst.clone(),
+                                value: value.clone(),
+                            },
+                            &strings,
+                            &label.name,
+                            &stack,
+                        )?;
+                        asm::label(&mut asm, skip_label);
                     }
-                    Instruction::Call { target } => {
-                        emit_call_instruction(
+                    ir::Instruction::Call { target } => {
+                        emit_ir_call_instruction(
                             &mut asm,
                             target,
                             &labels,
@@ -304,7 +357,7 @@ fn emit_x86_64_asm_impl(
                             &stack,
                         )?;
                     }
-                    Instruction::Exit { code } => {
+                    ir::Instruction::Exit { code } => {
                         if !target.supports_runtime(RuntimeOperation::Exit) {
                             return Err(BackendError::new(
                                 "exit is only supported for target x86; use asm.x86 \"hlt\" or an explicit loop for x86-free",
@@ -320,12 +373,12 @@ fn emit_x86_64_asm_impl(
                         };
                         emitter.emit_exit(&mut asm, *code)?;
                     }
-                    Instruction::InlineAsm { text, .. } => {
-                        asm.push_str(&format!("  {text}\n"));
+                    ir::Instruction::InlineAsm { text, .. } => {
+                        asm::instruction(&mut asm, text);
                     }
-                    Instruction::Jmp { target, condition } => {
+                    ir::Instruction::Jmp { target, condition } => {
                         conditional_jump_index += usize::from(condition.is_some());
-                        emit_jmp_instruction(
+                        emit_ir_jmp_instruction(
                             &mut asm,
                             target,
                             condition.as_ref(),
@@ -336,18 +389,15 @@ fn emit_x86_64_asm_impl(
                             conditional_jump_index,
                         )?;
                     }
-                    Instruction::Label { name } => {
-                        machine::emit(
-                            &machine::Instruction::Label { name: name.clone() },
-                            &mut asm,
-                        );
+                    ir::Instruction::Label { name } => {
+                        asm::label(&mut asm, name.clone());
                     }
-                    Instruction::Nop => {
-                        machine::emit(&machine::Instruction::Nop, &mut asm);
+                    ir::Instruction::Nop => {
+                        asm::nop(&mut asm);
                     }
-                    Instruction::Const { .. } | Instruction::Stack { .. } => {}
-                    Instruction::StackString { name, value } => {
-                        emit_stack_string_initializer(
+                    ir::Instruction::Const { .. } | ir::Instruction::Stack { .. } => {}
+                    ir::Instruction::StackString { name, value } => {
+                        emit_ir_stack_string_initializer(
                             &mut asm,
                             name,
                             value,
@@ -356,22 +406,13 @@ fn emit_x86_64_asm_impl(
                             &stack,
                         )?;
                     }
-                    Instruction::Print { .. } => {
+                    ir::Instruction::Runtime(operation) => {
                         if !target.supports_runtime(RuntimeOperation::Write) {
                             return Err(BackendError::new(
                                 "print is only supported for target x86_64",
                             ));
                         }
 
-                        let ir::Instruction::Runtime(operation) = lower::lower_runtime_instruction(
-                            instruction,
-                            &label.name,
-                            instruction_index,
-                        )
-                        .map_err(|error| BackendError::new(error.message))?
-                        else {
-                            return Err(BackendError::new("Expected lowered print operation"));
-                        };
                         let mut emitter = X86RuntimeEmitter {
                             strings: &strings,
                             literal_indexes: &mut literal_indexes,
@@ -379,83 +420,61 @@ fn emit_x86_64_asm_impl(
                             stack: &stack,
                             runtime_print_index: &mut runtime_print_index,
                         };
-                        emitter.emit_runtime(&mut asm, &operation)?;
+                        emitter.emit_runtime(&mut asm, operation)?;
                     }
-                    Instruction::Pop { dst } => {
-                        validate_pop_operand(dst, &strings, &stack)?;
-                        let dst = emit_operand(dst, &strings, &label.name, &stack)?;
-                        machine::emit(
-                            &machine::Instruction::Pop {
-                                dst: machine::Operand::Address(dst),
+                    ir::Instruction::Pop { dst } => {
+                        let dst_ast = ir_operand_to_ast(dst);
+                        validate_pop_operand(&dst_ast, &strings, &stack)?;
+                        let dst = emit_operand(&dst_ast, &strings, &label.name, &stack)?;
+                        asm::pop(&mut asm, asm::Operand::Address(dst));
+                    }
+                    ir::Instruction::Push { src } => {
+                        let src_ast = ir_operand_to_ast(src);
+                        validate_push_operand(&src_ast, &strings, &label.name, &stack)?;
+                        let src = emit_operand(&src_ast, &strings, &label.name, &stack)?;
+                        asm::push(&mut asm, asm::Operand::Address(src));
+                    }
+                    ir::Instruction::PairAssign { dst, op, lhs, rhs } => {
+                        emit_ir_pair_assignment(&mut asm, dst, *op, lhs, rhs)?;
+                    }
+                    ir::Instruction::WideAssign {
+                        dst,
+                        signed,
+                        division,
+                        lhs,
+                        rhs,
+                    } => {
+                        let mut checked = String::new();
+                        emit_assignment_legacy(
+                            &mut checked,
+                            &AssignmentTarget::RegisterPair(RegisterPair {
+                                high: dst.high.clone(),
+                                low: dst.low.clone(),
+                            }),
+                            &if *division {
+                                AssignmentValue::WideDivide {
+                                    signed: *signed,
+                                    lhs: ir_operand_to_ast(lhs),
+                                    rhs: ir_operand_to_ast(rhs),
+                                }
+                            } else {
+                                AssignmentValue::WideMultiply {
+                                    signed: *signed,
+                                    lhs: ir_operand_to_ast(lhs),
+                                    rhs: ir_operand_to_ast(rhs),
+                                }
                             },
-                            &mut asm,
-                        );
-                    }
-                    Instruction::Push { src } => {
-                        validate_push_operand(src, &strings, &label.name, &stack)?;
-                        let src = emit_operand(src, &strings, &label.name, &stack)?;
-                        machine::emit(
-                            &machine::Instruction::Push {
-                                src: machine::Operand::Address(src),
-                            },
-                            &mut asm,
-                        );
-                    }
-                    Instruction::Read { .. } => {
-                        if !target.supports_runtime(RuntimeOperation::Read) {
-                            return Err(BackendError::new(
-                                "read is only supported for target x86_64",
-                            ));
-                        }
-
-                        let ir::Instruction::Runtime(operation) = lower::lower_runtime_instruction(
-                            instruction,
+                            &strings,
                             &label.name,
-                            instruction_index,
-                        )
-                        .map_err(|error| BackendError::new(error.message))?
-                        else {
-                            return Err(BackendError::new("Expected lowered read operation"));
-                        };
-                        let mut emitter = X86RuntimeEmitter {
-                            strings: &strings,
-                            literal_indexes: &mut literal_indexes,
-                            label_name: &label.name,
-                            stack: &stack,
-                            runtime_print_index: &mut runtime_print_index,
-                        };
-                        emitter.emit_runtime(&mut asm, &operation)?;
+                            &stack,
+                        )?;
+                        asm.push_str(&checked);
                     }
-                    Instruction::Release { .. } => {
-                        if !target.supports_runtime(RuntimeOperation::Release) {
-                            return Err(BackendError::new(
-                                "release is only supported for target x86_64",
-                            ));
-                        }
-
-                        let ir::Instruction::Runtime(operation) = lower::lower_runtime_instruction(
-                            instruction,
-                            &label.name,
-                            instruction_index,
-                        )
-                        .map_err(|error| BackendError::new(error.message))?
-                        else {
-                            return Err(BackendError::new("Expected lowered release operation"));
-                        };
-                        let mut emitter = X86RuntimeEmitter {
-                            strings: &strings,
-                            literal_indexes: &mut literal_indexes,
-                            label_name: &label.name,
-                            stack: &stack,
-                            runtime_print_index: &mut runtime_print_index,
-                        };
-                        emitter.emit_runtime(&mut asm, &operation)?;
+                    ir::Instruction::Ret => {
+                        emit_ir_return_instruction(&mut asm, instruction, &stack, target.spec());
                     }
-                    Instruction::Ret => {
-                        emit_return_instruction(&mut asm, &stack, target.spec());
-                    }
-                    Instruction::Syscall => {
-                        asm.push_str("  syscall\n");
+                    ir::Instruction::Syscall => {
+                        asm::syscall_trap(&mut asm);
                     }
                 }
                 Ok(())
@@ -469,18 +488,196 @@ fn emit_x86_64_asm_impl(
             }
         }
 
-        validate_label(
-            label,
-            &top_level_labels,
-            &stack,
-            target.spec().frame_pointer,
-            target.spec().exit_syscall,
-        )?;
-
         asm.push('\n');
     }
 
     Ok(asm)
+}
+
+fn emit_ir_stack_initializers(
+    asm: &mut String,
+    instructions: &[ir::Instruction],
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    for instruction in instructions {
+        if let ir::Instruction::Stack { name, width, value } = instruction {
+            if width.is_float() {
+                let value = ir_operand_to_ast(value);
+                emit_stack_float_initializer(
+                    asm, name, *width, &value, strings, label_name, stack,
+                )?;
+            } else {
+                emit_ir_copy_instruction(
+                    asm,
+                    value,
+                    &ir::Operand::Name(name.clone()),
+                    strings,
+                    label_name,
+                    stack,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_ir_stack_string_initializer(
+    asm: &mut String,
+    name: &str,
+    value: &ir::StringInitializer,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    emit_stack_string_initializer(
+        asm,
+        name,
+        &match value {
+            ir::StringInitializer::Literal(value) => StringInitializer::Literal(value.clone()),
+            ir::StringInitializer::Slice { ptr, len } => StringInitializer::Slice {
+                ptr: ir_operand_to_ast(ptr),
+                len: ir_operand_to_ast(len),
+            },
+        },
+        strings,
+        label_name,
+        stack,
+    )
+}
+
+fn ir_value_uses_linux_reserve(value: &ir::Value) -> bool {
+    matches!(value, ir::Value::PlatformReserve { .. })
+}
+
+fn emit_ir_jmp_instruction(
+    asm: &mut String,
+    target: &ir::ControlTarget,
+    condition: Option<&ir::Condition>,
+    labels: &LabelSymbols,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+    index: usize,
+) -> Result<(), String> {
+    if condition.is_none() {
+        match target {
+            ir::ControlTarget::Label(target) => {
+                asm::jump(asm, asm::Operand::Address(labels.emit_label(target)));
+            }
+            ir::ControlTarget::Operand(operand) => {
+                validate_ir_indirect_control_target("jmp", operand, strings, label_name, stack)?;
+                let operand = emit_ir_operand(operand, strings, label_name, stack)?;
+                asm::jump(asm, asm::Operand::Address(operand));
+            }
+        }
+        return Ok(());
+    }
+
+    let target_ast = match target {
+        ir::ControlTarget::Label(target) => ControlTarget::Label(labels.emit_label(target)),
+        ir::ControlTarget::Operand(operand) => ControlTarget::Operand(ir_operand_to_ast(operand)),
+    };
+    let condition_ast = condition.map(ir_condition_to_ast);
+    emit_jmp_instruction(
+        asm,
+        &target_ast,
+        condition_ast.as_ref(),
+        labels,
+        strings,
+        label_name,
+        stack,
+        index,
+    )
+}
+
+fn emit_ir_pair_assignment(
+    asm: &mut String,
+    dst: &ir::RegisterPair,
+    op: PairBinaryOp,
+    lhs: &ir::RegisterPair,
+    rhs: &ir::RegisterPair,
+) -> Result<(), String> {
+    validate_pair_binary_assignment_ir(dst, lhs, rhs)?;
+    let (low, high) = pair_math_opcodes(op);
+    asm::instruction(asm, format_args!("{low} {}, {}", dst.low, rhs.low));
+    asm::instruction(asm, format_args!("{high} {}, {}", dst.high, rhs.high));
+    Ok(())
+}
+
+fn validate_pair_binary_assignment_ir(
+    dst: &ir::RegisterPair,
+    lhs: &ir::RegisterPair,
+    rhs: &ir::RegisterPair,
+) -> Result<(), String> {
+    if dst != lhs {
+        return Err(format!(
+            "Pair arithmetic left operand must match destination; found {}:{} = {}:{} ...",
+            dst.high, dst.low, lhs.high, lhs.low
+        ));
+    }
+    if same_register_family(&dst.high, &dst.low) {
+        return Err(format!(
+            "Pair arithmetic destination registers must be different, found {}:{}",
+            dst.high, dst.low
+        ));
+    }
+    if same_register_family(&rhs.high, &dst.low) {
+        return Err(format!(
+            "Pair arithmetic right high register {} cannot overlap destination low register {}",
+            rhs.high, dst.low
+        ));
+    }
+    for (name, register) in [
+        ("Pair arithmetic destination high register", &dst.high),
+        ("Pair arithmetic destination low register", &dst.low),
+        ("Pair arithmetic right high register", &rhs.high),
+        ("Pair arithmetic right low register", &rhs.low),
+    ] {
+        validate_pair_binary_register(name, register)?;
+    }
+    Ok(())
+}
+
+fn emit_ir_wide_assignment(
+    asm: &mut String,
+    dst: &ir::RegisterPair,
+    signed: bool,
+    division: bool,
+    lhs: &ir::Operand,
+    rhs: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    if dst.high != "rdx" || dst.low != "rax" {
+        return Err(format!(
+            "x86-64 widened math destination must be rdx:rax, found {}:{}",
+            dst.high, dst.low
+        ));
+    }
+    let lhs = emit_ir_operand(lhs, strings, label_name, stack)?;
+    let rhs = emit_ir_operand(rhs, strings, label_name, stack)?;
+    if lhs != "rax" {
+        asm::instruction(asm, format_args!("mov rax, {lhs}"));
+    }
+    if division {
+        asm::prepare_division(asm, signed);
+        asm::divide(
+            asm,
+            if signed { "idiv" } else { "div" },
+            asm::Operand::Address(rhs),
+        );
+    } else {
+        asm::binary(
+            asm,
+            if signed { "imul" } else { "mul" },
+            asm::Operand::Register(String::from("rax")),
+            asm::Operand::Address(rhs),
+        );
+    }
+    Ok(())
 }
 
 fn emit_conditional_jump(
@@ -547,61 +744,61 @@ fn emit_ir_condition_jump(
             let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
                 && matches!(lhs, ir::Operand::TargetRegister(register) if !is_xmm_register(register))
                 && matches!(rhs, ir::Operand::Immediate(0));
-            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
-            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            let lhs = emit_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_ir_operand(rhs, strings, label_name, stack)?;
             let op = if jump_if_true {
                 *op
             } else {
                 invert_compare_op(*op)
             };
             if use_test {
-                machine::emit(
-                    &machine::Instruction::Compare {
+                asm::emit(
+                    &asm::Instruction::Compare {
                         opcode: String::from("test"),
-                        lhs: machine::Operand::Address(lhs.clone()),
-                        rhs: machine::Operand::Address(lhs),
+                        lhs: asm::Operand::Address(lhs.clone()),
+                        rhs: asm::Operand::Address(lhs),
                     },
                     asm,
                 );
             } else {
-                machine::emit(
-                    &machine::Instruction::Compare {
+                asm::emit(
+                    &asm::Instruction::Compare {
                         opcode: String::from("cmp"),
-                        lhs: machine::Operand::Address(lhs),
-                        rhs: machine::Operand::Address(rhs),
+                        lhs: asm::Operand::Address(lhs),
+                        rhs: asm::Operand::Address(rhs),
                     },
                     asm,
                 );
             }
-            machine::emit(
-                &machine::Instruction::Branch {
+            asm::emit(
+                &asm::Instruction::Branch {
                     opcode: compare_jump_opcode(op).to_owned(),
-                    target: machine::Operand::Address(target.to_owned()),
+                    target: asm::Operand::Address(target.to_owned()),
                 },
                 asm,
             );
             Ok(())
         }
         ir::Condition::BitwiseAndZero { lhs, rhs, op } => {
-            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
-            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            let lhs = emit_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_ir_operand(rhs, strings, label_name, stack)?;
             let jump = match (*op, jump_if_true) {
                 (CompareOp::Equal, true) | (CompareOp::NotEqual, false) => "je",
                 (CompareOp::NotEqual, true) | (CompareOp::Equal, false) => "jne",
                 _ => unreachable!(),
             };
-            machine::emit(
-                &machine::Instruction::Compare {
+            asm::emit(
+                &asm::Instruction::Compare {
                     opcode: String::from("test"),
-                    lhs: machine::Operand::Address(lhs),
-                    rhs: machine::Operand::Address(rhs),
+                    lhs: asm::Operand::Address(lhs),
+                    rhs: asm::Operand::Address(rhs),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Branch {
+            asm::emit(
+                &asm::Instruction::Branch {
                     opcode: jump.to_owned(),
-                    target: machine::Operand::Address(target.to_owned()),
+                    target: asm::Operand::Address(target.to_owned()),
                 },
                 asm,
             );
@@ -738,24 +935,50 @@ fn emit_ir_call_instruction(
 ) -> Result<(), String> {
     match target {
         ir::ControlTarget::Label(target) => {
-            machine::emit(
-                &machine::Instruction::Call {
-                    target: machine::Operand::Address(labels.emit_label(target)),
-                },
-                asm,
-            );
+            asm::call(asm, asm::Operand::Address(labels.emit_label(target)));
             Ok(())
         }
         ir::ControlTarget::Operand(operand) => {
-            let operand = emit_x86_ir_operand(operand, strings, label_name, stack)?;
-            machine::emit(
-                &machine::Instruction::Call {
-                    target: machine::Operand::Address(operand),
-                },
-                asm,
-            );
+            validate_ir_indirect_control_target("call", operand, strings, label_name, stack)?;
+            let operand = emit_ir_operand(operand, strings, label_name, stack)?;
+            asm::call(asm, asm::Operand::Address(operand));
             Ok(())
         }
+    }
+}
+
+fn validate_ir_indirect_control_target(
+    instruction: &str,
+    operand: &ir::Operand,
+    _strings: &StringTable,
+    _label_name: &str,
+    stack: &StackFrame,
+) -> Result<(), String> {
+    let width = match operand {
+        ir::Operand::TargetRegister(register) => {
+            if is_xmm_register(register) {
+                return Err(format!(
+                    "indirect {instruction} target must be a 64-bit integer register or memory operand"
+                ));
+            }
+            register_width(register)
+        }
+        ir::Operand::Memory { width, .. } => width.map(memory_width_bits),
+        ir::Operand::Name(name) => {
+            stack_scalar_slot(stack, name).map(|(_, width)| memory_width_bits(width))
+        }
+        _ => None,
+    };
+
+    match width {
+        Some(Width::Bits64) => Ok(()),
+        Some(width) => Err(format!(
+            "indirect {instruction} target must be 64-bit, found {}-bit operand",
+            width.bits()
+        )),
+        None => Err(format!(
+            "indirect {instruction} target must be a 64-bit register or memory operand"
+        )),
     }
 }
 
@@ -769,13 +992,13 @@ fn emit_call_instruction_legacy(
 ) -> Result<(), String> {
     match target {
         ControlTarget::Label(target) => {
-            asm.push_str(&format!("  call {}\n", labels.emit_label(target)));
+            asm::call(asm, asm::Operand::Address(labels.emit_label(target)));
             Ok(())
         }
         ControlTarget::Operand(operand) => {
             validate_indirect_control_target("call", operand, strings, label_name, stack)?;
             let operand = emit_operand(operand, strings, label_name, stack)?;
-            asm.push_str(&format!("  call {operand}\n"));
+            asm::call(asm, asm::Operand::Address(operand));
             Ok(())
         }
     }
@@ -804,9 +1027,9 @@ fn emit_ir_return_instruction(
     }
 
     if stack.has_slots() {
-        x86_64::emit_frame_epilogue(asm, spec);
+        emit_frame_epilogue(asm, spec);
     }
-    machine::emit(&machine::Instruction::Return, asm);
+    asm::ret(asm);
 }
 
 fn emit_jmp_instruction(
@@ -832,12 +1055,7 @@ fn emit_jmp_instruction(
                     index,
                 )?;
             } else {
-                machine::emit(
-                    &machine::Instruction::Jump {
-                        target: machine::Operand::Address(labels.emit_label(target)),
-                    },
-                    asm,
-                );
+                asm::jump(asm, asm::Operand::Address(labels.emit_label(target)));
             }
 
             Ok(())
@@ -858,20 +1076,10 @@ fn emit_jmp_instruction(
                     stack,
                     index,
                 )?;
-                machine::emit(
-                    &machine::Instruction::Jump {
-                        target: machine::Operand::Address(operand),
-                    },
-                    asm,
-                );
-                asm.push_str(&format!("{skip_label}:\n"));
+                asm::jump(asm, asm::Operand::Address(operand));
+                asm::label(asm, skip_label);
             } else {
-                machine::emit(
-                    &machine::Instruction::Jump {
-                        target: machine::Operand::Address(operand),
-                    },
-                    asm,
-                );
+                asm::jump(asm, asm::Operand::Address(operand));
             }
 
             Ok(())
@@ -926,11 +1134,15 @@ fn emit_compare_condition_jump(
         invert_compare_op(op)
     };
     if use_test {
-        asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+        asm::instruction(asm, format_args!("test {lhs}, {lhs}"));
     } else {
-        asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+        asm::instruction(asm, format_args!("cmp {lhs}, {rhs}"));
     }
-    asm.push_str(&format!("  {} {target}\n", compare_jump_opcode(op)));
+    asm::branch(
+        asm,
+        compare_jump_opcode(op),
+        asm::Operand::Address(target.to_owned()),
+    );
 
     Ok(())
 }
@@ -956,8 +1168,8 @@ fn emit_test_condition_jump(
         _ => unreachable!(),
     };
 
-    asm.push_str(&format!("  test {lhs}, {rhs}\n"));
-    asm.push_str(&format!("  {jump} {target}\n"));
+    asm::instruction(asm, format_args!("test {lhs}, {rhs}"));
+    asm::branch(asm, jump, asm::Operand::Address(target.to_owned()));
 
     Ok(())
 }
@@ -1255,20 +1467,27 @@ fn emit_float_conditional_jump(
     let rhs = emit_float_operand(&condition.rhs, width, strings, label_name, stack)?;
     let ordered_label = format!(".L.__subsea.{label_name}.fcmp_{index}_ordered");
 
-    asm.push_str(&format!("  {} {lhs}, {rhs}\n", float_compare_opcode(width)));
+    asm::instruction(
+        asm,
+        format_args!("{} {lhs}, {rhs}", float_compare_opcode(width)),
+    );
     if jump_if_true {
-        asm.push_str(&format!("  jp {ordered_label}\n"));
+        asm::branch(asm, "jp", asm::Operand::Address(ordered_label.clone()));
     } else {
-        asm.push_str(&format!("  jp {target}\n"));
+        asm::branch(asm, "jp", asm::Operand::Address(target.to_owned()));
     }
     let op = if jump_if_true {
         condition.op
     } else {
         invert_compare_op(condition.op)
     };
-    asm.push_str(&format!("  {} {target}\n", float_compare_jump_opcode(op)));
+    asm::branch(
+        asm,
+        float_compare_jump_opcode(op),
+        asm::Operand::Address(target.to_owned()),
+    );
     if jump_if_true {
-        asm.push_str(&format!("{ordered_label}:\n"));
+        asm::label(asm, ordered_label);
     }
 
     Ok(())
@@ -1401,19 +1620,19 @@ fn emit_stack_float_initializer(
     let src = emit_float_operand(value, width, strings, label_name, stack)?;
     let ptr = width.ptr();
 
-    asm.push_str("  push rax\n");
+    asm::push(asm, asm::Operand::Register(String::from("rax")));
     match width {
         MemoryWidth::F32 => {
-            asm.push_str(&format!("  mov eax, {src}\n"));
-            asm.push_str(&format!("  mov {ptr} ptr [rbp - {offset}], eax\n"));
+            asm::instruction(asm, format_args!("mov eax, {src}"));
+            asm::instruction(asm, format_args!("mov {ptr} ptr [rbp - {offset}], eax"));
         }
         MemoryWidth::F64 => {
-            asm.push_str(&format!("  mov rax, {src}\n"));
-            asm.push_str(&format!("  mov {ptr} ptr [rbp - {offset}], rax\n"));
+            asm::instruction(asm, format_args!("mov rax, {src}"));
+            asm::instruction(asm, format_args!("mov {ptr} ptr [rbp - {offset}], rax"));
         }
         _ => unreachable!(),
     }
-    asm.push_str("  pop rax\n");
+    asm::pop(asm, asm::Operand::Register(String::from("rax")));
 
     Ok(())
 }
@@ -1498,50 +1717,46 @@ fn resolve_print_part<'a>(
     }
 }
 
-fn emit_data(asm: &mut String, memory: &[MemoryDeclaration], labels: &LabelSymbols) {
+fn emit_data(asm: &mut String, memory: &[ir::MemoryDeclaration], labels: &LabelSymbols) {
     if memory
         .iter()
-        .all(|declaration| matches!(declaration, MemoryDeclaration::Buffer { .. }))
+        .all(|declaration| matches!(declaration, ir::MemoryDeclaration::Buffer { .. }))
     {
         return;
     }
 
-    asm.push_str(".section .data\n");
+    asm::section(asm, "data");
 
     for declaration in memory {
         match declaration {
-            MemoryDeclaration::Scalar { name, width, value } => {
-                asm.push_str(&format!("{name}:\n"));
-                asm.push_str(&format!(
-                    "  {} {}\n",
-                    width.directive(),
-                    format_data_scalar(*width, *value)
-                ));
+            ir::MemoryDeclaration::Scalar { name, width, value } => {
+                asm::label(asm, name);
+                asm::scalar(asm, width.directive(), format_data_scalar(*width, *value));
             }
-            MemoryDeclaration::FloatScalar { name, width, value } => {
-                asm.push_str(&format!("{name}:\n"));
-                asm.push_str(&format!("  {} {value}\n", width.directive()));
+            ir::MemoryDeclaration::FloatScalar { name, width, value } => {
+                asm::label(asm, name);
+                asm::scalar(asm, width.directive(), value);
             }
-            MemoryDeclaration::Array {
+            ir::MemoryDeclaration::Array {
                 name,
                 width,
                 values,
             } => {
-                asm.push_str(&format!("{name}:\n"));
+                asm::label(asm, name);
                 emit_memory_values(asm, *width, values, labels);
             }
-            MemoryDeclaration::Repeat {
+            ir::MemoryDeclaration::Repeat {
                 name,
                 width,
                 count,
                 value,
             } => {
-                asm.push_str(&format!("{name}:\n"));
+                asm::label(asm, name);
                 for _ in 0..*count {
                     emit_memory_value(asm, *width, value, labels);
                 }
             }
-            MemoryDeclaration::Buffer { .. } => {}
+            ir::MemoryDeclaration::Buffer { .. } => {}
         }
     }
 
@@ -1551,7 +1766,7 @@ fn emit_data(asm: &mut String, memory: &[MemoryDeclaration], labels: &LabelSymbo
 fn emit_memory_values(
     asm: &mut String,
     width: MemoryWidth,
-    values: &[MemoryValue],
+    values: &[ir::MemoryValue],
     labels: &LabelSymbols,
 ) {
     for value in values {
@@ -1562,58 +1777,50 @@ fn emit_memory_values(
 fn emit_memory_value(
     asm: &mut String,
     width: MemoryWidth,
-    value: &MemoryValue,
+    value: &ir::MemoryValue,
     labels: &LabelSymbols,
 ) {
     match value {
-        MemoryValue::Integer(value) => {
-            asm.push_str(&format!(
-                "  {} {}\n",
-                width.directive(),
-                format_data_scalar(width, *value)
-            ));
+        ir::MemoryValue::Integer(value) => {
+            asm::scalar(asm, width.directive(), format_data_scalar(width, *value));
         }
-        MemoryValue::Addr { target } => {
-            asm.push_str(&format!("  .quad {}\n", labels.emit_label(target)));
+        ir::MemoryValue::Address { target } => {
+            asm::quad(asm, labels.emit_label(target));
         }
     }
 }
 
-fn emit_static_data(asm: &mut String, data: &[DataDeclaration], labels: &LabelSymbols) {
+fn emit_static_data(asm: &mut String, data: &[ir::DataDeclaration], labels: &LabelSymbols) {
     for declaration in data {
         let flags = if declaration.keep { "aR" } else { "a" };
-        asm.push_str(&format!(
-            ".section {}, \"{}\", @progbits\n",
-            declaration.section, flags
-        ));
+        asm::top_level_directive(
+            asm,
+            format_args!(".section {}, \"{}\", @progbits", declaration.section, flags),
+        );
 
         if declaration.export {
-            asm.push_str(&format!(".global {}\n", declaration.name));
+            asm::global(asm, &declaration.name);
         }
 
         if let Some(align) = declaration.align {
-            asm.push_str(&format!(".balign {align}\n"));
+            asm::top_level_directive(asm, format_args!(".balign {align}"));
         }
 
-        asm.push_str(&format!("{}:\n", declaration.name));
+        asm::label(asm, &declaration.name);
 
         for item in &declaration.items {
             match item {
-                DataItem::Scalar { width, value } => {
-                    asm.push_str(&format!(
-                        "  {} {}\n",
-                        width.directive(),
-                        format_data_scalar(*width, *value)
-                    ));
+                ir::DataItem::Scalar { width, value } => {
+                    asm::scalar(asm, width.directive(), format_data_scalar(*width, *value));
                 }
-                DataItem::Addr { target } => {
-                    asm.push_str(&format!("  .quad {}\n", labels.emit_label(target)));
+                ir::DataItem::Address { target } => {
+                    asm::quad(asm, labels.emit_label(target));
                 }
-                DataItem::Zero { count } => {
-                    asm.push_str(&format!("  .zero {count}\n"));
+                ir::DataItem::Zero { count } => {
+                    asm::zero(asm, count);
                 }
-                DataItem::Label { name } => {
-                    asm.push_str(&format!("{name}:\n"));
+                ir::DataItem::Label { name } => {
+                    asm::label(asm, name);
                 }
             }
         }
@@ -1630,15 +1837,15 @@ fn format_data_scalar(width: MemoryWidth, value: i128) -> String {
     }
 }
 
-fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
+fn emit_bss(asm: &mut String, memory: &[ir::MemoryDeclaration]) {
     let buffers: Vec<_> = memory
         .iter()
         .filter_map(|declaration| match declaration {
-            MemoryDeclaration::Scalar { .. }
-            | MemoryDeclaration::FloatScalar { .. }
-            | MemoryDeclaration::Array { .. }
-            | MemoryDeclaration::Repeat { .. } => None,
-            MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
+            ir::MemoryDeclaration::Scalar { .. }
+            | ir::MemoryDeclaration::FloatScalar { .. }
+            | ir::MemoryDeclaration::Array { .. }
+            | ir::MemoryDeclaration::Repeat { .. } => None,
+            ir::MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
         })
         .collect();
 
@@ -1646,11 +1853,11 @@ fn emit_bss(asm: &mut String, memory: &[MemoryDeclaration]) {
         return;
     }
 
-    asm.push_str(".section .bss\n");
+    asm::section(asm, "bss");
 
     for (name, width, count) in buffers {
-        asm.push_str(&format!("{name}:\n"));
-        asm.push_str(&format!("  .zero {}\n", width.size() * count));
+        asm::label(asm, name);
+        asm::zero(asm, width.size() * count);
     }
 
     asm.push('\n');
@@ -1664,13 +1871,13 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
     let mut bindings: Vec<_> = strings.iter().collect();
     bindings.sort_by(|left, right| left.asm_label.cmp(&right.asm_label));
 
-    asm.push_str(".section .rodata\n");
+    asm::section(asm, "rodata");
 
     for string in bindings {
-        asm.push_str(&format!("{}:\n", string.asm_label));
+        asm::label(asm, &string.asm_label);
 
         if string.value.is_empty() {
-            asm.push_str("  .byte 0\n");
+            asm::byte(asm, 0);
         } else {
             let bytes = string
                 .value
@@ -1680,7 +1887,7 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
                 .collect::<Vec<_>>()
                 .join(", ");
 
-            asm.push_str(&format!("  .byte {bytes}\n"));
+            asm::byte(asm, bytes);
         }
     }
 
@@ -1688,8 +1895,8 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
     float_bindings.sort_by(|left, right| left.asm_label.cmp(&right.asm_label));
 
     for float in float_bindings {
-        asm.push_str(&format!("{}:\n", float.asm_label));
-        asm.push_str(&format!("  {} {}\n", float.width.directive(), float.value));
+        asm::label(asm, &float.asm_label);
+        asm::scalar(asm, float.width.directive(), &float.value);
     }
 
     asm.push('\n');
@@ -1697,7 +1904,7 @@ fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBindi
 
 fn emit_print_string_instruction(asm: &mut String, string: &StringBinding) {
     emit_print_volatile_pushes(asm);
-    x86_64::emit_linux_write_label(asm, &string.asm_label, string.value.len());
+    emit_linux_write_label(asm, &string.asm_label, string.value.len());
     emit_print_volatile_pops(asm);
 }
 
@@ -1722,9 +1929,9 @@ fn ir_print_part_to_ast(part: &ir::PrintPart) -> PrintPart {
 
 fn emit_print_volatile_pushes(asm: &mut String) {
     for register in ["rax", "rcx", "rdi", "rsi", "rdx", "r11"] {
-        machine::emit(
-            &machine::Instruction::Push {
-                src: machine::Operand::Register(String::from(register)),
+        asm::emit(
+            &asm::Instruction::Push {
+                src: asm::Operand::Register(String::from(register)),
             },
             asm,
         );
@@ -1733,9 +1940,9 @@ fn emit_print_volatile_pushes(asm: &mut String) {
 
 fn emit_print_volatile_pops(asm: &mut String) {
     for register in ["r11", "rdx", "rsi", "rdi", "rcx", "rax"] {
-        machine::emit(
-            &machine::Instruction::Pop {
-                dst: machine::Operand::Register(String::from(register)),
+        asm::emit(
+            &asm::Instruction::Pop {
+                dst: asm::Operand::Register(String::from(register)),
             },
             asm,
         );
@@ -1782,23 +1989,23 @@ fn emit_print_operand_instruction(
     let prefix_done_label = format!(".L.__subsea.{label_name}.print_{index}_prefix_done");
     let digit_decimal_label = format!(".L.__subsea.{label_name}.print_{index}_digit_decimal");
 
-    machine::emit(
-        &machine::Instruction::Push {
-            src: machine::Operand::Register(String::from("rbx")),
+    asm::emit(
+        &asm::Instruction::Push {
+            src: asm::Operand::Register(String::from("rbx")),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::StackAdjust {
+    asm::emit(
+        &asm::Instruction::StackAdjust {
             opcode: String::from("sub"),
             register: String::from("rsp"),
             amount: 80,
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::LoadAddress {
-            dst: machine::Operand::Register(String::from("rsi")),
+    asm::emit(
+        &asm::Instruction::LoadAddress {
+            dst: asm::Operand::Register(String::from("rsi")),
             address: String::from("[rsp + 80]"),
         },
         asm,
@@ -1806,270 +2013,270 @@ fn emit_print_operand_instruction(
     match format {
         PrintFormat::Infer => unreachable!(),
         PrintFormat::SignedDecimal(_) => {
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Register(String::from("rbx")),
-                    src: machine::Operand::Immediate(10),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Register(String::from("rbx")),
+                    src: asm::Operand::Immediate(10),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: machine::Operand::Immediate(0),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
+                    src: asm::Operand::Immediate(0),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Compare {
+            asm::emit(
+                &asm::Instruction::Compare {
                     opcode: String::from("cmp"),
-                    lhs: machine::Operand::Register(String::from("rax")),
-                    rhs: machine::Operand::Immediate(0),
+                    lhs: asm::Operand::Register(String::from("rax")),
+                    rhs: asm::Operand::Immediate(0),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Branch {
+            asm::emit(
+                &asm::Instruction::Branch {
                     opcode: String::from("jl"),
-                    target: machine::Operand::Address(negative_label.clone()),
+                    target: asm::Operand::Address(negative_label.clone()),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Jump {
-                    target: machine::Operand::Address(digits_label.clone()),
+            asm::emit(
+                &asm::Instruction::Jump {
+                    target: asm::Operand::Address(digits_label.clone()),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Label {
+            asm::emit(
+                &asm::Instruction::Label {
                     name: negative_label.clone(),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Unary {
+            asm::emit(
+                &asm::Instruction::Unary {
                     opcode: String::from("neg"),
-                    operand: machine::Operand::Register(String::from("rax")),
+                    operand: asm::Operand::Register(String::from("rax")),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: machine::Operand::Immediate(45),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
+                    src: asm::Operand::Immediate(45),
                 },
                 asm,
             );
         }
         PrintFormat::UnsignedDecimal(_) => {
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Register(String::from("rbx")),
-                    src: machine::Operand::Immediate(10),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Register(String::from("rbx")),
+                    src: asm::Operand::Immediate(10),
                 },
                 asm,
             );
         }
         PrintFormat::Hex | PrintFormat::Pointer => {
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Register(String::from("rbx")),
-                    src: machine::Operand::Immediate(16),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Register(String::from("rbx")),
+                    src: asm::Operand::Immediate(16),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: machine::Operand::Immediate(48),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
+                    src: asm::Operand::Immediate(48),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp + 1]")),
-                    src: machine::Operand::Immediate(120),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
+                    src: asm::Operand::Immediate(120),
                 },
                 asm,
             );
         }
         PrintFormat::Binary => {
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Register(String::from("rbx")),
-                    src: machine::Operand::Immediate(2),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Register(String::from("rbx")),
+                    src: asm::Operand::Immediate(2),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: machine::Operand::Immediate(48),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
+                    src: asm::Operand::Immediate(48),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsp + 1]")),
-                    src: machine::Operand::Immediate(98),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
+                    src: asm::Operand::Immediate(98),
                 },
                 asm,
             );
         }
     }
-    machine::emit(
-        &machine::Instruction::Label {
+    asm::emit(
+        &asm::Instruction::Label {
             name: digits_label.clone(),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Label {
+    asm::emit(
+        &asm::Instruction::Label {
             name: loop_label.clone(),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Binary {
+    asm::emit(
+        &asm::Instruction::Binary {
             opcode: String::from("xor"),
-            dst: machine::Operand::Register(String::from("rdx")),
-            src: machine::Operand::Register(String::from("rdx")),
+            dst: asm::Operand::Register(String::from("rdx")),
+            src: asm::Operand::Register(String::from("rdx")),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::WideMath {
+    asm::emit(
+        &asm::Instruction::WideMath {
             opcode: String::from("div"),
-            operand: machine::Operand::Register(String::from("rbx")),
+            operand: asm::Operand::Register(String::from("rbx")),
         },
         asm,
     );
     if matches!(format, PrintFormat::Hex | PrintFormat::Pointer) {
-        machine::emit(
-            &machine::Instruction::Compare {
+        asm::emit(
+            &asm::Instruction::Compare {
                 opcode: String::from("cmp"),
-                lhs: machine::Operand::Register(String::from("dl")),
-                rhs: machine::Operand::Immediate(9),
+                lhs: asm::Operand::Register(String::from("dl")),
+                rhs: asm::Operand::Immediate(9),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Branch {
+        asm::emit(
+            &asm::Instruction::Branch {
                 opcode: String::from("jbe"),
-                target: machine::Operand::Address(digit_decimal_label.clone()),
+                target: asm::Operand::Address(digit_decimal_label.clone()),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Binary {
+        asm::emit(
+            &asm::Instruction::Binary {
                 opcode: String::from("add"),
-                dst: machine::Operand::Register(String::from("dl")),
-                src: machine::Operand::Immediate(87),
+                dst: asm::Operand::Register(String::from("dl")),
+                src: asm::Operand::Immediate(87),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Jump {
-                target: machine::Operand::Address(prefix_done_label.clone()),
+        asm::emit(
+            &asm::Instruction::Jump {
+                target: asm::Operand::Address(prefix_done_label.clone()),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Label {
+        asm::emit(
+            &asm::Instruction::Label {
                 name: digit_decimal_label.clone(),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Binary {
+        asm::emit(
+            &asm::Instruction::Binary {
                 opcode: String::from("add"),
-                dst: machine::Operand::Register(String::from("dl")),
-                src: machine::Operand::Immediate(48),
+                dst: asm::Operand::Register(String::from("dl")),
+                src: asm::Operand::Immediate(48),
             },
             asm,
         );
-        machine::emit(
-            &machine::Instruction::Label {
+        asm::emit(
+            &asm::Instruction::Label {
                 name: prefix_done_label.clone(),
             },
             asm,
         );
     } else {
-        machine::emit(
-            &machine::Instruction::Binary {
+        asm::emit(
+            &asm::Instruction::Binary {
                 opcode: String::from("add"),
-                dst: machine::Operand::Register(String::from("dl")),
-                src: machine::Operand::Immediate(48),
+                dst: asm::Operand::Register(String::from("dl")),
+                src: asm::Operand::Immediate(48),
             },
             asm,
         );
     }
-    machine::emit(
-        &machine::Instruction::Binary {
+    asm::emit(
+        &asm::Instruction::Binary {
             opcode: String::from("sub"),
-            dst: machine::Operand::Register(String::from("rsi")),
-            src: machine::Operand::Immediate(1),
+            dst: asm::Operand::Register(String::from("rsi")),
+            src: asm::Operand::Immediate(1),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Move {
-            dst: machine::Operand::Address(String::from("byte ptr [rsi]")),
-            src: machine::Operand::Register(String::from("dl")),
+    asm::emit(
+        &asm::Instruction::Move {
+            dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
+            src: asm::Operand::Register(String::from("dl")),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Compare {
+    asm::emit(
+        &asm::Instruction::Compare {
             opcode: String::from("cmp"),
-            lhs: machine::Operand::Register(String::from("rax")),
-            rhs: machine::Operand::Immediate(0),
+            lhs: asm::Operand::Register(String::from("rax")),
+            rhs: asm::Operand::Immediate(0),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Branch {
+    asm::emit(
+        &asm::Instruction::Branch {
             opcode: String::from("jne"),
-            target: machine::Operand::Address(loop_label.clone()),
+            target: asm::Operand::Address(loop_label.clone()),
         },
         asm,
     );
     match format {
         PrintFormat::Infer => unreachable!(),
         PrintFormat::SignedDecimal(_) => {
-            machine::emit(
-                &machine::Instruction::Compare {
+            asm::emit(
+                &asm::Instruction::Compare {
                     opcode: String::from("cmp"),
-                    lhs: machine::Operand::Address(String::from("byte ptr [rsp]")),
-                    rhs: machine::Operand::Immediate(45),
+                    lhs: asm::Operand::Address(String::from("byte ptr [rsp]")),
+                    rhs: asm::Operand::Immediate(45),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Branch {
+            asm::emit(
+                &asm::Instruction::Branch {
                     opcode: String::from("jne"),
-                    target: machine::Operand::Address(prefix_done_label.clone()),
+                    target: asm::Operand::Address(prefix_done_label.clone()),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Binary {
+            asm::emit(
+                &asm::Instruction::Binary {
                     opcode: String::from("sub"),
-                    dst: machine::Operand::Register(String::from("rsi")),
-                    src: machine::Operand::Immediate(1),
+                    dst: asm::Operand::Register(String::from("rsi")),
+                    src: asm::Operand::Immediate(1),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Move {
-                    dst: machine::Operand::Address(String::from("byte ptr [rsi]")),
-                    src: machine::Operand::Immediate(45),
+            asm::emit(
+                &asm::Instruction::Move {
+                    dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
+                    src: asm::Operand::Immediate(45),
                 },
                 asm,
             );
-            machine::emit(
-                &machine::Instruction::Label {
+            asm::emit(
+                &asm::Instruction::Label {
                     name: prefix_done_label.clone(),
                 },
                 asm,
@@ -2082,18 +2289,18 @@ fn emit_print_operand_instruction(
                 _ => 120,
             };
             for value in [marker, 48] {
-                machine::emit(
-                    &machine::Instruction::Binary {
+                asm::emit(
+                    &asm::Instruction::Binary {
                         opcode: String::from("sub"),
-                        dst: machine::Operand::Register(String::from("rsi")),
-                        src: machine::Operand::Immediate(1),
+                        dst: asm::Operand::Register(String::from("rsi")),
+                        src: asm::Operand::Immediate(1),
                     },
                     asm,
                 );
-                machine::emit(
-                    &machine::Instruction::Move {
-                        dst: machine::Operand::Address(String::from("byte ptr [rsi]")),
-                        src: machine::Operand::Immediate(value),
+                asm::emit(
+                    &asm::Instruction::Move {
+                        dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
+                        src: asm::Operand::Immediate(value),
                     },
                     asm,
                 );
@@ -2101,33 +2308,33 @@ fn emit_print_operand_instruction(
         }
         PrintFormat::UnsignedDecimal(_) => {}
     }
-    machine::emit(
-        &machine::Instruction::LoadAddress {
-            dst: machine::Operand::Register(String::from("rdx")),
+    asm::emit(
+        &asm::Instruction::LoadAddress {
+            dst: asm::Operand::Register(String::from("rdx")),
             address: String::from("[rsp + 80]"),
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Binary {
+    asm::emit(
+        &asm::Instruction::Binary {
             opcode: String::from("sub"),
-            dst: machine::Operand::Register(String::from("rdx")),
-            src: machine::Operand::Register(String::from("rsi")),
+            dst: asm::Operand::Register(String::from("rdx")),
+            src: asm::Operand::Register(String::from("rsi")),
         },
         asm,
     );
-    x86_64::emit_linux_write_registers(asm);
-    machine::emit(
-        &machine::Instruction::StackAdjust {
+    emit_linux_write_registers(asm);
+    asm::emit(
+        &asm::Instruction::StackAdjust {
             opcode: String::from("add"),
             register: String::from("rsp"),
             amount: 80,
         },
         asm,
     );
-    machine::emit(
-        &machine::Instruction::Pop {
-            dst: machine::Operand::Register(String::from("rbx")),
+    asm::emit(
+        &asm::Instruction::Pop {
+            dst: asm::Operand::Register(String::from("rbx")),
         },
         asm,
     );
@@ -2292,21 +2499,17 @@ fn emit_print_stack_string_instruction(
         .ok_or_else(|| format!("Unknown string stack variable {name:?}"))?;
 
     emit_print_volatile_pushes(asm);
-    machine::emit(
-        &machine::Instruction::Load {
-            dst: machine::Operand::Register(String::from("rsi")),
-            src: machine::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
-        },
+    asm::load(
         asm,
+        asm::Operand::Register(String::from("rsi")),
+        asm::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
     );
-    machine::emit(
-        &machine::Instruction::Load {
-            dst: machine::Operand::Register(String::from("rdx")),
-            src: machine::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
-        },
+    asm::load(
         asm,
+        asm::Operand::Register(String::from("rdx")),
+        asm::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
     );
-    x86_64::emit_linux_write_registers(asm);
+    emit_linux_write_registers(asm);
     emit_print_volatile_pops(asm);
 
     Ok(())
@@ -2331,10 +2534,11 @@ fn emit_stack_string_initializer(
                 .ok_or_else(|| format!("Unknown string literal for stack variable {name:?}"))?;
 
             emit_stack_string_address(asm, &string.asm_label, ptr_offset);
-            asm.push_str(&format!(
-                "  mov qword ptr [rbp - {len_offset}], {}\n",
-                string.value.len()
-            ));
+            asm::mov(
+                asm,
+                asm::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
+                asm::Operand::Immediate(string.value.len() as i128),
+            );
         }
         StringInitializer::Slice { ptr, len } => {
             emit_stack_string_slice_pointer(asm, ptr, strings, label_name, stack, ptr_offset)?;
@@ -2346,10 +2550,18 @@ fn emit_stack_string_initializer(
 }
 
 fn emit_stack_string_address(asm: &mut String, label: &str, ptr_offset: usize) {
-    asm.push_str("  push r10\n");
-    asm.push_str(&format!("  lea r10, [rip + {label}]\n"));
-    asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], r10\n"));
-    asm.push_str("  pop r10\n");
+    asm::push(asm, asm::Operand::Register(String::from("r10")));
+    asm::lea(
+        asm,
+        asm::Operand::Register(String::from("r10")),
+        format!("[rip + {label}]"),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
+        asm::Operand::Register(String::from("r10")),
+    );
+    asm::pop(asm, asm::Operand::Register(String::from("r10")));
 }
 
 fn emit_stack_string_slice_pointer(
@@ -2366,16 +2578,28 @@ fn emit_stack_string_slice_pointer(
             Ok(())
         }
         Operand::AddressOf(address) => {
-            asm.push_str("  push r10\n");
+            asm::push(asm, asm::Operand::Register(String::from("r10")));
             let address = emit_address(address);
-            asm.push_str(&format!("  lea r10, [{address}]\n"));
-            asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], r10\n"));
-            asm.push_str("  pop r10\n");
+            asm::lea(
+                asm,
+                asm::Operand::Register(String::from("r10")),
+                format!("[{address}]"),
+            );
+            asm::mov(
+                asm,
+                asm::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
+                asm::Operand::Register(String::from("r10")),
+            );
+            asm::pop(asm, asm::Operand::Register(String::from("r10")));
             Ok(())
         }
         Operand::Register(name) => match register_width(name) {
             Some(Width::Bits64) => {
-                asm.push_str(&format!("  mov qword ptr [rbp - {ptr_offset}], {name}\n"));
+                asm::mov(
+                    asm,
+                    asm::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
+                    asm::Operand::Register(name.clone()),
+                );
                 Ok(())
             }
             Some(width) => Err(format!(
@@ -2405,7 +2629,11 @@ fn emit_stack_string_slice_len(
 ) -> Result<(), String> {
     if let Some(value) = immediate_value(len, strings, label_name, stack) {
         validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
-        asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], {value}\n"));
+        asm::mov(
+            asm,
+            asm::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
+            asm::Operand::Immediate(value),
+        );
         return Ok(());
     }
 
@@ -2413,14 +2641,24 @@ fn emit_stack_string_slice_len(
         Some(Width::Bits64) => {
             let emitted_len = emit_operand(len, strings, label_name, stack)?;
             if is_memory_operand(len, stack) {
-                asm.push_str("  push r10\n");
-                asm.push_str(&format!("  mov r10, {emitted_len}\n"));
-                asm.push_str(&format!("  mov qword ptr [rbp - {len_offset}], r10\n"));
-                asm.push_str("  pop r10\n");
+                asm::push(asm, asm::Operand::Register(String::from("r10")));
+                asm::mov(
+                    asm,
+                    asm::Operand::Register(String::from("r10")),
+                    asm::Operand::Address(emitted_len),
+                );
+                asm::mov(
+                    asm,
+                    asm::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
+                    asm::Operand::Register(String::from("r10")),
+                );
+                asm::pop(asm, asm::Operand::Register(String::from("r10")));
             } else {
-                asm.push_str(&format!(
-                    "  mov qword ptr [rbp - {len_offset}], {emitted_len}\n"
-                ));
+                asm::mov(
+                    asm,
+                    asm::Operand::Address(format!("qword ptr [rbp - {len_offset}]")),
+                    asm::Operand::Address(emitted_len),
+                );
             }
             Ok(())
         }
@@ -2446,7 +2684,7 @@ fn emit_read_instruction(
     emit_read_len_arg(asm, len, strings, label_name, stack)?;
     emit_read_dst_arg(asm, dst)?;
     emit_read_src_arg(asm, src);
-    x86_64::emit_linux_read(asm);
+    emit_linux_read(asm);
 
     Ok(())
 }
@@ -2460,12 +2698,32 @@ fn emit_linux_reserve_assignment(
     stack: &StackFrame,
 ) -> Result<(), BackendError> {
     emit_reserve_len_arg(asm, len, strings, label_name, stack)?;
-    asm.push_str(&format!("  mov rdi, {}\n", linux::STDIN));
-    asm.push_str("  mov rdx, 3\n");
-    asm.push_str("  mov r10, 34\n");
-    asm.push_str("  mov r8, -1\n");
-    asm.push_str("  mov r9, 0\n");
-    x86_64::emit_linux_mmap(asm);
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("rdi")),
+        asm::Operand::Immediate(linux::STDIN as i128),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("rdx")),
+        asm::Operand::Immediate(3),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("r10")),
+        asm::Operand::Immediate(34),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("r8")),
+        asm::Operand::Immediate(-1),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("r9")),
+        asm::Operand::Immediate(0),
+    );
+    emit_linux_mmap(asm);
 
     if dst != &Operand::Register(String::from("rax")) {
         emit_copy_instruction(
@@ -2491,7 +2749,7 @@ fn emit_release_instruction(
 ) -> Result<(), BackendError> {
     emit_release_ptr_arg(asm, ptr, strings, label_name, stack)?;
     emit_release_len_arg(asm, len, strings, label_name, stack)?;
-    x86_64::emit_linux_munmap(asm);
+    emit_linux_munmap(asm);
 
     Ok(())
 }
@@ -2541,13 +2799,21 @@ fn emit_linux_memory_pointer_arg(
 ) -> Result<(), String> {
     match ptr {
         Operand::Pointer(name) => {
-            asm.push_str(&format!("  lea rdi, [rip + {name}]\n"));
+            asm::lea(
+                asm,
+                asm::Operand::Register(String::from("rdi")),
+                format!("[rip + {name}]"),
+            );
             Ok(())
         }
         _ => match operand_width(ptr, strings, label_name, stack)? {
             Some(Width::Bits64) => {
                 let ptr = emit_operand(ptr, strings, label_name, stack)?;
-                asm.push_str(&format!("  mov rdi, {ptr}\n"));
+                asm::mov(
+                    asm,
+                    asm::Operand::Register(String::from("rdi")),
+                    asm::Operand::Address(ptr),
+                );
                 Ok(())
             }
             Some(width) => Err(format!(
@@ -2572,14 +2838,22 @@ fn emit_linux_memory_size_arg(
 ) -> Result<(), String> {
     if let Some(value) = immediate_value(len, strings, label_name, stack) {
         validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
-        asm.push_str(&format!("  mov {dst_register}, {value}\n"));
+        asm::mov(
+            asm,
+            asm::Operand::Register(String::from(dst_register)),
+            asm::Operand::Immediate(value),
+        );
         return Ok(());
     }
 
     match operand_width(len, strings, label_name, stack)? {
         Some(Width::Bits64) => {
             let len = emit_operand(len, strings, label_name, stack)?;
-            asm.push_str(&format!("  mov {dst_register}, {len}\n"));
+            asm::mov(
+                asm,
+                asm::Operand::Register(String::from(dst_register)),
+                asm::Operand::Address(len),
+            );
             Ok(())
         }
         Some(width) => Err(format!(
@@ -2594,14 +2868,22 @@ fn emit_linux_memory_size_arg(
 
 fn emit_read_src_arg(asm: &mut String, src: &ReadSource) {
     match src {
-        ReadSource::Stdin => asm.push_str(&format!("  mov rdi, {}\n", linux::STDIN)),
+        ReadSource::Stdin => asm::mov(
+            asm,
+            asm::Operand::Register(String::from("rdi")),
+            asm::Operand::Immediate(linux::STDIN as i128),
+        ),
     }
 }
 
 fn emit_read_dst_arg(asm: &mut String, dst: &Operand) -> Result<(), String> {
     match dst {
         Operand::Pointer(name) => {
-            asm.push_str(&format!("  lea rsi, [rip + {name}]\n"));
+            asm::lea(
+                asm,
+                asm::Operand::Register(String::from("rsi")),
+                format!("[rip + {name}]"),
+            );
             Ok(())
         }
         Operand::Register(name) => {
@@ -2613,7 +2895,11 @@ fn emit_read_dst_arg(asm: &mut String, dst: &Operand) -> Result<(), String> {
 
             match register_width(name) {
                 Some(Width::Bits64) => {
-                    asm.push_str(&format!("  mov rsi, {name}\n"));
+                    asm::mov(
+                        asm,
+                        asm::Operand::Register(String::from("rsi")),
+                        asm::Operand::Register(name.clone()),
+                    );
                     Ok(())
                 }
                 Some(width) => Err(format!(
@@ -2640,14 +2926,22 @@ fn emit_read_len_arg(
 ) -> Result<(), String> {
     if let Some(value) = immediate_value(len, strings, label_name, stack) {
         validate_immediate_range(value, ImmediateDestination::Memory(MemoryWidth::U64))?;
-        asm.push_str(&format!("  mov rdx, {value}\n"));
+        asm::mov(
+            asm,
+            asm::Operand::Register(String::from("rdx")),
+            asm::Operand::Immediate(value),
+        );
         return Ok(());
     }
 
     match operand_width(len, strings, label_name, stack)? {
         Some(Width::Bits64) => {
             let len = emit_operand(len, strings, label_name, stack)?;
-            asm.push_str(&format!("  mov rdx, {len}\n"));
+            asm::mov(
+                asm,
+                asm::Operand::Register(String::from("rdx")),
+                asm::Operand::Address(len),
+            );
             Ok(())
         }
         Some(width) => Err(format!(
@@ -2670,7 +2964,7 @@ fn load_print_operand(
 ) -> Result<(), String> {
     if matches!(operand, Operand::Immediate(_)) {
         let operand = emit_operand(operand, strings, label_name, stack)?;
-        asm.push_str(&format!("  mov rax, {operand}\n"));
+        asm::instruction(asm, format_args!("mov rax, {operand}"));
         return Ok(());
     }
 
@@ -2678,31 +2972,31 @@ fn load_print_operand(
 
     match format {
         PrintFormat::SignedDecimal(MemoryWidth::I8) => {
-            asm.push_str(&format!("  movsx rax, {operand}\n"));
+            asm::instruction(asm, format_args!("movsx rax, {operand}"));
         }
         PrintFormat::SignedDecimal(MemoryWidth::I16) => {
-            asm.push_str(&format!("  movsx rax, {operand}\n"));
+            asm::instruction(asm, format_args!("movsx rax, {operand}"));
         }
         PrintFormat::SignedDecimal(MemoryWidth::I32) => {
-            asm.push_str(&format!("  movsxd rax, {operand}\n"));
+            asm::instruction(asm, format_args!("movsxd rax, {operand}"));
         }
         PrintFormat::SignedDecimal(MemoryWidth::I64) => {
-            asm.push_str(&format!("  mov rax, {operand}\n"));
+            asm::instruction(asm, format_args!("mov rax, {operand}"));
         }
         PrintFormat::UnsignedDecimal(MemoryWidth::U8) => {
-            asm.push_str(&format!("  movzx rax, {operand}\n"));
+            asm::instruction(asm, format_args!("movzx rax, {operand}"));
         }
         PrintFormat::UnsignedDecimal(MemoryWidth::U16) => {
-            asm.push_str(&format!("  movzx rax, {operand}\n"));
+            asm::instruction(asm, format_args!("movzx rax, {operand}"));
         }
         PrintFormat::UnsignedDecimal(MemoryWidth::U32) => {
-            asm.push_str(&format!("  mov eax, {operand}\n"));
+            asm::instruction(asm, format_args!("mov eax, {operand}"));
         }
         PrintFormat::UnsignedDecimal(MemoryWidth::U64)
         | PrintFormat::Hex
         | PrintFormat::Binary
         | PrintFormat::Pointer => {
-            asm.push_str(&format!("  mov rax, {operand}\n"));
+            asm::instruction(asm, format_args!("mov rax, {operand}"));
         }
         PrintFormat::Infer | PrintFormat::SignedDecimal(_) | PrintFormat::UnsignedDecimal(_) => {
             unreachable!()
@@ -2725,7 +3019,7 @@ fn emit_binary_instruction(
 
     let src = emit_operand(src, strings, label_name, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
-    asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
+    asm::instruction(asm, format_args!("{opcode} {dst}, {src}"));
 
     Ok(())
 }
@@ -2775,7 +3069,7 @@ fn emit_shift_instruction(
 
     let count = emit_operand(count, strings, label_name, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
-    asm.push_str(&format!("  {opcode} {dst}, {count}\n"));
+    asm::instruction(asm, format_args!("{opcode} {dst}, {count}"));
 
     Ok(())
 }
@@ -2792,7 +3086,7 @@ fn emit_bitwise_unary_instruction(
 
     validate_bitwise_unary_operand(opcode, dst, strings, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
-    asm.push_str(&format!("  {opcode} {dst}\n"));
+    asm::instruction(asm, format_args!("{opcode} {dst}"));
 
     Ok(())
 }
@@ -2925,20 +3219,37 @@ fn emit_ir_assignment(
         return Err(String::from("Expected an IR assignment"));
     };
 
+    // Keep the established x86 validation and special-case diagnostics while
+    // allowing the normal emission below to consume IR operands directly.
+    let mut validation_asm = String::new();
+    let (legacy_dst, legacy_value) = ir_assignment_to_ast(instruction)?;
+    emit_assignment_legacy(
+        &mut validation_asm,
+        &legacy_dst,
+        &legacy_value,
+        strings,
+        label_name,
+        stack,
+    )?;
+
     match value {
         ir::Value::Operand(src) => {
-            let dst = match instruction {
-                ir::Instruction::Assign { dst, .. } => dst,
-                _ => unreachable!(),
-            };
-            emit_ir_copy_instruction(asm, src, dst, strings, label_name, stack)
+            let _ = src;
+            emit_assignment_legacy(asm, &legacy_dst, &legacy_value, strings, label_name, stack)
         }
         ir::Value::Binary { op, lhs, rhs }
             if is_direct_ir_operand(dst)
                 && is_direct_ir_operand(lhs)
                 && is_direct_ir_operand(rhs) =>
         {
-            emit_ir_integer_binary_assignment(asm, dst, *op, lhs, rhs, strings, label_name, stack)
+            if *op == MathOp::Power || ir_binary_may_be_float(lhs, rhs) {
+                let (dst, value) = ir_assignment_to_ast(instruction)?;
+                emit_assignment_legacy(asm, &dst, &value, strings, label_name, stack)
+            } else {
+                emit_ir_integer_binary_assignment(
+                    asm, dst, *op, lhs, rhs, strings, label_name, stack,
+                )
+            }
         }
         ir::Value::Binary { op, lhs, rhs } => {
             let dst = ir_operand_to_ast(dst);
@@ -2998,11 +3309,11 @@ fn emit_ir_float_binary_assignment(
 
     if lhs != dst {
         let lhs = emit_ir_float_operand(lhs, width, strings, label_name, stack)?;
-        machine::emit(
-            &machine::Instruction::FloatMove {
-                opcode: float_move_opcode_for_width(width)?.to_owned(),
-                dst: machine::Operand::Register(dst_register.clone()),
-                src: machine::Operand::Address(lhs),
+        asm::emit(
+            &asm::Instruction::FloatMove {
+                opcode: x86_float_move_opcode(width)?.to_owned(),
+                dst: asm::Operand::Register(dst_register.clone()),
+                src: asm::Operand::Address(lhs),
             },
             asm,
         );
@@ -3019,11 +3330,11 @@ fn emit_ir_float_binary_assignment(
     } else {
         emit_ir_float_operand(rhs, width, strings, label_name, stack)?
     };
-    machine::emit(
-        &machine::Instruction::FloatBinary {
+    asm::emit(
+        &asm::Instruction::FloatBinary {
             opcode: float_math_opcode(op, width).to_owned(),
-            dst: machine::Operand::Register(dst_register.clone()),
-            src: machine::Operand::Address(rhs),
+            dst: asm::Operand::Register(dst_register.clone()),
+            src: asm::Operand::Address(rhs),
         },
         asm,
     );
@@ -3060,7 +3371,7 @@ fn emit_ir_float_operand(
                 binding.asm_label
             ))
         }
-        _ => emit_x86_ir_operand(operand, strings, label_name, stack),
+        _ => emit_ir_operand(operand, strings, label_name, stack),
     }
 }
 
@@ -3074,16 +3385,23 @@ fn emit_ir_float_copy_instruction(
     stack: &StackFrame,
 ) -> Result<(), String> {
     let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
-    let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
-    machine::emit(
-        &machine::Instruction::FloatMove {
-            opcode: float_move_opcode_for_width(width)?.to_owned(),
-            dst: machine::Operand::Address(dst),
-            src: machine::Operand::Address(src),
+    let dst = emit_ir_operand(dst, strings, label_name, stack)?;
+    asm::emit(
+        &asm::Instruction::FloatMove {
+            opcode: x86_float_move_opcode(width)?.to_owned(),
+            dst: asm::Operand::Address(dst),
+            src: asm::Operand::Address(src),
         },
         asm,
     );
     Ok(())
+}
+
+fn ir_binary_may_be_float(lhs: &ir::Operand, rhs: &ir::Operand) -> bool {
+    [lhs, rhs].into_iter().any(|operand| {
+        matches!(operand, ir::Operand::FloatLiteral(_))
+            || matches!(operand, ir::Operand::TargetRegister(name) if is_xmm_register(name))
+    })
 }
 
 fn ir_assignment_to_ast(
@@ -3259,8 +3577,8 @@ fn emit_ir_integer_binary_assignment(
             return emit_ir_integer_math_instruction(asm, op, lhs, dst, strings, label_name, stack);
         }
         if op == MathOp::Subtract {
-            let dst_text = emit_x86_ir_operand(dst, strings, label_name, stack)?;
-            asm.push_str(&format!("  neg {dst_text}\n"));
+            let dst_text = emit_ir_operand(dst, strings, label_name, stack)?;
+            asm::instruction(asm, format_args!("neg {dst_text}"));
             return emit_ir_binary_instruction(asm, "add", lhs, dst, strings, label_name, stack);
         }
         return Err(format!(
@@ -3302,12 +3620,12 @@ fn emit_ir_binary_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    let instruction = machine::Instruction::Binary {
+    let instruction = asm::Instruction::Binary {
         opcode: opcode.to_owned(),
         dst: ir_machine_operand(dst, strings, label_name, stack)?,
         src: ir_machine_operand(src, strings, label_name, stack)?,
     };
-    machine::emit(&instruction, asm);
+    asm::emit(&instruction, asm);
     Ok(())
 }
 
@@ -3401,24 +3719,20 @@ fn emit_ir_copy_instruction(
     let dst_machine = ir_machine_operand(dst, strings, label_name, stack)?;
     let src_machine = ir_machine_operand(src, strings, label_name, stack)?;
     let instruction = match (&dst_machine, &src_machine) {
-        (machine::Operand::Address(_) | machine::Operand::Memory(_), _) => {
-            machine::Instruction::Store {
-                dst: dst_machine,
-                src: src_machine,
-            }
-        }
-        (_, machine::Operand::Address(_) | machine::Operand::Memory(_)) => {
-            machine::Instruction::Load {
-                dst: dst_machine,
-                src: src_machine,
-            }
-        }
-        _ => machine::Instruction::Move {
+        (asm::Operand::Address(_) | asm::Operand::Memory(_), _) => asm::Instruction::Store {
+            dst: dst_machine,
+            src: src_machine,
+        },
+        (_, asm::Operand::Address(_) | asm::Operand::Memory(_)) => asm::Instruction::Load {
+            dst: dst_machine,
+            src: src_machine,
+        },
+        _ => asm::Instruction::Move {
             dst: dst_machine,
             src: src_machine,
         },
     };
-    machine::emit(&instruction, asm);
+    asm::emit(&instruction, asm);
     Ok(())
 }
 
@@ -3427,18 +3741,18 @@ fn ir_machine_operand(
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
-) -> Result<machine::Operand, String> {
+) -> Result<asm::Operand, String> {
     match operand {
-        ir::Operand::Immediate(value) => Ok(machine::Operand::Immediate(*value)),
-        ir::Operand::TargetRegister(name) => Ok(machine::Operand::Register(name.clone())),
+        ir::Operand::Immediate(value) => Ok(asm::Operand::Immediate(*value)),
+        ir::Operand::TargetRegister(name) => Ok(asm::Operand::Register(name.clone())),
         ir::Operand::Memory {
             address,
             width: Some(width),
-        } => Ok(machine::Operand::Memory(ir_machine_memory_address(
+        } => Ok(asm::Operand::Memory(ir_machine_memory_address(
             address,
             Some(*width),
         ))),
-        _ => Ok(machine::Operand::Address(emit_x86_ir_operand(
+        _ => Ok(asm::Operand::Address(emit_ir_operand(
             operand, strings, label_name, stack,
         )?)),
     }
@@ -3447,18 +3761,18 @@ fn ir_machine_operand(
 fn ir_machine_memory_address(
     address: &ir::Address,
     width: Option<MemoryWidth>,
-) -> machine::MemoryAddress {
-    machine::MemoryAddress {
+) -> asm::MemoryAddress {
+    asm::MemoryAddress {
         width: width.map(|width| width.ptr().to_owned()),
         terms: std::iter::once((
-            machine::AddressOperator::Add,
+            asm::AddressOperator::Add,
             ir_machine_address_term(&address.first),
         ))
         .chain(address.rest.iter().map(|(operator, term)| {
             (
                 match operator {
-                    ir::AddressOperator::Add => machine::AddressOperator::Add,
-                    ir::AddressOperator::Subtract => machine::AddressOperator::Subtract,
+                    ir::AddressOperator::Add => asm::AddressOperator::Add,
+                    ir::AddressOperator::Subtract => asm::AddressOperator::Subtract,
                 },
                 ir_machine_address_term(term),
             )
@@ -3467,15 +3781,13 @@ fn ir_machine_memory_address(
     }
 }
 
-fn ir_machine_address_term(term: &ir::AddressTerm) -> machine::AddressTerm {
+fn ir_machine_address_term(term: &ir::AddressTerm) -> asm::AddressTerm {
     match term {
-        ir::AddressTerm::Immediate(value) => machine::AddressTerm::Immediate(*value),
-        ir::AddressTerm::Name(name) => machine::AddressTerm::Symbol(name.clone()),
-        ir::AddressTerm::TargetRegister(register) => {
-            machine::AddressTerm::Register(register.clone())
-        }
+        ir::AddressTerm::Immediate(value) => asm::AddressTerm::Immediate(*value),
+        ir::AddressTerm::Name(name) => asm::AddressTerm::Symbol(name.clone()),
+        ir::AddressTerm::TargetRegister(register) => asm::AddressTerm::Register(register.clone()),
         ir::AddressTerm::ScaledTargetRegister { register, scale } => {
-            machine::AddressTerm::ScaledRegister {
+            asm::AddressTerm::ScaledRegister {
                 register: register.clone(),
                 scale: *scale,
             }
@@ -3653,7 +3965,7 @@ fn emit_assignment_legacy(
                     }
                     MathOp::Subtract => {
                         let dst_operand = emit_operand(dst, strings, label_name, stack)?;
-                        asm.push_str(&format!("  neg {dst_operand}\n"));
+                        asm::instruction(asm, format_args!("neg {dst_operand}"));
 
                         return emit_binary_instruction(
                             asm, "add", lhs, dst, strings, label_name, stack,
@@ -3744,7 +4056,7 @@ fn emit_integer_binary_assignment(
             }
             MathOp::Subtract => {
                 let dst_operand = emit_operand(dst, strings, label_name, stack)?;
-                asm.push_str(&format!("  neg {dst_operand}\n"));
+                asm::instruction(asm, format_args!("neg {dst_operand}"));
 
                 return emit_binary_instruction(asm, "add", lhs, dst, strings, label_name, stack);
             }
@@ -3819,7 +4131,7 @@ fn emit_string_bytes_assignment(
         } else {
             format!("{base} + {index}")
         };
-        asm.push_str(&format!("  mov byte ptr [{address}], {byte}\n"));
+        asm::instruction(asm, format_args!("mov byte ptr [{address}], {byte}"));
     }
 
     Ok(())
@@ -4063,18 +4375,22 @@ fn emit_power_operation(
     let skip_multiply_label = format!(".L.__subsea.{label_name}.pow_{}_skip_mul", asm.len());
     let done_label = format!(".L.__subsea.{label_name}.pow_{}_done", asm.len());
 
-    asm.push_str(&format!("  mov {dst_register}, 1\n"));
-    asm.push_str(&format!("{loop_label}:\n"));
-    asm.push_str("  test r11, r11\n");
-    asm.push_str(&format!("  je {done_label}\n"));
-    asm.push_str("  test r11, 1\n");
-    asm.push_str(&format!("  je {skip_multiply_label}\n"));
-    asm.push_str(&format!("  imul {dst_register}, r10\n"));
-    asm.push_str(&format!("{skip_multiply_label}:\n"));
-    asm.push_str("  imul r10, r10\n");
-    asm.push_str("  shr r11, 1\n");
-    asm.push_str(&format!("  jmp {loop_label}\n"));
-    asm.push_str(&format!("{done_label}:\n"));
+    asm::instruction(asm, format_args!("mov {dst_register}, 1"));
+    asm::label(asm, &loop_label);
+    asm::instruction(asm, "test r11, r11");
+    asm::branch(asm, "je", asm::Operand::Address(done_label.clone()));
+    asm::instruction(asm, "test r11, 1");
+    asm::branch(
+        asm,
+        "je",
+        asm::Operand::Address(skip_multiply_label.clone()),
+    );
+    asm::instruction(asm, format_args!("imul {dst_register}, r10"));
+    asm::label(asm, &skip_multiply_label);
+    asm::instruction(asm, "imul r10, r10");
+    asm::instruction(asm, "shr r11, 1");
+    asm::jump(asm, asm::Operand::Address(loop_label.clone()));
+    asm::label(asm, &done_label);
 
     Ok(())
 }
@@ -4091,7 +4407,7 @@ fn emit_power_exponent_load(
             return Err(String::from("Power exponent must be non-negative"));
         }
         validate_immediate_range(value, ImmediateDestination::Register(Width::Bits64))?;
-        asm.push_str(&format!("  mov r11, {value}\n"));
+        asm::instruction(asm, format_args!("mov r11, {value}"));
         return Ok(());
     }
 
@@ -4106,9 +4422,11 @@ fn emit_power_exponent_load(
     let exponent = emit_operand(exponent, strings, label_name, stack)?;
 
     match width {
-        Width::Bits64 => asm.push_str(&format!("  mov r11, {exponent}\n")),
-        Width::Bits32 => asm.push_str(&format!("  mov r11d, {exponent}\n")),
-        Width::Bits16 | Width::Bits8 => asm.push_str(&format!("  movzx r11, {exponent}\n")),
+        Width::Bits64 => asm::instruction(asm, format_args!("mov r11, {exponent}")),
+        Width::Bits32 => asm::instruction(asm, format_args!("mov r11d, {exponent}")),
+        Width::Bits16 | Width::Bits8 => {
+            asm::instruction(asm, format_args!("movzx r11, {exponent}"))
+        }
     }
 
     Ok(())
@@ -4131,14 +4449,14 @@ fn emit_division_from_accumulator(
     let rax = Operand::Register(String::from("rax"));
     emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
-    machine::emit(&machine::Instruction::PrepareDivision { signed }, asm);
+    asm::prepare_division(asm, signed);
 
     let opcode = division_opcode(signed);
     let divisor = emit_operand(&divisor, strings, label_name, stack)?;
-    machine::emit(
-        &machine::Instruction::Divide {
+    asm::emit(
+        &asm::Instruction::Divide {
             opcode: opcode.to_owned(),
-            divisor: machine::Operand::Address(divisor),
+            divisor: asm::Operand::Address(divisor),
         },
         asm,
     );
@@ -4378,19 +4696,19 @@ fn emit_ir_boolean_condition_assignment(
             let use_test = matches!(op, CompareOp::Equal | CompareOp::NotEqual)
                 && matches!(lhs, ir::Operand::TargetRegister(register) if !is_xmm_register(register))
                 && matches!(rhs, ir::Operand::Immediate(0));
-            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
-            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
+            let lhs = emit_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_ir_operand(rhs, strings, label_name, stack)?;
             if use_test {
-                asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+                asm::instruction(asm, format_args!("test {lhs}, {lhs}"));
             } else {
-                asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+                asm::instruction(asm, format_args!("cmp {lhs}, {rhs}"));
             }
             compare_set_opcode(*op)
         }
         ir::Condition::BitwiseAndZero { lhs, rhs, op } => {
-            let lhs = emit_x86_ir_operand(lhs, strings, label_name, stack)?;
-            let rhs = emit_x86_ir_operand(rhs, strings, label_name, stack)?;
-            asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+            let lhs = emit_ir_operand(lhs, strings, label_name, stack)?;
+            let rhs = emit_ir_operand(rhs, strings, label_name, stack)?;
+            asm::instruction(asm, format_args!("test {lhs}, {rhs}"));
             match op {
                 CompareOp::Equal => "sete",
                 CompareOp::NotEqual => "setne",
@@ -4417,11 +4735,11 @@ fn emit_ir_setcc_result(
     };
 
     if register_width(register) == Some(Width::Bits8) {
-        asm.push_str(&format!("  {set_opcode} {register}\n"));
+        asm::instruction(asm, format_args!("{set_opcode} {register}"));
     } else {
-        asm.push_str(&format!("  {set_opcode} r10b\n"));
-        let dst = emit_x86_ir_operand(dst, strings, label_name, stack)?;
-        asm.push_str(&format!("  movzx {dst}, r10b\n"));
+        asm::instruction(asm, format_args!("{set_opcode} r10b"));
+        let dst = emit_ir_operand(dst, strings, label_name, stack)?;
+        asm::instruction(asm, format_args!("movzx {dst}, r10b"));
     }
     Ok(())
 }
@@ -4470,9 +4788,9 @@ fn emit_condition_for_setcc(
             let lhs = emit_operand(lhs, strings, label_name, stack)?;
             let rhs = emit_operand(rhs, strings, label_name, stack)?;
             if use_test {
-                asm.push_str(&format!("  test {lhs}, {lhs}\n"));
+                asm::instruction(asm, format_args!("test {lhs}, {lhs}"));
             } else {
-                asm.push_str(&format!("  cmp {lhs}, {rhs}\n"));
+                asm::instruction(asm, format_args!("cmp {lhs}, {rhs}"));
             }
 
             Ok(compare_set_opcode(op))
@@ -4482,7 +4800,7 @@ fn emit_condition_for_setcc(
 
             let lhs = emit_operand(lhs, strings, label_name, stack)?;
             let rhs = emit_operand(rhs, strings, label_name, stack)?;
-            asm.push_str(&format!("  test {lhs}, {rhs}\n"));
+            asm::instruction(asm, format_args!("test {lhs}, {rhs}"));
 
             Ok(match op {
                 CompareOp::Equal => "sete",
@@ -4506,26 +4824,26 @@ fn emit_setcc_result(
     if let Operand::Register(register) = dst
         && register_width(register) == Some(Width::Bits8)
     {
-        asm.push_str(&format!("  {set_opcode} {register}\n"));
+        asm::instruction(asm, format_args!("{set_opcode} {register}"));
         return Ok(());
     }
 
     let temp = boolean_temp_register(dst)?;
-    asm.push_str(&format!("  {set_opcode} {}b\n", temp));
+    asm::instruction(asm, format_args!("{set_opcode} {}b", temp));
 
     match destination_width(dst, strings, stack)? {
         Some(ImmediateDestination::Register(width)) => {
             let dst = emit_operand(dst, strings, label_name, stack)?;
-            asm.push_str(&format!("  movzx {dst}, {}b\n", temp));
+            asm::instruction(asm, format_args!("movzx {dst}, {}b", temp));
             validate_boolean_movzx_width(width)?;
         }
         Some(ImmediateDestination::Memory(width)) => {
             let dst = emit_operand(dst, strings, label_name, stack)?;
             let temp_src = temp_register_for_memory_width(temp, width)?;
             if memory_width_bits(width) != Width::Bits8 {
-                asm.push_str(&format!("  movzx {temp}, {}b\n", temp));
+                asm::instruction(asm, format_args!("movzx {temp}, {}b", temp));
             }
-            asm.push_str(&format!("  mov {dst}, {temp_src}\n"));
+            asm::instruction(asm, format_args!("mov {dst}, {temp_src}"));
         }
         None => unreachable!(),
     }
@@ -4572,15 +4890,15 @@ fn emit_wide_math_assignment(
     emit_copy_instruction(asm, lhs, &rax, strings, label_name, stack)?;
 
     if division {
-        machine::emit(&machine::Instruction::PrepareDivision { signed }, asm);
+        asm::prepare_division(asm, signed);
     }
 
     let opcode = wide_math_opcode(division, signed);
     let rhs = emit_operand(&rhs, strings, label_name, stack)?;
-    machine::emit(
-        &machine::Instruction::WideMath {
+    asm::emit(
+        &asm::Instruction::WideMath {
             opcode: opcode.to_owned(),
-            operand: machine::Operand::Address(rhs),
+            operand: asm::Operand::Address(rhs),
         },
         asm,
     );
@@ -4605,8 +4923,11 @@ fn emit_pair_binary_assignment(
 
     let (low_opcode, high_opcode) = pair_math_opcodes(op);
 
-    asm.push_str(&format!("  {low_opcode} {}, {}\n", dst.low, rhs.low));
-    asm.push_str(&format!("  {high_opcode} {}, {}\n", dst.high, rhs.high));
+    asm::instruction(asm, format_args!("{low_opcode} {}, {}", dst.low, rhs.low));
+    asm::instruction(
+        asm,
+        format_args!("{high_opcode} {}, {}", dst.high, rhs.high),
+    );
 
     Ok(())
 }
@@ -4761,11 +5082,14 @@ fn emit_ir_float_rounding_intrinsic(
         register.as_str()
     };
     let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {src}, {}\n",
-        float_rounding_opcode(width),
-        float_rounding_mode(op)
-    ));
+    asm::instruction(
+        asm,
+        format_args!(
+            "{} {dst_register}, {src}, {}",
+            float_rounding_opcode(width),
+            float_rounding_mode(op)
+        ),
+    );
 
     if memory_destination {
         emit_ir_float_copy_instruction(
@@ -4805,10 +5129,10 @@ fn emit_ir_float_sqrt_intrinsic(
         register.as_str()
     };
     let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {src}\n",
-        float_sqrt_opcode(width)
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {dst_register}, {src}", float_sqrt_opcode(width)),
+    );
 
     if memory_destination {
         emit_ir_float_copy_instruction(
@@ -4874,10 +5198,10 @@ fn emit_ir_float_min_max_intrinsic(
         unreachable!()
     };
     let rhs = emit_ir_float_operand(rhs, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {register}, {rhs}\n",
-        float_min_max_opcode(op, width)
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {register}, {rhs}", float_min_max_opcode(op, width)),
+    );
     if memory_destination {
         emit_ir_float_copy_instruction(asm, &target, dst, width, strings, label_name, stack)?;
     }
@@ -4924,20 +5248,21 @@ fn emit_ir_integer_min_max_intrinsic(
         }
         _ => rhs.clone(),
     };
-    let dst_operand = emit_x86_ir_operand(&result, strings, label_name, stack)?;
-    let rhs_operand = emit_x86_ir_operand(&rhs, strings, label_name, stack)?;
+    let dst_operand = emit_ir_operand(&result, strings, label_name, stack)?;
+    let rhs_operand = emit_ir_operand(&rhs, strings, label_name, stack)?;
     let keep_label = format!(
         ".L.__subsea.{label_name}.{}_{}_keep",
         intrinsic_op_name(op),
         asm.len()
     );
-    asm.push_str(&format!("  cmp {dst_operand}, {rhs_operand}\n"));
-    asm.push_str(&format!(
-        "  {} {keep_label}\n",
-        integer_min_max_keep_jump(op, width)
-    ));
-    asm.push_str(&format!("  mov {dst_operand}, {rhs_operand}\n"));
-    asm.push_str(&format!("{keep_label}:\n"));
+    asm::instruction(asm, format_args!("cmp {dst_operand}, {rhs_operand}"));
+    asm::branch(
+        asm,
+        integer_min_max_keep_jump(op, width),
+        asm::Operand::Address(keep_label.clone()),
+    );
+    asm::instruction(asm, format_args!("mov {dst_operand}, {rhs_operand}"));
+    asm::label(asm, &keep_label);
 
     if memory_destination {
         emit_ir_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
@@ -5023,10 +5348,10 @@ fn emit_float_sqrt_intrinsic(
         dst_register.as_str()
     };
     let src = emit_float_operand(src, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {src}\n",
-        float_sqrt_opcode(width)
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {dst_register}, {src}", float_sqrt_opcode(width)),
+    );
 
     if memory_destination {
         emit_float_copy_instruction(
@@ -5167,47 +5492,54 @@ fn emit_integer_sqrt_intrinsic(
     let done_label = format!(".L.__subsea.{label_name}.sqrt_{}_done", asm.len());
 
     if is_signed_integer_width(width) {
-        asm.push_str(&format!("  bt {base}, {}\n", expected.bits() - 1));
-        asm.push_str(&format!("  jc {negative_label}\n"));
+        asm::instruction(asm, format_args!("bt {base}, {}", expected.bits() - 1));
+        asm::branch(asm, "jc", asm::Operand::Address(negative_label.clone()));
     }
-    asm.push_str(&format!("  xor {dst_accumulator}, {dst_accumulator}\n"));
-    asm.push_str(&format!("  mov {bit}, {bit_value}\n"));
-    asm.push_str(&format!("{find_bit_label}:\n"));
-    asm.push_str(&format!("  cmp {base}, {bit}\n"));
-    asm.push_str(&format!("  jae {loop_label}\n"));
-    asm.push_str(&format!("  shr {bit}, 2\n"));
-    asm.push_str(&format!("  test {bit}, {bit}\n"));
-    asm.push_str(&format!("  jne {find_bit_label}\n"));
-    asm.push_str(&format!("  jmp {done_label}\n"));
-    asm.push_str(&format!("{loop_label}:\n"));
-    asm.push_str(&format!("  test {bit}, {bit}\n"));
-    asm.push_str(&format!("  je {done_label}\n"));
-    asm.push_str(&format!("  lea {sum}, [{dst_accumulator} + {bit}]\n"));
-    asm.push_str(&format!("  cmp {base}, {sum}\n"));
-    asm.push_str(&format!("  jb {no_subtract_label}\n"));
-    asm.push_str(&format!("  sub {base}, {sum}\n"));
-    asm.push_str(&format!("  shr {dst_accumulator}, 1\n"));
-    asm.push_str(&format!("  add {dst_accumulator}, {bit}\n"));
-    asm.push_str(&format!("  shr {bit}, 2\n"));
-    asm.push_str(&format!("  jmp {loop_label}\n"));
-    asm.push_str(&format!("{no_subtract_label}:\n"));
-    asm.push_str(&format!("  shr {dst_accumulator}, 1\n"));
-    asm.push_str(&format!("  shr {bit}, 2\n"));
-    asm.push_str(&format!("  jmp {loop_label}\n"));
-    asm.push_str(&format!("{done_label}:\n"));
+    asm::instruction(
+        asm,
+        format_args!("xor {dst_accumulator}, {dst_accumulator}"),
+    );
+    asm::instruction(asm, format_args!("mov {bit}, {bit_value}"));
+    asm::label(asm, &find_bit_label);
+    asm::instruction(asm, format_args!("cmp {base}, {bit}"));
+    asm::branch(asm, "jae", asm::Operand::Address(loop_label.clone()));
+    asm::instruction(asm, format_args!("shr {bit}, 2"));
+    asm::instruction(asm, format_args!("test {bit}, {bit}"));
+    asm::branch(asm, "jne", asm::Operand::Address(find_bit_label.clone()));
+    asm::jump(asm, asm::Operand::Address(done_label.clone()));
+    asm::label(asm, &loop_label);
+    asm::instruction(asm, format_args!("test {bit}, {bit}"));
+    asm::branch(asm, "je", asm::Operand::Address(done_label.clone()));
+    asm::lea(
+        asm,
+        asm::Operand::Register(sum.to_owned()),
+        format!("[{dst_accumulator} + {bit}]"),
+    );
+    asm::instruction(asm, format_args!("cmp {base}, {sum}"));
+    asm::branch(asm, "jb", asm::Operand::Address(no_subtract_label.clone()));
+    asm::instruction(asm, format_args!("sub {base}, {sum}"));
+    asm::instruction(asm, format_args!("shr {dst_accumulator}, 1"));
+    asm::instruction(asm, format_args!("add {dst_accumulator}, {bit}"));
+    asm::instruction(asm, format_args!("shr {bit}, 2"));
+    asm::jump(asm, asm::Operand::Address(loop_label.clone()));
+    asm::label(asm, &no_subtract_label);
+    asm::instruction(asm, format_args!("shr {dst_accumulator}, 1"));
+    asm::instruction(asm, format_args!("shr {bit}, 2"));
+    asm::jump(asm, asm::Operand::Address(loop_label.clone()));
+    asm::label(asm, &done_label);
 
     if narrow_destination {
         let result = register_alias(&dst_accumulator, expected)?;
-        asm.push_str(&format!("  mov {}, {result}\n", dst_register.unwrap()));
+        asm::instruction(asm, format_args!("mov {}, {result}", dst_register.unwrap()));
     } else if memory_destination {
         let result = Operand::Register(register_alias(&dst_accumulator, expected)?);
         emit_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
     }
     if is_signed_integer_width(width) {
-        asm.push_str(&format!("  jmp {after_negative_label}\n"));
-        asm.push_str(&format!("{negative_label}:\n"));
-        asm.push_str("  ud2\n");
-        asm.push_str(&format!("{after_negative_label}:\n"));
+        asm::jump(asm, asm::Operand::Address(after_negative_label.clone()));
+        asm::label(asm, &negative_label);
+        asm::instruction(asm, "ud2");
+        asm::label(asm, &after_negative_label);
     }
 
     Ok(())
@@ -5230,19 +5562,19 @@ fn emit_integer_sqrt_source_load(
 
     let emitted = emit_operand(src, strings, label_name, stack)?;
     match width {
-        Width::Bits64 => asm.push_str(&format!("  mov {base}, {emitted}\n")),
+        Width::Bits64 => asm::instruction(asm, format_args!("mov {base}, {emitted}")),
         Width::Bits32 => {
             let source = match src {
                 Operand::Register(register) => register_alias(register, Width::Bits32)?,
                 _ => emitted,
             };
-            asm.push_str(&format!("  mov {base}d, {source}\n"));
+            asm::instruction(asm, format_args!("mov {base}d, {source}"));
         }
         Width::Bits16 | Width::Bits8 => {
             if immediate_value(src, strings, label_name, stack).is_some() {
-                asm.push_str(&format!("  mov {base}, {emitted}\n"));
+                asm::instruction(asm, format_args!("mov {base}, {emitted}"));
             } else {
-                asm.push_str(&format!("  movzx {base}, {emitted}\n"));
+                asm::instruction(asm, format_args!("movzx {base}, {emitted}"));
             }
         }
     }
@@ -5304,11 +5636,14 @@ fn emit_float_rounding_intrinsic(
         dst_register.as_str()
     };
     let src = emit_float_operand(src, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {src}, {}\n",
-        float_rounding_opcode(width),
-        float_rounding_mode(op)
-    ));
+    asm::instruction(
+        asm,
+        format_args!(
+            "{} {dst_register}, {src}, {}",
+            float_rounding_opcode(width),
+            float_rounding_mode(op)
+        ),
+    );
 
     if memory_destination {
         emit_float_copy_instruction(
@@ -5369,10 +5704,10 @@ fn emit_float_min_max_intrinsic(
         unreachable!()
     };
     let rhs = emit_float_operand(rhs, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {rhs}\n",
-        float_min_max_opcode(op, width)
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {dst_register}, {rhs}", float_min_max_opcode(op, width)),
+    );
 
     if memory_destination {
         emit_float_copy_instruction(asm, &target, dst, width, strings, label_name, stack)?;
@@ -5415,13 +5750,14 @@ fn emit_integer_min_max_intrinsic(
         asm.len()
     );
 
-    asm.push_str(&format!("  cmp {dst_operand}, {rhs_operand}\n"));
-    asm.push_str(&format!(
-        "  {} {keep_label}\n",
-        integer_min_max_keep_jump(op, width)
-    ));
-    asm.push_str(&format!("  mov {dst_operand}, {rhs_operand}\n"));
-    asm.push_str(&format!("{keep_label}:\n"));
+    asm::instruction(asm, format_args!("cmp {dst_operand}, {rhs_operand}"));
+    asm::branch(
+        asm,
+        integer_min_max_keep_jump(op, width),
+        asm::Operand::Address(keep_label.clone()),
+    );
+    asm::instruction(asm, format_args!("mov {dst_operand}, {rhs_operand}"));
+    asm::label(asm, &keep_label);
 
     if memory_destination {
         emit_copy_instruction(asm, &result, dst, strings, label_name, stack)?;
@@ -5712,10 +6048,10 @@ fn emit_float_binary_operand_assignment(
     if rhs == dst {
         if matches!(op, FloatMathOp::Add | FloatMathOp::Multiply) {
             let rhs = emit_float_operand(lhs, width, strings, label_name, stack)?;
-            asm.push_str(&format!(
-                "  {} {dst_register}, {rhs}\n",
-                float_math_opcode(op, width)
-            ));
+            asm::instruction(
+                asm,
+                format_args!("{} {dst_register}, {rhs}", float_math_opcode(op, width)),
+            );
             return Ok(());
         }
 
@@ -5729,10 +6065,10 @@ fn emit_float_binary_operand_assignment(
     }
 
     let rhs = emit_float_operand(rhs, width, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst_register}, {rhs}\n",
-        float_math_opcode(op, width)
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {dst_register}, {rhs}", float_math_opcode(op, width)),
+    );
 
     Ok(())
 }
@@ -5748,10 +6084,10 @@ fn emit_float_copy_instruction(
 ) -> Result<(), String> {
     let src = emit_float_operand(src, width, strings, label_name, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
-    asm.push_str(&format!(
-        "  {} {dst}, {src}\n",
-        float_move_opcode_for_width(width)?
-    ));
+    asm::instruction(
+        asm,
+        format_args!("{} {dst}, {src}", x86_float_move_opcode(width)?),
+    );
 
     Ok(())
 }
@@ -5969,10 +6305,10 @@ fn emit_copy_instruction(
         emit_numeric_cast_copy(asm, operand, *width, dst, strings, label_name, stack)
     } else if emit_truncating_copy(asm, src, dst, strings, label_name, stack)? {
         Ok(())
-    } else if let Some(opcode) = float_move_opcode(src, dst, strings, stack)? {
+    } else if let Some(opcode) = float_move_instruction_opcode(src, dst, strings, stack)? {
         let src = emit_operand(src, strings, label_name, stack)?;
         let dst = emit_operand(dst, strings, label_name, stack)?;
-        asm.push_str(&format!("  {opcode} {dst}, {src}\n"));
+        asm::instruction(asm, format_args!("{opcode} {dst}, {src}"));
 
         Ok(())
     } else if operand_uses_xmm_register(src) || operand_uses_xmm_register(dst) {
@@ -5989,7 +6325,7 @@ fn emit_copy_instruction(
         validate_address_copy_dst(dst)?;
 
         let dst = emit_operand(dst, strings, label_name, stack)?;
-        asm.push_str(&format!("  lea {dst}, [rip + {name}]\n"));
+        asm::instruction(asm, format_args!("lea {dst}, [rip + {name}]"));
 
         Ok(())
     } else if let Operand::AddressOf(address) = src {
@@ -5997,7 +6333,7 @@ fn emit_copy_instruction(
 
         let dst = emit_operand(dst, strings, label_name, stack)?;
         let address = emit_address(address);
-        asm.push_str(&format!("  lea {dst}, [{address}]\n"));
+        asm::instruction(asm, format_args!("lea {dst}, [{address}]"));
 
         Ok(())
     } else {
@@ -6051,19 +6387,19 @@ fn emit_width_conversion_copy(
     match (conversion, src_width, dst_width) {
         (WidthConversion::ZeroExtend, Width::Bits32, Width::Bits64) => {
             let dst = register_alias(dst_register, Width::Bits32)?;
-            asm.push_str(&format!("  mov {dst}, {src}\n"));
+            asm::instruction(asm, format_args!("mov {dst}, {src}"));
         }
         (WidthConversion::ZeroExtend, _, _) => {
             let dst = emit_operand(dst, strings, label_name, stack)?;
-            asm.push_str(&format!("  movzx {dst}, {src}\n"));
+            asm::instruction(asm, format_args!("movzx {dst}, {src}"));
         }
         (WidthConversion::SignExtend, Width::Bits32, Width::Bits64) => {
             let dst = emit_operand(dst, strings, label_name, stack)?;
-            asm.push_str(&format!("  movsxd {dst}, {src}\n"));
+            asm::instruction(asm, format_args!("movsxd {dst}, {src}"));
         }
         (WidthConversion::SignExtend, _, _) => {
             let dst = emit_operand(dst, strings, label_name, stack)?;
-            asm.push_str(&format!("  movsx {dst}, {src}\n"));
+            asm::instruction(asm, format_args!("movsx {dst}, {src}"));
         }
     }
 
@@ -6123,7 +6459,7 @@ fn emit_int_to_float_cast(
         _ => unreachable!(),
     };
     let src = cast_integer_operand_for_cvtsi(src, src_width, strings, label_name, stack)?;
-    asm.push_str(&format!("  {opcode} {dst_register}, {src}\n"));
+    asm::instruction(asm, format_args!("{opcode} {dst_register}, {src}"));
 
     Ok(())
 }
@@ -6164,12 +6500,12 @@ fn emit_float_to_int_cast(
         _ => unreachable!(),
     };
     let src = emit_float_operand(src, source_width, strings, label_name, stack)?;
-    asm.push_str(&format!("  {opcode} {cast_dst}, {src}\n"));
+    asm::instruction(asm, format_args!("{opcode} {cast_dst}, {src}"));
 
     if matches!(dst_width, Width::Bits16 | Width::Bits8) {
         let narrowed = register_alias("r11", dst_width)?;
         let dst = emit_operand(dst, strings, label_name, stack)?;
-        asm.push_str(&format!("  mov {dst}, {narrowed}\n"));
+        asm::instruction(asm, format_args!("mov {dst}, {narrowed}"));
     }
 
     Ok(())
@@ -6291,7 +6627,7 @@ fn emit_truncating_copy(
     validate_binary_operands("mov", src, dst, strings, label_name, stack)?;
     let dst = emit_operand(dst, strings, label_name, stack)?;
     let src = register_alias(src_register, dst_width)?;
-    asm.push_str(&format!("  mov {dst}, {src}\n"));
+    asm::instruction(asm, format_args!("mov {dst}, {src}"));
 
     Ok(true)
 }
@@ -6737,20 +7073,7 @@ fn validate_stack_width(
     }
 }
 
-fn emit_operand(
-    operand: &Operand,
-    strings: &StringTable,
-    label_name: &str,
-    stack: &StackFrame,
-) -> Result<String, String> {
-    emit_x86_operand(operand, strings, label_name, stack)
-}
-
-fn emit_address(address: &Address) -> String {
-    emit_x86_address(address)
-}
-
-fn float_move_opcode(
+fn float_move_instruction_opcode(
     src: &Operand,
     dst: &Operand,
     strings: &StringTable,
@@ -6764,12 +7087,12 @@ fn float_move_opcode(
         }
         (Operand::Register(register), memory) if is_xmm_register(register) => {
             float_memory_width(memory, strings, stack)?
-                .map(float_move_opcode_for_width)
+                .map(x86_float_move_opcode)
                 .transpose()
         }
         (memory, Operand::Register(register)) if is_xmm_register(register) => {
             float_memory_width(memory, strings, stack)?
-                .map(float_move_opcode_for_width)
+                .map(x86_float_move_opcode)
                 .transpose()
         }
         _ => Ok(None),
@@ -6950,4 +7273,452 @@ fn address_term_uses_register(term: &AddressTerm, predicate: fn(&str) -> bool) -
         }
         _ => false,
     }
+}
+
+pub(crate) fn emit_operand(
+    operand: &Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<String, String> {
+    match operand {
+        Operand::Converted { .. } | Operand::Cast { .. } => Err(String::from(
+            "Conversion operands are only supported as assignment sources",
+        )),
+        Operand::AddressOf(_) => Err(String::from(
+            "Address-of operands are only supported as assignment sources",
+        )),
+        Operand::Dereference { address, width } => {
+            let emitted_address = emit_address(address);
+
+            Ok(match resolve_memory_width(address, *width, strings)? {
+                Some(width) => format!("{} ptr [{}]", width.ptr(), emitted_address),
+                None => format!("[{emitted_address}]"),
+            })
+        }
+        Operand::FloatLiteral(value) => Err(format!(
+            "Float literal {value} requires an explicit floating-point operator width"
+        )),
+        Operand::Immediate(value) => Ok(value.to_string()),
+        Operand::Register(name) => Ok(name.clone()),
+        Operand::Ident(name) => match stack_scalar_slot(stack, name) {
+            Some((offset, width)) => Ok(format!("{} ptr [rbp - {}]", width.ptr(), offset)),
+            None if stack_string_slot(stack, name).is_some() => Err(format!(
+                "String stack variable {name:?} in label {label_name:?} cannot be used as an operand"
+            )),
+            None => match strings
+                .integers
+                .get(&(label_name.to_string(), name.clone()))
+            {
+                Some(binding) => Ok(binding.value.to_string()),
+                None if strings
+                    .float_bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "Float binding {name:?} in label {label_name:?} requires a floating-point operator width"
+                    ))
+                }
+                None if strings
+                    .bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "String binding {name:?} in label {label_name:?} cannot be used as an operand"
+                    ))
+                }
+                None => Err(format!("Unknown binding {name:?} in label {label_name:?}")),
+            },
+        },
+        Operand::StringProperty { name, property } => {
+            if let Some(offset) = stack_string_property_slot(stack, name, *property) {
+                return Ok(format!("qword ptr [rbp - {offset}]"));
+            }
+
+            let binding = strings
+                .bindings
+                .get(&(label_name.to_string(), name.clone()))
+                .ok_or_else(|| {
+                    format!("Unknown string binding {name:?} in label {label_name:?}")
+                })?;
+
+            Ok(match property {
+                StringProperty::Len => binding.value.len().to_string(),
+                StringProperty::Ptr => format!("offset {}", binding.asm_label),
+            })
+        }
+        Operand::Pointer(name) => Err(format!(
+            "Pointer operand &{name} is only supported as the right side of assignment"
+        )),
+    }
+}
+
+pub(crate) fn emit_ir_operand(
+    operand: &ir::Operand,
+    strings: &StringTable,
+    label_name: &str,
+    stack: &StackFrame,
+) -> Result<String, String> {
+    match operand {
+        ir::Operand::Immediate(value) => Ok(value.to_string()),
+        ir::Operand::Name(name) => match stack_scalar_slot(stack, name) {
+            Some((offset, width)) => Ok(format!("{} ptr [rbp - {}]", width.ptr(), offset)),
+            None if stack_string_slot(stack, name).is_some() => Err(format!(
+                "String stack variable {name:?} in label {label_name:?} cannot be used as an operand"
+            )),
+            None => match strings
+                .integers
+                .get(&(label_name.to_string(), name.clone()))
+            {
+                Some(binding) => Ok(binding.value.to_string()),
+                None if strings
+                    .float_bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "Float binding {name:?} in label {label_name:?} requires a floating-point operator width"
+                    ))
+                }
+                None if strings
+                    .bindings
+                    .contains_key(&(label_name.to_string(), name.clone())) =>
+                {
+                    Err(format!(
+                        "String binding {name:?} in label {label_name:?} cannot be used as an operand"
+                    ))
+                }
+                None => Err(format!("Unknown binding {name:?} in label {label_name:?}")),
+            },
+        },
+        ir::Operand::Memory { address, width } => {
+            let emitted_address = emit_ir_address(address);
+            let ast_address = ir_address_to_ast(address);
+            Ok(match resolve_memory_width(&ast_address, *width, strings)? {
+                Some(width) => format!("{} ptr [{}]", width.ptr(), emitted_address),
+                None => format!("[{emitted_address}]"),
+            })
+        }
+        ir::Operand::StringProperty { name, property } => {
+            if let Some(offset) = stack_string_property_slot(
+                stack,
+                name,
+                match property {
+                    ir::StringProperty::Len => crate::ast::StringProperty::Len,
+                    ir::StringProperty::Ptr => crate::ast::StringProperty::Ptr,
+                },
+            ) {
+                return Ok(format!("qword ptr [rbp - {offset}]"));
+            }
+
+            let binding = strings
+                .bindings
+                .get(&(label_name.to_string(), name.clone()))
+                .ok_or_else(|| {
+                    format!("Unknown string binding {name:?} in label {label_name:?}")
+                })?;
+
+            Ok(match property {
+                ir::StringProperty::Len => binding.value.len().to_string(),
+                ir::StringProperty::Ptr => format!("offset {}", binding.asm_label),
+            })
+        }
+        ir::Operand::TargetRegister(name) => Ok(name.clone()),
+        ir::Operand::FloatLiteral(value) => Err(format!(
+            "Float literal {value} requires an explicit floating-point operator width"
+        )),
+        ir::Operand::Pointer(name) => Err(format!(
+            "Pointer operand &{name} is only supported as the right side of assignment"
+        )),
+        ir::Operand::AddressOf(_) => Err(String::from(
+            "Address-of operands are only supported as assignment sources",
+        )),
+        ir::Operand::Converted { .. } | ir::Operand::Cast { .. } => Err(String::from(
+            "Conversion operands are only supported as assignment sources",
+        )),
+    }
+}
+
+fn emit_ir_address(address: &ir::Address) -> String {
+    let mut value = emit_ir_address_term(&address.first);
+
+    for (operator, term) in &address.rest {
+        value.push_str(match operator {
+            ir::AddressOperator::Add => " + ",
+            ir::AddressOperator::Subtract => " - ",
+        });
+        value.push_str(&emit_ir_address_term(term));
+    }
+
+    value
+}
+
+fn emit_ir_address_term(term: &ir::AddressTerm) -> String {
+    match term {
+        ir::AddressTerm::Immediate(value) => value.to_string(),
+        ir::AddressTerm::Name(name) => name.clone(),
+        ir::AddressTerm::TargetRegister(name) => name.clone(),
+        ir::AddressTerm::ScaledTargetRegister { register, scale } => {
+            format!("{register} * {scale}")
+        }
+    }
+}
+
+pub(crate) fn emit_address(address: &Address) -> String {
+    let mut value = emit_address_term(&address.first);
+
+    for (operator, term) in &address.rest {
+        match operator {
+            AddressOperator::Add => value.push_str(" + "),
+            AddressOperator::Subtract => value.push_str(" - "),
+        }
+
+        value.push_str(&emit_address_term(term));
+    }
+
+    value
+}
+
+fn emit_address_term(term: &AddressTerm) -> String {
+    match term {
+        AddressTerm::Immediate(value) => value.to_string(),
+        AddressTerm::Register(name) => name.clone(),
+        AddressTerm::ScaledRegister { register, scale } => format!("{register} * {scale}"),
+        AddressTerm::Ident(name) => name.clone(),
+    }
+}
+
+pub(crate) fn integer_math_opcode(op: MathOp) -> &'static str {
+    match op {
+        MathOp::Add => "add",
+        MathOp::BitAnd => "and",
+        MathOp::BitOr => "or",
+        MathOp::BitXor => "xor",
+        MathOp::Multiply => "imul",
+        MathOp::Power => unreachable!(),
+        MathOp::ShiftLeft => "shl",
+        MathOp::ShiftRightArithmetic => "sar",
+        MathOp::ShiftRightLogical => "shr",
+        MathOp::Subtract => "sub",
+    }
+}
+
+pub(crate) fn bitwise_unary_opcode(op: BitwiseUnaryOp) -> &'static str {
+    match op {
+        BitwiseUnaryOp::Not => "not",
+    }
+}
+
+pub(crate) fn compare_jump_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equal => "je",
+        CompareOp::NotEqual => "jne",
+        CompareOp::SignedLess => "jl",
+        CompareOp::SignedLessEqual => "jle",
+        CompareOp::SignedGreater => "jg",
+        CompareOp::SignedGreaterEqual => "jge",
+        CompareOp::UnsignedLess => "jb",
+        CompareOp::UnsignedLessEqual => "jbe",
+        CompareOp::UnsignedGreater => "ja",
+        CompareOp::UnsignedGreaterEqual => "jae",
+        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
+            unreachable!()
+        }
+        CompareOp::FloatEqual(_)
+        | CompareOp::FloatNotEqual(_)
+        | CompareOp::FloatLess(_)
+        | CompareOp::FloatLessEqual(_)
+        | CompareOp::FloatGreater(_)
+        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
+    }
+}
+
+pub(crate) fn compare_set_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equal => "sete",
+        CompareOp::NotEqual => "setne",
+        CompareOp::SignedLess => "setl",
+        CompareOp::SignedLessEqual => "setle",
+        CompareOp::SignedGreater => "setg",
+        CompareOp::SignedGreaterEqual => "setge",
+        CompareOp::UnsignedLess => "setb",
+        CompareOp::UnsignedLessEqual => "setbe",
+        CompareOp::UnsignedGreater => "seta",
+        CompareOp::UnsignedGreaterEqual => "setae",
+        CompareOp::Less | CompareOp::LessEqual | CompareOp::Greater | CompareOp::GreaterEqual => {
+            unreachable!()
+        }
+        CompareOp::FloatEqual(_)
+        | CompareOp::FloatNotEqual(_)
+        | CompareOp::FloatLess(_)
+        | CompareOp::FloatLessEqual(_)
+        | CompareOp::FloatGreater(_)
+        | CompareOp::FloatGreaterEqual(_) => unreachable!(),
+    }
+}
+
+pub(crate) fn float_sqrt_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "sqrtss",
+        MemoryWidth::F64 => "sqrtsd",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_rounding_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "roundss",
+        MemoryWidth::F64 => "roundsd",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_rounding_mode(op: IntrinsicOp) -> u8 {
+    match op {
+        IntrinsicOp::Round => 0,
+        IntrinsicOp::Floor => 1,
+        IntrinsicOp::Ceil => 2,
+        IntrinsicOp::Trunc => 3,
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_min_max_opcode(op: IntrinsicOp, width: MemoryWidth) -> &'static str {
+    match (op, width) {
+        (IntrinsicOp::Min, MemoryWidth::F32) => "minss",
+        (IntrinsicOp::Min, MemoryWidth::F64) => "minsd",
+        (IntrinsicOp::Max, MemoryWidth::F32) => "maxss",
+        (IntrinsicOp::Max, MemoryWidth::F64) => "maxsd",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_math_opcode(op: FloatMathOp, width: MemoryWidth) -> &'static str {
+    match (op, width) {
+        (FloatMathOp::Add, MemoryWidth::F32) => "addss",
+        (FloatMathOp::Add, MemoryWidth::F64) => "addsd",
+        (FloatMathOp::Divide, MemoryWidth::F32) => "divss",
+        (FloatMathOp::Divide, MemoryWidth::F64) => "divsd",
+        (FloatMathOp::Multiply, MemoryWidth::F32) => "mulss",
+        (FloatMathOp::Multiply, MemoryWidth::F64) => "mulsd",
+        (FloatMathOp::Subtract, MemoryWidth::F32) => "subss",
+        (FloatMathOp::Subtract, MemoryWidth::F64) => "subsd",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_compare_opcode(width: MemoryWidth) -> &'static str {
+    match width {
+        MemoryWidth::F32 => "ucomiss",
+        MemoryWidth::F64 => "ucomisd",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn float_compare_jump_opcode(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Equal | CompareOp::FloatEqual(_) => "je",
+        CompareOp::NotEqual | CompareOp::FloatNotEqual(_) => "jne",
+        CompareOp::Less | CompareOp::FloatLess(_) => "jb",
+        CompareOp::LessEqual | CompareOp::FloatLessEqual(_) => "jbe",
+        CompareOp::Greater | CompareOp::FloatGreater(_) => "ja",
+        CompareOp::GreaterEqual | CompareOp::FloatGreaterEqual(_) => "jae",
+        _ => unreachable!(),
+    }
+}
+
+pub(crate) fn division_opcode(signed: bool) -> &'static str {
+    if signed { "idiv" } else { "div" }
+}
+
+pub(crate) fn wide_math_opcode(division: bool, signed: bool) -> &'static str {
+    match (division, signed) {
+        (false, true) => "imul",
+        (false, false) => "mul",
+        (true, true) => "idiv",
+        (true, false) => "div",
+    }
+}
+
+pub(crate) fn pair_math_opcodes(op: crate::ast::PairBinaryOp) -> (&'static str, &'static str) {
+    match op {
+        crate::ast::PairBinaryOp::Add => ("add", "adc"),
+        crate::ast::PairBinaryOp::Subtract => ("sub", "sbb"),
+    }
+}
+
+pub(crate) fn x86_float_move_opcode(width: MemoryWidth) -> Result<&'static str, String> {
+    match width {
+        MemoryWidth::F32 => Ok("movss"),
+        MemoryWidth::F64 => Ok("movsd"),
+        _ => Err(String::from(
+            "XMM moves require an explicitly f32 or f64 memory operand",
+        )),
+    }
+}
+
+pub(crate) fn emit_frame_prologue(asm: &mut String, stack: &StackFrame, spec: TargetSpec) {
+    asm::push(asm, asm::Operand::Register(spec.frame_pointer.to_owned()));
+    asm::mov(
+        asm,
+        asm::Operand::Register(spec.frame_pointer.to_owned()),
+        asm::Operand::Register(spec.stack_pointer.to_owned()),
+    );
+    if stack.size > 0 {
+        asm::stack_adjust(asm, "sub", spec.stack_pointer.to_owned(), stack.size);
+    }
+}
+
+pub(crate) fn emit_frame_epilogue(asm: &mut String, spec: TargetSpec) {
+    asm::mov(
+        asm,
+        asm::Operand::Register(spec.stack_pointer.to_owned()),
+        asm::Operand::Register(spec.frame_pointer.to_owned()),
+    );
+    asm::pop(asm, asm::Operand::Register(spec.frame_pointer.to_owned()));
+}
+
+pub(crate) fn emit_linux_syscall(asm: &mut String, number: u64) {
+    asm::syscall(asm, number);
+}
+
+pub(crate) fn emit_linux_write_label(asm: &mut String, label: &str, len: usize) {
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("rax")),
+        asm::Operand::Immediate(linux::SYS_WRITE as i128),
+    );
+    asm::instruction(
+        asm,
+        format_args!(
+            "mov rdi, {}\n  lea rsi, [rip + {label}]\n  mov rdx, {len}",
+            linux::STDOUT
+        ),
+    );
+    asm::syscall_trap(asm);
+}
+
+pub(crate) fn emit_linux_write_registers(asm: &mut String) {
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("rax")),
+        asm::Operand::Immediate(linux::SYS_WRITE as i128),
+    );
+    asm::mov(
+        asm,
+        asm::Operand::Register(String::from("rdi")),
+        asm::Operand::Immediate(linux::STDOUT as i128),
+    );
+    asm::syscall_trap(asm);
+}
+
+pub(crate) fn emit_linux_read(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_READ);
+}
+
+pub(crate) fn emit_linux_mmap(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_MMAP);
+}
+
+pub(crate) fn emit_linux_munmap(asm: &mut String) {
+    emit_linux_syscall(asm, linux::SYS_MUNMAP);
 }

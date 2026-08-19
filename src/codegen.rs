@@ -159,25 +159,24 @@ pub fn emit_target_asm_with_origins(
     origins: &ProgramOrigins,
 ) -> Result<String, Diagnostic> {
     validate_program_with_diagnostics_for_target(program, origins, target)?;
+    let semantic_ir = lower::lower_program(program).map_err(|error| {
+        at_instruction(
+            Diagnostic::new(error.message),
+            origins,
+            &error.label,
+            error.instruction,
+        )
+    })?;
 
     match target.spec().architecture {
-        Architecture::X86_64 => crate::backend::x86_64::codegen::emit_x86_64_asm_with_origins(
-            program,
+        Architecture::X86_64 => crate::backend::x86_64::codegen::emit_ir_x86_64_asm_with_origins(
+            &semantic_ir,
             target,
             entry_symbol,
             origins,
         )
         .map_err(|error| render_backend_diagnostic(&error, origins)),
         Architecture::AArch64 => {
-            let semantic_ir = lower::lower_program(program).map_err(|error| {
-                at_instruction(
-                    Diagnostic::new(error.message),
-                    origins,
-                    &error.label,
-                    error.instruction,
-                )
-            })?;
-
             crate::backend::aarch64::emit_for_target_with_entry(&semantic_ir, target, entry_symbol)
                 .map_err(|error| render_backend_diagnostic(&error, origins))
         }
