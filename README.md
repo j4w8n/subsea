@@ -1014,9 +1014,9 @@ xmm6 = trunc(xmm7):f32
 - Floating-point rounding emits SSE4.1 `roundss` or `roundsd`: `round` uses nearest, `floor` rounds down, `ceil` rounds up, and `trunc` rounds toward zero.
 - Floating-point intrinsic operands can be XMM registers, floating-point memory operands, `f32`/`f64` const bindings, stack float variables, or float literals matching the intrinsic width.
 
-## Freestanding And Raw X86
+## Freestanding And Raw Assembly
 
-`asm.x86 "..."` emits one raw x86-64 assembly instruction. It is mainly useful for explicit architecture interop in freestanding code.
+`asm.x86 "..."` emits one raw x86-64 assembly instruction, while `asm.aarch64 "..."` emits one raw AArch64 instruction. These forms are useful for explicit architecture interop in freestanding code and must match the selected target.
 
 Freestanding halt loop:
 
@@ -1328,13 +1328,22 @@ subsea build --target x86-free --linker-script kernel.ld -o kernel.elf kernel.ss
 subsea build --target x86-free -T kernel.ld --format binary -o kernel.bin kernel.ss
 ```
 
+Use `aarch-free` for freestanding AArch64 assembly. It has the same freestanding build flow and Linux-runtime restrictions, but emits AArch64 instructions and uses the AArch64 target toolchain:
+
+```sh
+subsea emit-asm --target aarch-free kernel.ss
+subsea build --target aarch-free -o kernel.o kernel.ss
+subsea build --target aarch-free -T kernel.ld -o kernel.elf kernel.ss
+subsea build --target aarch-free -T kernel.ld --format binary -o kernel.bin kernel.ss
+```
+
 By default, Subsea emits source-level `main` as the linker-visible symbol `_start`. Freestanding mode can override that symbol with `--entry`:
 
 ```sh
-subsea emit-asm -t x86-free --entry kernel_entry kernel.ss
+subsea emit-asm -t aarch-free --entry kernel_entry kernel.ss
 ```
 
-For `x86-free`, `build` writes an object file instead of linking an executable by default. This keeps freestanding output composable with external boot code, linker scripts, and custom build systems. If `-o` is omitted, the object file is written to `target/subsea/main.o`.
+For freestanding targets, `build` writes an object file instead of linking an executable by default. This keeps freestanding output composable with external boot code, linker scripts, and custom build systems. If `-o` is omitted, the object file is written to `target/subsea/main.o`.
 
 Pass `--linker-script` or `-T` to link the freestanding object with `ld -T` and write a freestanding executable instead:
 
@@ -1342,7 +1351,7 @@ Pass `--linker-script` or `-T` to link the freestanding object with `ld -T` and 
 subsea build -t x86-free -T kernel.ld -o kernel.elf kernel.ss
 ```
 
-Freestanding linker-script builds pass `-m elf_x86_64` to the linker so output does not depend on the host linker's default emulation. Use `--linker` to select a different linker program, such as `ld.lld` or `x86_64-elf-ld`.
+Freestanding linker-script builds pass the target's linker emulation (for example, `elf_x86_64` or `aarch64elf`) to the linker so output does not depend on the host linker's default emulation. Use `--linker` to select a different linker program, such as `ld.lld` or a cross-target linker.
 
 Raw binary output is available for linked freestanding builds with `--format binary`. It links an ELF first, then runs `objcopy -O binary`:
 
@@ -1398,14 +1407,14 @@ If `kernel.ss` writes bytes with `asm.x86 "out 0xe9, al"`, they appear in the te
 
 Writes intermediate assembly and object files to a unique per-build directory under `target/subsea/build-*`. The default executable is written to `target/subsea/main`
 
-`-o`: output is written to the requested path. For `x86`, this is a linked executable. For `x86-free`, this is an object file unless `--linker-script`/`-T` is provided.
+`-o`: output is written to the requested path. For Linux targets, this is a linked executable. For freestanding targets, this is an object file unless `--linker-script`/`-T` is provided.
 
 ```sh
 subsea build -o my_util main.ss
 subsea build -t x86-free -o kernel.o kernel.ss
 ```
 
-`--linker-script` or `-T`: link `x86-free` output with the requested linker script. This writes a freestanding executable instead of an object file.
+`--linker-script` or `-T`: link freestanding output with the requested linker script. This writes a freestanding executable instead of an object file.
 
 ```sh
 subsea build -t x86-free --linker-script kernel.ld -o kernel.elf kernel.ss
@@ -1419,25 +1428,25 @@ subsea build -t x86-free -T kernel.ld --format elf -o kernel.elf kernel.ss
 subsea build -t x86-free -T kernel.ld --format binary -o kernel.bin kernel.ss
 ```
 
-`--linker`: select the linker program for `x86-free` linker-script builds. The default is `ld`.
+`--linker`: select the linker program for freestanding linker-script builds. The default comes from the selected target.
 
 ```sh
 subsea build -t x86-free --linker ld.lld -T kernel.ld -o kernel.elf kernel.ss
 ```
 
-`--link-input`: add an extra object file to an `x86-free` linker-script build. This flag can be repeated.
+`--link-input`: add an extra object file to a freestanding linker-script build. This flag can be repeated.
 
 ```sh
 subsea build -t x86-free -T kernel.ld --link-input boot.o --link-input tables.o -o kernel.elf kernel.ss
 ```
 
-`--target` or `-t`: select a target. Supported targets are `x86`, `x86-free`, and `aarch`.
+`--target` or `-t`: select a target. Supported targets are `x86`, `x86-free`, `aarch`, and `aarch-free`.
 
 ```sh
 subsea build -t x86-free kernel.ss
 ```
 
-`--entry`: select the linker-visible entry symbol for `x86-free`. The source program still uses `main`; codegen emits that entry block with the requested symbol.
+`--entry`: select the linker-visible entry symbol for a freestanding target. The source program still uses `main`; codegen emits that entry block with the requested symbol.
 
 ```sh
 subsea build -t x86-free --entry kernel_entry kernel.ss
