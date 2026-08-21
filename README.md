@@ -803,7 +803,7 @@ rbx = [&buf]
 
 ## Stack Variables
 
-Use `stack` to declare label-local mutable storage in the current label's stack frame:
+Use `stack` to declare function-local storage in the current function's stack frame:
 
 ```ss
 main: {
@@ -832,11 +832,13 @@ count = 5    // store to stack slot
 rax = count  // load from stack slot
 ```
 
-Stack variables live from label entry to label exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
+Stack variables live from function entry to function exit, not from the declaration line. A `stack` declaration inside a loop does not allocate once per iteration.
 
-If a label declares stack variables, Subsea reserves `rbp` for the stack frame in that label. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a label that uses `stack`.
+If a function declares stack variables, Subsea reserves `rbp` for the stack frame in that function. Do not read or write `rbp`, `ebp`, `bp`, or `bpl` manually in a function that uses `stack`.
 
-Stack strings are runtime string slices stored as an address and a byte length. A literal initializer points at compiler-emitted read-only bytes:
+The stack `str` type is a descriptor stored as an address and a byte length on the stack. The descriptor is stored in the current function's stack frame, but its backing bytes are not necessarily on the stack. Stack string descriptors are currently initialized only at declaration; whether the bytes can be modified depends on their backing storage.
+
+A literal initializer points at compiler-emitted read-only bytes:
 
 ```ss
 stack message:str = "Hello\n"
@@ -850,6 +852,47 @@ stack message:str = "Hello\n"
 rsi = message.ptr
 rdx = message.len
 ```
+
+A stack string can also be a view over writable `mem` storage. The descriptor remains in the stack frame, while changing the backing bytes changes what the string prints:
+
+```ss
+mem text:u8(16)
+
+main: {
+  [text] = "Hello"
+  stack message:str = slice(&text, 5)
+
+  linux.print message  // Hello
+  linux.print "\n"
+
+  text[0] = 74       // ASCII 'J'
+  linux.print message  // Jello
+  linux.print "\n"
+
+  linux.exit 0
+}
+```
+
+Use a stack byte buffer when the writable backing storage should be local to the current function - unlike global `mem`. The buffer has a fixed capacity, is zero-initialized, and can be used as the backing storage for a stack `str` descriptor:
+
+```ss
+main: {
+  stack buffer:u8(16)
+  [buffer] = "Hello"
+
+  stack message:str = slice(&buffer, 5)
+  linux.print message
+  linux.print "\n"
+
+  buffer[0]:u8 = 74       // ASCII 'J'
+  linux.print message
+  linux.print "\n"
+
+  linux.exit 0
+}
+```
+
+The buffer is function-local and fixed-size. Indexed access is low-level and does not perform runtime bounds checks; keep accesses within the declared capacity.
 
 ## Manual Stack Operations
 
