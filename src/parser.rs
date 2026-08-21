@@ -8,7 +8,7 @@ use crate::ast::{
 use crate::diagnostic::{Diagnostic, ProgramOrigins, Span};
 use crate::grammar::Token;
 use crate::lexer::SpannedToken;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -2368,7 +2368,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         let mut bindings = HashSet::new();
         let mut operand_bindings = HashSet::new();
         let mut string_bindings = HashSet::new();
-        let mut stack_buffers = HashSet::new();
+        let mut stack_buffers = HashMap::new();
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Const { name, value } => {
@@ -2414,7 +2414,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     bindings.insert(name.as_str());
                     operand_bindings.insert(name.as_str());
                 }
-                Instruction::StackBuffer { name, .. } => {
+                Instruction::StackBuffer { name, count } => {
                     if data_names.contains(name.as_str()) {
                         return Err(format!(
                             "Name {name:?} in label {:?} conflicts with top-level data",
@@ -2430,7 +2430,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     }
 
                     bindings.insert(name.as_str());
-                    stack_buffers.insert(name.as_str());
+                    stack_buffers.insert(name.as_str(), *count);
                 }
                 Instruction::StackString { name, .. } => {
                     if data_names.contains(name.as_str()) {
@@ -2477,7 +2477,7 @@ fn validate_instruction_symbols(
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
     string_bindings: &HashSet<&str>,
-    stack_buffers: &HashSet<&str>,
+    stack_buffers: &HashMap<&str, usize>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     top_level_labels: &HashSet<&str>,
@@ -2523,7 +2523,7 @@ fn validate_instruction_symbols(
         Instruction::Read { dst, .. } => {
             if let Operand::Pointer(name) = dst
                 && !memory.contains(name.as_str())
-                && !stack_buffers.contains(name.as_str())
+                && !stack_buffers.contains_key(name.as_str())
             {
                 return Err(format!(
                     "Read destination {name:?} in label {current_label:?} must be memory or a stack buffer"
@@ -2553,6 +2553,75 @@ fn validate_instruction_symbols(
             labels,
             current_label,
         );
+    });
+
+    result?;
+    validate_stack_buffer_accesses(instruction, stack_buffers)
+}
+
+fn validate_stack_buffer_accesses(
+    instruction: &Instruction,
+    stack_buffers: &HashMap<&str, usize>,
+) -> Result<(), String> {
+    let string_bytes_destination = match instruction {
+        Instruction::Assign { dst, value } | Instruction::AssignIf { dst, value, .. } => {
+            match (dst, value) {
+                (
+                    AssignmentTarget::Operand(Operand::Dereference { address, .. }),
+                    AssignmentValue::StringBytes { value },
+                ) => Some((address, value.len())),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    let mut result = Ok(());
+    instruction.visit_operands(|operand| {
+        if result.is_err() {
+            return;
+        }
+
+        let (address, width) = match operand {
+            Operand::Dereference { address, width } => {
+                let width = width.map(MemoryWidth::size).or_else(|| {
+                    string_bytes_destination
+                        .filter(|(destination, _)| *destination == address)
+                        .map(|(_, length)| length)
+                });
+                let Some(width) = width else {
+                    return;
+                };
+                (address, width)
+            }
+            Operand::AddressOf(address) => (address, 1),
+            _ => return,
+        };
+
+        let AddressTerm::Ident(name) = &address.first else {
+            return;
+        };
+        let Some(capacity) = stack_buffers.get(name.as_str()) else {
+            return;
+        };
+
+        let mut offset = 0i128;
+        for (operator, term) in &address.rest {
+            let AddressTerm::Immediate(value) = term else {
+                return;
+            };
+            offset += match operator {
+                AddressOperator::Add => *value,
+                AddressOperator::Subtract => -*value,
+            };
+        }
+
+        let end = offset + width as i128;
+        if offset < 0 || end > *capacity as i128 {
+            result = Err(format!(
+                "Stack buffer {name:?} access at offset {offset} with width {width} exceeds capacity {capacity}"
+            ));
+        }
     });
 
     result
@@ -2590,7 +2659,7 @@ fn validate_operand_symbol(
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
     string_bindings: &HashSet<&str>,
-    stack_buffers: &HashSet<&str>,
+    stack_buffers: &HashMap<&str, usize>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
@@ -2628,7 +2697,7 @@ fn validate_operand_symbol(
         Operand::Pointer(name)
             if !memory.contains(name.as_str())
                 && !labels.contains(name.as_str())
-                && !stack_buffers.contains(name.as_str()) =>
+                && !stack_buffers.contains_key(name.as_str()) =>
         {
             Err(format!(
                 "Unknown address target {name:?} in label {current_label:?}"
@@ -2641,7 +2710,7 @@ fn validate_operand_symbol(
                 if let AddressTerm::Ident(name) = term
                     && !memory.contains(name.as_str())
                     && !labels.contains(name.as_str())
-                    && !stack_buffers.contains(name.as_str())
+                    && !stack_buffers.contains_key(name.as_str())
                 {
                     return Err(format!(
                         "Unknown address symbol {name:?} in label {current_label:?}"

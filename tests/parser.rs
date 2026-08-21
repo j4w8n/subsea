@@ -508,6 +508,62 @@ fn rejects_non_byte_stack_buffer() {
 }
 
 #[test]
+fn rejects_constant_stack_buffer_index_out_of_bounds() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        tid("buffer"),
+        Token::Colon,
+        tid("u8"),
+        Token::LParen,
+        tnum("16"),
+        Token::RParen,
+        tid("buffer"),
+        Token::LBracket,
+        tnum("16"),
+        Token::RBracket,
+        Token::Colon,
+        tid("u8"),
+        Token::Equals,
+        tnum("1"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+    assert_eq!(
+        validate_program_symbols(&program).unwrap_err(),
+        "Stack buffer \"buffer\" access at offset 16 with width 1 exceeds capacity 16"
+    );
+}
+
+#[test]
+fn rejects_constant_stack_buffer_access_that_exceeds_width() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        tid("buffer"),
+        Token::Colon,
+        tid("u8"),
+        Token::LParen,
+        tnum("16"),
+        Token::RParen,
+        tid("buffer"),
+        Token::LBracket,
+        tnum("15"),
+        Token::RBracket,
+        Token::Colon,
+        tid("u16"),
+        Token::Equals,
+        treg("rax"),
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+    assert_eq!(
+        validate_program_symbols(&program).unwrap_err(),
+        "Stack buffer \"buffer\" access at offset 15 with width 2 exceeds capacity 16"
+    );
+}
+
+#[test]
 fn parses_stack_string_literal() {
     let mut tokens = empty_main_prefix();
     tokens.extend([
