@@ -8,8 +8,10 @@ use subsea::ast::{
     Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
 use subsea::codegen::{
-    Target, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol, emit_x86_64_linux_asm,
+    Target, emit_target_asm_with_origins, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol,
+    emit_x86_64_linux_asm,
 };
+use subsea::diagnostic::ProgramOrigins;
 
 fn s(value: &str) -> String {
     value.to_string()
@@ -98,6 +100,247 @@ fn assert_assembles(asm: &str) {
         "assembler failed:\n{}\nassembly:\n{asm}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn emits_aarch64_source_level_codegen() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: Vec::new(),
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("x0")),
+                    value: AssignmentValue::Operand(Operand::Immediate(7)),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_target_asm_with_origins(
+        &program,
+        Target::AArch64Linux,
+        "_start",
+        &ProgramOrigins::default(),
+    )
+    .unwrap();
+
+    assert!(asm.contains("mov x0, #7\n"));
+}
+
+#[test]
+fn assembles_aarch64_source_level_addressing_when_available() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Buffer {
+            name: s("buffer"),
+            width: MemoryWidth::U64,
+            count: 16,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("x0")),
+                    value: AssignmentValue::Operand(Operand::AddressOf(Address {
+                        first: AddressTerm::Ident(s("buffer")),
+                        rest: vec![
+                            (
+                                AddressOperator::Add,
+                                AddressTerm::ScaledRegister {
+                                    register: s("x1"),
+                                    scale: 8,
+                                },
+                            ),
+                            (AddressOperator::Subtract, AddressTerm::Register(s("x2"))),
+                        ],
+                    })),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_target_asm_with_origins(
+        &program,
+        Target::AArch64Linux,
+        "_start",
+        &ProgramOrigins::default(),
+    )
+    .unwrap();
+
+    if Command::new("aarch64-linux-gnu-as")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let asm_path = std::env::temp_dir().join(format!(
+            "subsea-aarch64-source-{}-{unique}.s",
+            std::process::id()
+        ));
+        let object_path = asm_path.with_extension("o");
+        std::fs::write(&asm_path, asm).unwrap();
+        let output = Command::new("aarch64-linux-gnu-as")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&object_path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&asm_path);
+        let _ = std::fs::remove_file(&object_path);
+        assert!(
+            output.status.success(),
+            "AArch64 assembler failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn emit_aarch64_source(
+    mut instructions: Vec<Instruction>,
+) -> Result<String, subsea::diagnostic::Diagnostic> {
+    instructions.push(Instruction::Exit { code: 0 });
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: Vec::new(),
+        labels: vec![Label {
+            name: s("main"),
+            instructions,
+        }],
+    };
+    emit_target_asm_with_origins(
+        &program,
+        Target::AArch64Linux,
+        "_start",
+        &ProgramOrigins::default(),
+    )
+}
+
+#[test]
+fn validates_aarch64_public_indirect_calls_and_register_widths() {
+    let error = emit_aarch64_source(vec![Instruction::Call {
+        target: ControlTarget::Operand(reg("w0")),
+    }]);
+    assert_eq!(
+        error.unwrap_err().message,
+        "AArch64 indirect call target must be a 64-bit integer operand"
+    );
+}
+
+#[test]
+fn validates_aarch64_public_float_widths() {
+    let error = emit_aarch64_source(vec![Instruction::Assign {
+        dst: AssignmentTarget::Operand(reg("v0")),
+        value: AssignmentValue::FloatBinary {
+            width: MemoryWidth::F32,
+            op: FloatMathOp::Add,
+            lhs: reg("s0"),
+            rhs: reg("d1"),
+        },
+    }]);
+    assert!(error.is_err());
+}
+
+#[test]
+fn validates_aarch64_public_push_and_pop_operands() {
+    let error = emit_aarch64_source(vec![Instruction::Push { src: reg("s0") }]);
+    assert_eq!(
+        error.unwrap_err().message,
+        "AArch64 push operand must be a 64-bit integer value"
+    );
+
+    let error = emit_aarch64_source(vec![
+        Instruction::Push { src: reg("x0") },
+        Instruction::Pop { dst: reg("w0") },
+    ]);
+    assert_eq!(
+        error.unwrap_err().message,
+        "AArch64 backend does not support pop destination must be a 64-bit register or explicitly 64-bit memory operand yet"
+    );
+}
+
+#[test]
+fn emits_aarch64_public_integer_and_pair_arithmetic() {
+    let asm = emit_aarch64_source(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("x0")),
+            value: AssignmentValue::Binary {
+                op: MathOp::Add,
+                lhs: reg("x1"),
+                rhs: reg("x2"),
+            },
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair(rpair("x1", "x0")),
+            value: AssignmentValue::PairBinary {
+                op: PairBinaryOp::Add,
+                lhs: rpair("x1", "x0"),
+                rhs: rpair("x3", "x2"),
+            },
+        },
+    ])
+    .unwrap();
+
+    assert!(asm.contains("add x0, x1, x2\n"));
+    assert!(asm.contains("adds x0, x0, x2\n  adc x1, x1, x3\n"));
+}
+
+#[test]
+fn emits_aarch64_public_cast_and_float_arithmetic() {
+    let asm = emit_aarch64_source(vec![
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("v0")),
+            value: AssignmentValue::Operand(Operand::Cast {
+                operand: Box::new(reg("x0")),
+                width: MemoryWidth::F64,
+            }),
+        },
+        Instruction::Assign {
+            dst: AssignmentTarget::Operand(reg("v1")),
+            value: AssignmentValue::FloatBinary {
+                width: MemoryWidth::F64,
+                op: FloatMathOp::Add,
+                lhs: reg("v0"),
+                rhs: float("1.0"),
+            },
+        },
+    ])
+    .unwrap();
+
+    assert!(asm.contains("scvtf d0, x16\n"));
+    assert!(asm.contains("fadd d1, d16, d17\n"));
+}
+
+#[test]
+fn emits_aarch64_public_stack_string_runtime_print() {
+    let asm = emit_aarch64_source(vec![
+        Instruction::StackString {
+            name: s("message"),
+            value: StringInitializer::Literal(s("hello")),
+        },
+        Instruction::Print {
+            parts: vec![PrintPart::Binding(s("message"))],
+        },
+    ])
+    .unwrap();
+
+    assert!(asm.contains("mov x8, #64\n"));
+    assert!(asm.contains("ldr x2, [x29, #56]\n"));
 }
 
 #[test]
@@ -2992,6 +3235,74 @@ fn emits_integer_to_float_casts() {
 }
 
 #[test]
+fn emits_unsigned_narrow_integer_to_float_casts() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("count"),
+            width: MemoryWidth::U32,
+            value: 4_000_000_000,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("xmm0")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("count", None)),
+                        width: MemoryWidth::F64,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  mov r11d, dword ptr [count]\n"));
+    assert!(asm.contains("  cvtsi2sd xmm0, r11\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_unsigned_u64_integer_to_float_casts() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::Scalar {
+            name: s("count"),
+            width: MemoryWidth::U64,
+            value: 9_000_000_000,
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("xmm0")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("count", None)),
+                        width: MemoryWidth::F64,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  test r11, r11\n"));
+    assert!(asm.contains("  cvtsi2sd xmm0, r10\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
 fn emits_float_memory_to_integer_casts() {
     let program = Program {
         imports: Vec::new(),
@@ -3030,6 +3341,75 @@ fn emits_float_memory_to_integer_casts() {
     assert!(asm.contains("  cvttsd2si rax, qword ptr [ratio]\n"));
     assert!(asm.contains("  cvttsd2si r11d, qword ptr [ratio]\n"));
     assert!(asm.contains("  mov cx, r11w\n"));
+    assert!(asm.contains("  ud2\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_unsigned_narrow_float_to_integer_casts() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::FloatScalar {
+            name: s("ratio"),
+            width: MemoryWidth::F64,
+            value: s("4294967295.0"),
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("eax")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("ratio", None)),
+                        width: MemoryWidth::U32,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  cvttsd2si r11, qword ptr [ratio]\n"));
+    assert!(asm.contains("  mov eax, r11d\n"));
+    assert_assembles(&asm);
+}
+
+#[test]
+fn emits_unsigned_u64_float_to_integer_casts() {
+    let program = Program {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        entry: s("main"),
+        data: Vec::new(),
+        memory: vec![MemoryDeclaration::FloatScalar {
+            name: s("ratio"),
+            width: MemoryWidth::F64,
+            value: s("9223372036854775808.0"),
+        }],
+        labels: vec![Label {
+            name: s("main"),
+            instructions: vec![
+                Instruction::Assign {
+                    dst: AssignmentTarget::Operand(reg("rax")),
+                    value: AssignmentValue::Operand(Operand::Cast {
+                        operand: Box::new(deref_ident("ratio", None)),
+                        width: MemoryWidth::U64,
+                    }),
+                },
+                Instruction::Exit { code: 0 },
+            ],
+        }],
+    };
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("  ucomisd xmm15, xmm14\n"));
+    assert!(asm.contains("  or rax, r10\n"));
     assert_assembles(&asm);
 }
 

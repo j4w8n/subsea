@@ -2639,14 +2639,58 @@ fn emit_ir_special_copy(
                     ir_operand_width(operand, strings, label_name, stack).ok_or_else(|| {
                         String::from("Integer-to-float cast source must have a known width")
                     })?;
-                let src = emit_ir_operand(operand, strings, label_name, stack)?;
+                let source_memory_width = match &**operand {
+                    ir::Operand::Name(name) => stack_scalar_slot(stack, name)
+                        .map(|(_, width)| width)
+                        .or_else(|| {
+                            strings
+                                .integers
+                                .get(&(label_name.to_owned(), name.clone()))
+                                .and_then(|binding| binding.width)
+                        }),
+                    _ => ir_operand_memory_width(operand, strings, stack),
+                };
+                if matches!(
+                    source_memory_width,
+                    Some(MemoryWidth::U64 | MemoryWidth::Ptr)
+                ) {
+                    let src = emit_ir_operand(operand, strings, label_name, stack)?;
+                    emit_unsigned_u64_to_float_cast(asm, dst_register, &src, *width, operand)?;
+                    return Ok(());
+                }
                 let opcode = match width {
                     MemoryWidth::F32 => "cvtsi2ss",
                     MemoryWidth::F64 => "cvtsi2sd",
                     _ => unreachable!(),
                 };
-                let _ = src_width;
-                asm::instruction(asm, format_args!("{opcode} {dst_register}, {src}"));
+                let unsigned = matches!(src_width, Width::Bits8 | Width::Bits16 | Width::Bits32)
+                    && source_memory_width.is_some_and(|width| {
+                        matches!(width, MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32)
+                    });
+                let src = emit_ir_operand(operand, strings, label_name, stack)?;
+                if unsigned {
+                    let scratch = if !ir_operand_uses_register_family(operand, "r11") {
+                        "r11"
+                    } else if !ir_operand_uses_register_family(operand, "r10") {
+                        "r10"
+                    } else {
+                        return Err(String::from(
+                            "Unsigned integer-to-float cast source cannot use both r10 and r11",
+                        ));
+                    };
+                    match src_width {
+                        Width::Bits8 | Width::Bits16 => {
+                            asm::instruction(asm, format_args!("movzx {scratch}, {src}"));
+                        }
+                        Width::Bits32 => {
+                            asm::instruction(asm, format_args!("mov {scratch}d, {src}"));
+                        }
+                        Width::Bits64 => unreachable!(),
+                    }
+                    asm::instruction(asm, format_args!("{opcode} {dst_register}, {scratch}"));
+                } else {
+                    asm::instruction(asm, format_args!("{opcode} {dst_register}, {src}"));
+                }
             } else {
                 let ir::Operand::TargetRegister(dst_register) = dst else {
                     return Err(String::from(
@@ -2667,6 +2711,7 @@ fn emit_ir_special_copy(
                         String::from("Float-to-integer cast source must have a known width")
                     })?;
                 let src = emit_ir_operand(operand, strings, label_name, stack)?;
+                emit_float_to_integer_validation_x86(asm, &src, src_width, *width)?;
                 let opcode = match src_width {
                     MemoryWidth::F32 => "cvttss2si",
                     MemoryWidth::F64 => "cvttsd2si",
@@ -2679,15 +2724,34 @@ fn emit_ir_special_copy(
                 let dst_width = register_width(dst_register).ok_or_else(|| {
                     String::from("Float-to-integer cast destination must be an integer register")
                 })?;
+                let unsigned =
+                    matches!(width, MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32);
+                if matches!(width, MemoryWidth::U64 | MemoryWidth::Ptr) {
+                    emit_float_to_unsigned_u64_cast(asm, dst_register, &src, src_width)?;
+                    return Ok(());
+                }
                 if matches!(dst_width, Width::Bits8 | Width::Bits16) {
                     let scratch = if same_register_family(dst_register, "r11") {
                         "r10"
                     } else {
                         "r11"
                     };
-                    asm::instruction(asm, format_args!("{opcode} {scratch}d, {src}"));
+                    let conversion_register = if unsigned {
+                        scratch
+                    } else {
+                        &format!("{scratch}d")
+                    };
+                    asm::instruction(asm, format_args!("{opcode} {conversion_register}, {src}"));
                     let scratch = register_alias(scratch, dst_width)?;
                     asm::instruction(asm, format_args!("mov {dst_register}, {scratch}"));
+                } else if unsigned && matches!(dst_width, Width::Bits32) {
+                    let scratch = if same_register_family(dst_register, "r11") {
+                        "r10"
+                    } else {
+                        "r11"
+                    };
+                    asm::instruction(asm, format_args!("{opcode} {scratch}, {src}"));
+                    asm::instruction(asm, format_args!("mov {dst_register}, {scratch}d"));
                 } else {
                     asm::instruction(asm, format_args!("{opcode} {dst_register}, {src}"));
                 }
@@ -2695,6 +2759,258 @@ fn emit_ir_special_copy(
         }
         _ => unreachable!(),
     }
+    Ok(())
+}
+
+fn emit_float_to_integer_validation_x86(
+    asm: &mut String,
+    src: &str,
+    source_width: MemoryWidth,
+    destination_width: MemoryWidth,
+) -> Result<(), String> {
+    let suffix = match source_width {
+        MemoryWidth::F32 => "ss",
+        MemoryWidth::F64 => "sd",
+        _ => {
+            return Err(String::from(
+                "Float-to-integer cast source must be floating-point",
+            ));
+        }
+    };
+    let source_xmm = if src.starts_with("xmm15") {
+        "xmm14"
+    } else {
+        "xmm15"
+    };
+    let threshold_xmm = if source_xmm == "xmm15" {
+        "xmm14"
+    } else {
+        "xmm15"
+    };
+    let invalid = format!(".L.__subsea.x86.invalid_cast_{}", asm.len());
+    let done = format!(".L.__subsea.x86.valid_cast_{}", asm.len());
+    let bits = destination_width.size() * 8;
+    let unsigned = matches!(
+        destination_width,
+        MemoryWidth::U8 | MemoryWidth::U16 | MemoryWidth::U32 | MemoryWidth::U64 | MemoryWidth::Ptr
+    );
+    asm::push(asm, asm::Operand::Register(String::from("r10")));
+    asm::instruction(asm, format_args!("mov{suffix} {source_xmm}, {src}"));
+    if unsigned {
+        asm::instruction(asm, format_args!("pxor {threshold_xmm}, {threshold_xmm}"));
+        asm::instruction(
+            asm,
+            format_args!("ucomi{suffix} {source_xmm}, {threshold_xmm}"),
+        );
+        asm::branch(asm, "jp", asm::Operand::Address(invalid.clone()));
+        asm::branch(asm, "jb", asm::Operand::Address(invalid.clone()));
+    } else {
+        let lower = x86_integer_cast_bound(bits, false, false)?;
+        load_x86_float_constant(asm, threshold_xmm, source_width, lower);
+        asm::instruction(
+            asm,
+            format_args!("ucomi{suffix} {source_xmm}, {threshold_xmm}"),
+        );
+        asm::branch(asm, "jp", asm::Operand::Address(invalid.clone()));
+        asm::branch(asm, "jb", asm::Operand::Address(invalid.clone()));
+    }
+    let upper = x86_integer_cast_bound(bits, unsigned, true)?;
+    load_x86_float_constant(asm, threshold_xmm, source_width, upper);
+    asm::instruction(
+        asm,
+        format_args!("ucomi{suffix} {source_xmm}, {threshold_xmm}"),
+    );
+    asm::branch(asm, "jp", asm::Operand::Address(invalid.clone()));
+    asm::branch(asm, "jae", asm::Operand::Address(invalid.clone()));
+    asm::pop(asm, asm::Operand::Register(String::from("r10")));
+    asm::branch(asm, "jmp", asm::Operand::Address(done.clone()));
+    asm::label(asm, &invalid);
+    asm::pop(asm, asm::Operand::Register(String::from("r10")));
+    asm::instruction(asm, "ud2");
+    asm::label(asm, &done);
+    Ok(())
+}
+
+fn x86_integer_cast_bound(
+    bits: usize,
+    unsigned: bool,
+    upper: bool,
+) -> Result<&'static str, String> {
+    match (bits, unsigned, upper) {
+        (8, false, false) => Ok("-128.0"),
+        (8, false, true) => Ok("128.0"),
+        (16, false, false) => Ok("-32768.0"),
+        (16, false, true) => Ok("32768.0"),
+        (32, false, false) => Ok("-2147483648.0"),
+        (32, false, true) => Ok("2147483648.0"),
+        (64, false, false) => Ok("-9223372036854775808.0"),
+        (64, false, true) => Ok("9223372036854775808.0"),
+        (8, true, true) => Ok("256.0"),
+        (16, true, true) => Ok("65536.0"),
+        (32, true, true) => Ok("4294967296.0"),
+        (64, true, true) => Ok("18446744073709551616.0"),
+        _ => Err(String::from("unsupported integer cast bound")),
+    }
+}
+
+fn load_x86_float_constant(asm: &mut String, register: &str, width: MemoryWidth, value: &str) {
+    let immediate = match (width, value) {
+        (MemoryWidth::F32, "-128.0") => "0xc3000000",
+        (MemoryWidth::F32, "128.0") => "0x43000000",
+        (MemoryWidth::F32, "-32768.0") => "0xc7000000",
+        (MemoryWidth::F32, "32768.0") => "0x47000000",
+        (MemoryWidth::F32, "-2147483648.0") => "0xcf000000",
+        (MemoryWidth::F32, "2147483648.0") => "0x4f000000",
+        (MemoryWidth::F32, "256.0") => "0x43800000",
+        (MemoryWidth::F32, "65536.0") => "0x47800000",
+        (MemoryWidth::F32, "4294967296.0") => "0x4f800000",
+        (MemoryWidth::F64, "-128.0") => "0xc060000000000000",
+        (MemoryWidth::F64, "128.0") => "0x4060000000000000",
+        (MemoryWidth::F64, "-32768.0") => "0xc0e0000000000000",
+        (MemoryWidth::F64, "32768.0") => "0x40e0000000000000",
+        (MemoryWidth::F64, "-2147483648.0") => "0xc1e0000000000000",
+        (MemoryWidth::F64, "2147483648.0") => "0x41e0000000000000",
+        (MemoryWidth::F64, "256.0") => "0x4070000000000000",
+        (MemoryWidth::F64, "65536.0") => "0x40f0000000000000",
+        (MemoryWidth::F64, "4294967296.0") => "0x41f0000000000000",
+        (MemoryWidth::F64, "-9223372036854775808.0") => "0xc3e0000000000000",
+        (MemoryWidth::F64, "9223372036854775808.0") => "0x43e0000000000000",
+        (MemoryWidth::F64, "18446744073709551616.0") => "0x43f0000000000000",
+        (MemoryWidth::F32, "-9223372036854775808.0") => "0xdf000000",
+        (MemoryWidth::F32, "9223372036854775808.0") => "0x5f000000",
+        (MemoryWidth::F32, "18446744073709551616.0") => "0x5f800000",
+        _ => "0",
+    };
+    asm::instruction(asm, format_args!("mov r10, {immediate}"));
+    if width == MemoryWidth::F32 {
+        asm::instruction(asm, format_args!("movd {register}, r10d"));
+    } else {
+        asm::instruction(asm, format_args!("movq {register}, r10"));
+    }
+}
+
+fn emit_unsigned_u64_to_float_cast(
+    asm: &mut String,
+    dst: &str,
+    src: &str,
+    width: MemoryWidth,
+    operand: &ir::Operand,
+) -> Result<(), String> {
+    let value = match operand {
+        ir::Operand::TargetRegister(register) => register.as_str(),
+        _ => "r11",
+    };
+    let work = if same_register_family(value, "r10") {
+        "r11"
+    } else {
+        "r10"
+    };
+    if !matches!(operand, ir::Operand::TargetRegister(_)) {
+        asm::instruction(asm, format_args!("mov {value}, {src}"));
+    }
+    let constant_xmm = if dst == "xmm15" { "xmm14" } else { "xmm15" };
+    let signed_label = format!(".L.__subsea.x86.cast_signed_{}", asm.len());
+    let done_label = format!(".L.__subsea.x86.cast_done_{}", asm.len());
+    let convert = match width {
+        MemoryWidth::F32 => "cvtsi2ss",
+        MemoryWidth::F64 => "cvtsi2sd",
+        _ => {
+            return Err(String::from(
+                "Integer-to-float cast destination must be floating-point",
+            ));
+        }
+    };
+    let (add, move_constant, constant) = match width {
+        MemoryWidth::F32 => ("addss", "movd", "0x3f800000"),
+        MemoryWidth::F64 => ("addsd", "movq", "0x3ff0000000000000"),
+        _ => unreachable!(),
+    };
+    asm::instruction(asm, format_args!("test {value}, {value}"));
+    asm::branch(asm, "jns", asm::Operand::Address(signed_label.clone()));
+    asm::instruction(asm, format_args!("mov {work}, {value}"));
+    asm::instruction(asm, format_args!("shr {work}, 1"));
+    asm::instruction(asm, format_args!("{convert} {dst}, {work}"));
+    asm::instruction(asm, format_args!("{add} {dst}, {dst}"));
+    asm::instruction(asm, format_args!("test {value}, 1"));
+    asm::branch(asm, "jz", asm::Operand::Address(done_label.clone()));
+    asm::instruction(asm, format_args!("mov {work}, {constant}"));
+    asm::instruction(asm, format_args!("{move_constant} {constant_xmm}, {work}"));
+    asm::instruction(asm, format_args!("{add} {dst}, {constant_xmm}"));
+    asm::branch(asm, "jmp", asm::Operand::Address(done_label.clone()));
+    asm::label(asm, &signed_label);
+    asm::instruction(asm, format_args!("{convert} {dst}, {value}"));
+    asm::label(asm, &done_label);
+    Ok(())
+}
+
+fn emit_float_to_unsigned_u64_cast(
+    asm: &mut String,
+    dst: &str,
+    src: &str,
+    width: MemoryWidth,
+) -> Result<(), String> {
+    let source_xmm = if src.starts_with("xmm15") {
+        "xmm14"
+    } else {
+        "xmm15"
+    };
+    let threshold_xmm = if source_xmm == "xmm15" {
+        "xmm14"
+    } else {
+        "xmm15"
+    };
+    let scratch = if same_register_family(dst, "r10") {
+        "r11"
+    } else {
+        "r10"
+    };
+    let (move_source, move_constant, compare, subtract, convert, threshold, high_bit) = match width
+    {
+        MemoryWidth::F32 => (
+            "movss",
+            "movd",
+            "ucomiss",
+            "subss",
+            "cvttss2si",
+            "0x5f000000",
+            "0x8000000000000000",
+        ),
+        MemoryWidth::F64 => (
+            "movsd",
+            "movq",
+            "ucomisd",
+            "subsd",
+            "cvttsd2si",
+            "0x43e0000000000000",
+            "0x8000000000000000",
+        ),
+        _ => {
+            return Err(String::from(
+                "Float-to-integer cast source must be floating-point",
+            ));
+        }
+    };
+    let signed_label = format!(".L.__subsea.x86.cast_signed_{}", asm.len());
+    let done_label = format!(".L.__subsea.x86.cast_done_{}", asm.len());
+    asm::instruction(asm, format_args!("{move_source} {source_xmm}, {src}"));
+    asm::instruction(asm, format_args!("mov {scratch}, {threshold}"));
+    asm::instruction(
+        asm,
+        format_args!("{move_constant} {threshold_xmm}, {scratch}"),
+    );
+    asm::instruction(asm, format_args!("{compare} {source_xmm}, {threshold_xmm}"));
+    asm::branch(asm, "jb", asm::Operand::Address(signed_label.clone()));
+    asm::instruction(
+        asm,
+        format_args!("{subtract} {source_xmm}, {threshold_xmm}"),
+    );
+    asm::instruction(asm, format_args!("{convert} {dst}, {source_xmm}"));
+    asm::instruction(asm, format_args!("mov {scratch}, {high_bit}"));
+    asm::instruction(asm, format_args!("or {dst}, {scratch}"));
+    asm::branch(asm, "jmp", asm::Operand::Address(done_label.clone()));
+    asm::label(asm, &signed_label);
+    asm::instruction(asm, format_args!("{convert} {dst}, {source_xmm}"));
+    asm::label(asm, &done_label);
     Ok(())
 }
 
@@ -5530,3 +5846,7 @@ pub(crate) fn emit_linux_mmap(asm: &mut String) {
 pub(crate) fn emit_linux_munmap(asm: &mut String) {
     emit_linux_syscall(asm, linux::SYS_MUNMAP);
 }
+
+#[cfg(test)]
+#[path = "codegen_tests.rs"]
+mod tests;
