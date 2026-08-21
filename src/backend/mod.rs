@@ -1,6 +1,5 @@
-pub mod aarch64;
+pub(crate) mod aarch64;
 pub(crate) mod x86_64;
-pub use x86_64::machine as x86_64_machine;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Architecture {

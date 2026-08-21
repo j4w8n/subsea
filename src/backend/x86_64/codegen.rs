@@ -1,3 +1,8 @@
+use super::asm;
+use super::{
+    family as register_family, is_extended as is_extended_register,
+    is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, width as register_width,
+};
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
     build_stack_frame_from_layout, collect_ir_string_bindings, memory_width_bits,
@@ -7,11 +12,6 @@ use crate::analysis::{
 use crate::ast::{
     BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth, PairBinaryOp,
     Program,
-};
-use crate::backend::x86_64::asm;
-use crate::backend::x86_64::{
-    family as register_family, is_extended as is_extended_register,
-    is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, width as register_width,
 };
 use crate::backend::{
     Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target, TargetSpec,
@@ -222,6 +222,15 @@ pub(crate) fn emit_x86_64_asm_with_origins(
     let semantic_ir = lower::lower_program(program)
         .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
     emit_ir_x86_64_asm_with_origins(&semantic_ir, target, entry_symbol, origins)
+}
+
+#[cfg(test)]
+pub(crate) fn emit_ir_x86_64_asm(
+    program: &ir::Program,
+    target: Target,
+    entry_symbol: &str,
+) -> Result<String, BackendError> {
+    emit_ir_x86_64_asm_impl(program, target, entry_symbol, None)
 }
 
 fn emit_x86_64_asm_impl(
@@ -829,13 +838,7 @@ fn emit_ir_wide_math_assignment(
         asm::prepare_division(asm, signed);
     }
     let rhs = ir_machine_operand(&rhs, strings, label_name, stack)?;
-    asm::emit(
-        &asm::Instruction::WideMath {
-            opcode: wide_math_opcode(division, signed).to_owned(),
-            operand: rhs,
-        },
-        asm,
-    );
+    asm::wide_math(asm, wide_math_opcode(division, signed).to_owned(), rhs);
     Ok(())
 }
 
@@ -1048,30 +1051,24 @@ fn emit_ir_condition_jump(
                 invert_compare_op(op)
             };
             if use_test {
-                asm::emit(
-                    &asm::Instruction::Compare {
-                        opcode: String::from("test"),
-                        lhs: asm::Operand::Address(lhs.clone()),
-                        rhs: asm::Operand::Address(lhs),
-                    },
+                asm::compare(
                     asm,
+                    String::from("test"),
+                    asm::Operand::Address(lhs.clone()),
+                    asm::Operand::Address(lhs),
                 );
             } else {
-                asm::emit(
-                    &asm::Instruction::Compare {
-                        opcode: String::from("cmp"),
-                        lhs: asm::Operand::Address(lhs),
-                        rhs: asm::Operand::Address(rhs),
-                    },
+                asm::compare(
                     asm,
+                    String::from("cmp"),
+                    asm::Operand::Address(lhs),
+                    asm::Operand::Address(rhs),
                 );
             }
-            asm::emit(
-                &asm::Instruction::Branch {
-                    opcode: compare_jump_opcode(op).to_owned(),
-                    target: asm::Operand::Address(target.to_owned()),
-                },
+            asm::branch(
                 asm,
+                compare_jump_opcode(op).to_owned(),
+                asm::Operand::Address(target.to_owned()),
             );
             Ok(())
         }
@@ -1090,20 +1087,16 @@ fn emit_ir_condition_jump(
                 (CompareOp::NotEqual, true) | (CompareOp::Equal, false) => "jne",
                 _ => unreachable!(),
             };
-            asm::emit(
-                &asm::Instruction::Compare {
-                    opcode: String::from("test"),
-                    lhs: asm::Operand::Address(lhs),
-                    rhs: asm::Operand::Address(rhs),
-                },
+            asm::compare(
                 asm,
+                String::from("test"),
+                asm::Operand::Address(lhs),
+                asm::Operand::Address(rhs),
             );
-            asm::emit(
-                &asm::Instruction::Branch {
-                    opcode: jump.to_owned(),
-                    target: asm::Operand::Address(target.to_owned()),
-                },
+            asm::branch(
                 asm,
+                jump.to_owned(),
+                asm::Operand::Address(target.to_owned()),
             );
             Ok(())
         }
@@ -1609,23 +1602,13 @@ fn resolve_ir_print_part<'a>(
 
 fn emit_print_volatile_pushes(asm: &mut String) {
     for register in ["rax", "rcx", "rdi", "rsi", "rdx", "r11"] {
-        asm::emit(
-            &asm::Instruction::Push {
-                src: asm::Operand::Register(String::from(register)),
-            },
-            asm,
-        );
+        asm::push(asm, asm::Operand::Register(String::from(register)));
     }
 }
 
 fn emit_print_volatile_pops(asm: &mut String) {
     for register in ["r11", "rdx", "rsi", "rdi", "rcx", "rax"] {
-        asm::emit(
-            &asm::Instruction::Pop {
-                dst: asm::Operand::Register(String::from(register)),
-            },
-            asm,
-        );
+        asm::pop(asm, asm::Operand::Register(String::from(register)));
     }
 }
 
@@ -1669,298 +1652,188 @@ fn emit_print_operand_instruction(
     let prefix_done_label = format!(".L.__subsea.{label_name}.print_{index}_prefix_done");
     let digit_decimal_label = format!(".L.__subsea.{label_name}.print_{index}_digit_decimal");
 
-    asm::emit(
-        &asm::Instruction::Push {
-            src: asm::Operand::Register(String::from("rbx")),
-        },
+    asm::push(asm, asm::Operand::Register(String::from("rbx")));
+    asm::stack_adjust(asm, String::from("sub"), String::from("rsp"), 80);
+    asm::lea(
         asm,
-    );
-    asm::emit(
-        &asm::Instruction::StackAdjust {
-            opcode: String::from("sub"),
-            register: String::from("rsp"),
-            amount: 80,
-        },
-        asm,
-    );
-    asm::emit(
-        &asm::Instruction::LoadAddress {
-            dst: asm::Operand::Register(String::from("rsi")),
-            address: String::from("[rsp + 80]"),
-        },
-        asm,
+        asm::Operand::Register(String::from("rsi")),
+        String::from("[rsp + 80]"),
     );
     match format {
         ir::PrintFormat::Infer => unreachable!(),
         ir::PrintFormat::SignedDecimal(_) => {
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Register(String::from("rbx")),
-                    src: asm::Operand::Immediate(10),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Register(String::from("rbx")),
+                asm::Operand::Immediate(10),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: asm::Operand::Immediate(0),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsp]")),
+                asm::Operand::Immediate(0),
             );
-            asm::emit(
-                &asm::Instruction::Compare {
-                    opcode: String::from("cmp"),
-                    lhs: asm::Operand::Register(String::from("rax")),
-                    rhs: asm::Operand::Immediate(0),
-                },
+            asm::compare(
                 asm,
+                String::from("cmp"),
+                asm::Operand::Register(String::from("rax")),
+                asm::Operand::Immediate(0),
             );
-            asm::emit(
-                &asm::Instruction::Branch {
-                    opcode: String::from("jl"),
-                    target: asm::Operand::Address(negative_label.clone()),
-                },
+            asm::branch(
                 asm,
+                String::from("jl"),
+                asm::Operand::Address(negative_label.clone()),
             );
-            asm::emit(
-                &asm::Instruction::Jump {
-                    target: asm::Operand::Address(digits_label.clone()),
-                },
+            asm::jump(asm, asm::Operand::Address(digits_label.clone()));
+            asm::label(asm, negative_label.clone());
+            asm::unary(
                 asm,
+                String::from("neg"),
+                asm::Operand::Register(String::from("rax")),
             );
-            asm::emit(
-                &asm::Instruction::Label {
-                    name: negative_label.clone(),
-                },
+            asm::mov(
                 asm,
-            );
-            asm::emit(
-                &asm::Instruction::Unary {
-                    opcode: String::from("neg"),
-                    operand: asm::Operand::Register(String::from("rax")),
-                },
-                asm,
-            );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: asm::Operand::Immediate(45),
-                },
-                asm,
+                asm::Operand::Address(String::from("byte ptr [rsp]")),
+                asm::Operand::Immediate(45),
             );
         }
         ir::PrintFormat::UnsignedDecimal(_) => {
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Register(String::from("rbx")),
-                    src: asm::Operand::Immediate(10),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Register(String::from("rbx")),
+                asm::Operand::Immediate(10),
             );
         }
         ir::PrintFormat::Hex | ir::PrintFormat::Pointer => {
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Register(String::from("rbx")),
-                    src: asm::Operand::Immediate(16),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Register(String::from("rbx")),
+                asm::Operand::Immediate(16),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: asm::Operand::Immediate(48),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsp]")),
+                asm::Operand::Immediate(48),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
-                    src: asm::Operand::Immediate(120),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
+                asm::Operand::Immediate(120),
             );
         }
         ir::PrintFormat::Binary => {
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Register(String::from("rbx")),
-                    src: asm::Operand::Immediate(2),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Register(String::from("rbx")),
+                asm::Operand::Immediate(2),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp]")),
-                    src: asm::Operand::Immediate(48),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsp]")),
+                asm::Operand::Immediate(48),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
-                    src: asm::Operand::Immediate(98),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsp + 1]")),
+                asm::Operand::Immediate(98),
             );
         }
     }
-    asm::emit(
-        &asm::Instruction::Label {
-            name: digits_label.clone(),
-        },
+    asm::label(asm, digits_label.clone());
+    asm::label(asm, loop_label.clone());
+    asm::binary(
         asm,
+        String::from("xor"),
+        asm::Operand::Register(String::from("rdx")),
+        asm::Operand::Register(String::from("rdx")),
     );
-    asm::emit(
-        &asm::Instruction::Label {
-            name: loop_label.clone(),
-        },
+    asm::wide_math(
         asm,
-    );
-    asm::emit(
-        &asm::Instruction::Binary {
-            opcode: String::from("xor"),
-            dst: asm::Operand::Register(String::from("rdx")),
-            src: asm::Operand::Register(String::from("rdx")),
-        },
-        asm,
-    );
-    asm::emit(
-        &asm::Instruction::WideMath {
-            opcode: String::from("div"),
-            operand: asm::Operand::Register(String::from("rbx")),
-        },
-        asm,
+        String::from("div"),
+        asm::Operand::Register(String::from("rbx")),
     );
     if matches!(format, ir::PrintFormat::Hex | ir::PrintFormat::Pointer) {
-        asm::emit(
-            &asm::Instruction::Compare {
-                opcode: String::from("cmp"),
-                lhs: asm::Operand::Register(String::from("dl")),
-                rhs: asm::Operand::Immediate(9),
-            },
+        asm::compare(
             asm,
+            String::from("cmp"),
+            asm::Operand::Register(String::from("dl")),
+            asm::Operand::Immediate(9),
         );
-        asm::emit(
-            &asm::Instruction::Branch {
-                opcode: String::from("jbe"),
-                target: asm::Operand::Address(digit_decimal_label.clone()),
-            },
+        asm::branch(
             asm,
+            String::from("jbe"),
+            asm::Operand::Address(digit_decimal_label.clone()),
         );
-        asm::emit(
-            &asm::Instruction::Binary {
-                opcode: String::from("add"),
-                dst: asm::Operand::Register(String::from("dl")),
-                src: asm::Operand::Immediate(87),
-            },
+        asm::binary(
             asm,
+            String::from("add"),
+            asm::Operand::Register(String::from("dl")),
+            asm::Operand::Immediate(87),
         );
-        asm::emit(
-            &asm::Instruction::Jump {
-                target: asm::Operand::Address(prefix_done_label.clone()),
-            },
+        asm::jump(asm, asm::Operand::Address(prefix_done_label.clone()));
+        asm::label(asm, digit_decimal_label.clone());
+        asm::binary(
             asm,
+            String::from("add"),
+            asm::Operand::Register(String::from("dl")),
+            asm::Operand::Immediate(48),
         );
-        asm::emit(
-            &asm::Instruction::Label {
-                name: digit_decimal_label.clone(),
-            },
-            asm,
-        );
-        asm::emit(
-            &asm::Instruction::Binary {
-                opcode: String::from("add"),
-                dst: asm::Operand::Register(String::from("dl")),
-                src: asm::Operand::Immediate(48),
-            },
-            asm,
-        );
-        asm::emit(
-            &asm::Instruction::Label {
-                name: prefix_done_label.clone(),
-            },
-            asm,
-        );
+        asm::label(asm, prefix_done_label.clone());
     } else {
-        asm::emit(
-            &asm::Instruction::Binary {
-                opcode: String::from("add"),
-                dst: asm::Operand::Register(String::from("dl")),
-                src: asm::Operand::Immediate(48),
-            },
+        asm::binary(
             asm,
+            String::from("add"),
+            asm::Operand::Register(String::from("dl")),
+            asm::Operand::Immediate(48),
         );
     }
-    asm::emit(
-        &asm::Instruction::Binary {
-            opcode: String::from("sub"),
-            dst: asm::Operand::Register(String::from("rsi")),
-            src: asm::Operand::Immediate(1),
-        },
+    asm::binary(
         asm,
+        String::from("sub"),
+        asm::Operand::Register(String::from("rsi")),
+        asm::Operand::Immediate(1),
     );
-    asm::emit(
-        &asm::Instruction::Move {
-            dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
-            src: asm::Operand::Register(String::from("dl")),
-        },
+    asm::mov(
         asm,
+        asm::Operand::Address(String::from("byte ptr [rsi]")),
+        asm::Operand::Register(String::from("dl")),
     );
-    asm::emit(
-        &asm::Instruction::Compare {
-            opcode: String::from("cmp"),
-            lhs: asm::Operand::Register(String::from("rax")),
-            rhs: asm::Operand::Immediate(0),
-        },
+    asm::compare(
         asm,
+        String::from("cmp"),
+        asm::Operand::Register(String::from("rax")),
+        asm::Operand::Immediate(0),
     );
-    asm::emit(
-        &asm::Instruction::Branch {
-            opcode: String::from("jne"),
-            target: asm::Operand::Address(loop_label.clone()),
-        },
+    asm::branch(
         asm,
+        String::from("jne"),
+        asm::Operand::Address(loop_label.clone()),
     );
     match format {
         ir::PrintFormat::Infer => unreachable!(),
         ir::PrintFormat::SignedDecimal(_) => {
-            asm::emit(
-                &asm::Instruction::Compare {
-                    opcode: String::from("cmp"),
-                    lhs: asm::Operand::Address(String::from("byte ptr [rsp]")),
-                    rhs: asm::Operand::Immediate(45),
-                },
+            asm::compare(
                 asm,
+                String::from("cmp"),
+                asm::Operand::Address(String::from("byte ptr [rsp]")),
+                asm::Operand::Immediate(45),
             );
-            asm::emit(
-                &asm::Instruction::Branch {
-                    opcode: String::from("jne"),
-                    target: asm::Operand::Address(prefix_done_label.clone()),
-                },
+            asm::branch(
                 asm,
+                String::from("jne"),
+                asm::Operand::Address(prefix_done_label.clone()),
             );
-            asm::emit(
-                &asm::Instruction::Binary {
-                    opcode: String::from("sub"),
-                    dst: asm::Operand::Register(String::from("rsi")),
-                    src: asm::Operand::Immediate(1),
-                },
+            asm::binary(
                 asm,
+                String::from("sub"),
+                asm::Operand::Register(String::from("rsi")),
+                asm::Operand::Immediate(1),
             );
-            asm::emit(
-                &asm::Instruction::Move {
-                    dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
-                    src: asm::Operand::Immediate(45),
-                },
+            asm::mov(
                 asm,
+                asm::Operand::Address(String::from("byte ptr [rsi]")),
+                asm::Operand::Immediate(45),
             );
-            asm::emit(
-                &asm::Instruction::Label {
-                    name: prefix_done_label.clone(),
-                },
-                asm,
-            );
+            asm::label(asm, prefix_done_label.clone());
         }
         ir::PrintFormat::Hex | ir::PrintFormat::Pointer | ir::PrintFormat::Binary => {
             let marker = match format {
@@ -1969,55 +1842,35 @@ fn emit_print_operand_instruction(
                 _ => 120,
             };
             for value in [marker, 48] {
-                asm::emit(
-                    &asm::Instruction::Binary {
-                        opcode: String::from("sub"),
-                        dst: asm::Operand::Register(String::from("rsi")),
-                        src: asm::Operand::Immediate(1),
-                    },
+                asm::binary(
                     asm,
+                    String::from("sub"),
+                    asm::Operand::Register(String::from("rsi")),
+                    asm::Operand::Immediate(1),
                 );
-                asm::emit(
-                    &asm::Instruction::Move {
-                        dst: asm::Operand::Address(String::from("byte ptr [rsi]")),
-                        src: asm::Operand::Immediate(value),
-                    },
+                asm::mov(
                     asm,
+                    asm::Operand::Address(String::from("byte ptr [rsi]")),
+                    asm::Operand::Immediate(value),
                 );
             }
         }
         ir::PrintFormat::UnsignedDecimal(_) => {}
     }
-    asm::emit(
-        &asm::Instruction::LoadAddress {
-            dst: asm::Operand::Register(String::from("rdx")),
-            address: String::from("[rsp + 80]"),
-        },
+    asm::lea(
         asm,
+        asm::Operand::Register(String::from("rdx")),
+        String::from("[rsp + 80]"),
     );
-    asm::emit(
-        &asm::Instruction::Binary {
-            opcode: String::from("sub"),
-            dst: asm::Operand::Register(String::from("rdx")),
-            src: asm::Operand::Register(String::from("rsi")),
-        },
+    asm::binary(
         asm,
+        String::from("sub"),
+        asm::Operand::Register(String::from("rdx")),
+        asm::Operand::Register(String::from("rsi")),
     );
     emit_linux_write_registers(asm);
-    asm::emit(
-        &asm::Instruction::StackAdjust {
-            opcode: String::from("add"),
-            register: String::from("rsp"),
-            amount: 80,
-        },
-        asm,
-    );
-    asm::emit(
-        &asm::Instruction::Pop {
-            dst: asm::Operand::Register(String::from("rbx")),
-        },
-        asm,
-    );
+    asm::stack_adjust(asm, String::from("add"), String::from("rsp"), 80);
+    asm::pop(asm, asm::Operand::Register(String::from("rbx")));
     emit_print_volatile_pops(asm);
 
     Ok(())
@@ -3235,12 +3088,10 @@ fn emit_ir_division_from_accumulator(
     )?;
     asm::prepare_division(asm, signed);
     let divisor = emit_ir_operand(&divisor, strings, label_name, stack)?;
-    asm::emit(
-        &asm::Instruction::Divide {
-            opcode: division_opcode(signed).to_owned(),
-            divisor: asm::Operand::Address(divisor),
-        },
+    asm::divide(
         asm,
+        division_opcode(signed).to_owned(),
+        asm::Operand::Address(divisor),
     );
     let result = ir::Operand::TargetRegister(if remainder { "rdx" } else { "rax" }.to_owned());
     if result != *dst {
@@ -3846,13 +3697,11 @@ fn emit_ir_float_binary_assignment(
 
     if lhs != dst {
         let lhs = emit_ir_float_operand(lhs, width, strings, label_name, stack)?;
-        asm::emit(
-            &asm::Instruction::FloatMove {
-                opcode: x86_float_move_opcode(width)?.to_owned(),
-                dst: asm::Operand::Register(dst_register.clone()),
-                src: asm::Operand::Address(lhs),
-            },
+        asm::float_move(
             asm,
+            x86_float_move_opcode(width)?.to_owned(),
+            asm::Operand::Register(dst_register.clone()),
+            asm::Operand::Address(lhs),
         );
     }
 
@@ -3867,13 +3716,11 @@ fn emit_ir_float_binary_assignment(
     } else {
         emit_ir_float_operand(rhs, width, strings, label_name, stack)?
     };
-    asm::emit(
-        &asm::Instruction::FloatBinary {
-            opcode: float_math_opcode(op, width).to_owned(),
-            dst: asm::Operand::Register(dst_register.clone()),
-            src: asm::Operand::Address(rhs),
-        },
+    asm::float_binary(
         asm,
+        float_math_opcode(op, width).to_owned(),
+        asm::Operand::Register(dst_register.clone()),
+        asm::Operand::Address(rhs),
     );
     Ok(())
 }
@@ -4017,13 +3864,11 @@ fn emit_ir_float_copy_instruction(
 ) -> Result<(), String> {
     let src = emit_ir_float_operand(src, width, strings, label_name, stack)?;
     let dst = emit_ir_operand(dst, strings, label_name, stack)?;
-    asm::emit(
-        &asm::Instruction::FloatMove {
-            opcode: x86_float_move_opcode(width)?.to_owned(),
-            dst: asm::Operand::Address(dst),
-            src: asm::Operand::Address(src),
-        },
+    asm::float_move(
         asm,
+        x86_float_move_opcode(width)?.to_owned(),
+        asm::Operand::Address(dst),
+        asm::Operand::Address(src),
     );
     Ok(())
 }
@@ -4097,12 +3942,12 @@ fn emit_ir_binary_instruction(
     label_name: &str,
     stack: &StackFrame,
 ) -> Result<(), String> {
-    let instruction = asm::Instruction::Binary {
-        opcode: opcode.to_owned(),
-        dst: ir_machine_operand(dst, strings, label_name, stack)?,
-        src: ir_machine_operand(src, strings, label_name, stack)?,
-    };
-    asm::emit(&instruction, asm);
+    asm::binary(
+        asm,
+        opcode,
+        ir_machine_operand(dst, strings, label_name, stack)?,
+        ir_machine_operand(src, strings, label_name, stack)?,
+    );
     Ok(())
 }
 
@@ -4133,21 +3978,15 @@ fn emit_ir_copy_instruction(
         _ => src.clone(),
     };
     let src_machine = ir_machine_operand(&narrowed_src, strings, label_name, stack)?;
-    let instruction = match (&dst_machine, &src_machine) {
-        (asm::Operand::Address(_) | asm::Operand::Memory(_), _) => asm::Instruction::Store {
-            dst: dst_machine,
-            src: src_machine,
-        },
-        (_, asm::Operand::Address(_) | asm::Operand::Memory(_)) => asm::Instruction::Load {
-            dst: dst_machine,
-            src: src_machine,
-        },
-        _ => asm::Instruction::Move {
-            dst: dst_machine,
-            src: src_machine,
-        },
-    };
-    asm::emit(&instruction, asm);
+    match (&dst_machine, &src_machine) {
+        (asm::Operand::Address(_) | asm::Operand::Memory(_), _) => {
+            asm::store(asm, dst_machine, src_machine)
+        }
+        (_, asm::Operand::Address(_) | asm::Operand::Memory(_)) => {
+            asm::load(asm, dst_machine, src_machine)
+        }
+        _ => asm::mov(asm, dst_machine, src_machine),
+    }
     Ok(())
 }
 

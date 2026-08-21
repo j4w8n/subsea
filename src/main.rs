@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::backend::Target;
+use subsea::codegen::Target;
 use subsea::codegen::emit_target_asm_with_origins;
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,

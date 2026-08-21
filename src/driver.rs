@@ -5,7 +5,7 @@ use std::process::{self, Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::backend::Target;
+use crate::codegen::Target;
 
 static BUILD_COUNTER: AtomicU64 = AtomicU64::new(0);
 

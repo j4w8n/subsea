@@ -1,6 +1,5 @@
-pub mod asm;
+pub(crate) mod asm;
 pub(crate) mod codegen;
-pub mod machine;
 mod registers;
 
 pub(crate) use registers::width;

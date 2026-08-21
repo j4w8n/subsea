@@ -1,103 +1,9 @@
 //! x86-64 assembly syntax and operand formatting.
 //!
-//! This module is the low-level assembly boundary for the x86-64 backend. The
-//! instruction-shaped types remain temporarily for compatibility and for the
-//! incremental migration away from the former `machine` module.
+//! This module owns assembler spelling only. Instruction selection and runtime
+//! policy remain in `codegen`.
 
-use std::fmt::{Display, Write};
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Program {
-    pub instructions: Vec<Instruction>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Instruction {
-    Label {
-        name: String,
-    },
-    Nop,
-    Move {
-        dst: Operand,
-        src: Operand,
-    },
-    Load {
-        dst: Operand,
-        src: Operand,
-    },
-    LoadAddress {
-        dst: Operand,
-        address: String,
-    },
-    Store {
-        dst: Operand,
-        src: Operand,
-    },
-    FloatMove {
-        opcode: String,
-        dst: Operand,
-        src: Operand,
-    },
-    FloatBinary {
-        opcode: String,
-        dst: Operand,
-        src: Operand,
-    },
-    Binary {
-        opcode: String,
-        dst: Operand,
-        src: Operand,
-    },
-    Unary {
-        opcode: String,
-        operand: Operand,
-    },
-    Compare {
-        opcode: String,
-        lhs: Operand,
-        rhs: Operand,
-    },
-    Call {
-        target: Operand,
-    },
-    RuntimeCall {
-        target: Operand,
-    },
-    Branch {
-        opcode: String,
-        target: Operand,
-    },
-    Jump {
-        target: Operand,
-    },
-    Push {
-        src: Operand,
-    },
-    Pop {
-        dst: Operand,
-    },
-    StackAdjust {
-        opcode: String,
-        register: String,
-        amount: usize,
-    },
-    Syscall {
-        number: u64,
-    },
-    SyscallTrap,
-    PrepareDivision {
-        signed: bool,
-    },
-    Divide {
-        opcode: String,
-        divisor: Operand,
-    },
-    WideMath {
-        opcode: String,
-        operand: Operand,
-    },
-    Return,
-}
+use std::fmt::{Display, Formatter, Result as FmtResult, Write};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
@@ -127,174 +33,140 @@ pub enum AddressTerm {
     ScaledRegister { register: String, scale: i64 },
 }
 
+impl Display for Operand {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Immediate(value) => value.fmt(formatter),
+            Self::Register(name) | Self::Address(name) => name.fmt(formatter),
+            Self::Memory(address) => address.fmt(formatter),
+        }
+    }
+}
+
+impl Display for MemoryAddress {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        if let Some(width) = &self.width {
+            write!(formatter, "{width} ptr ")?;
+        }
+        formatter.write_str("[")?;
+        for (index, (operator, term)) in self.terms.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(match operator {
+                    AddressOperator::Add => " + ",
+                    AddressOperator::Subtract => " - ",
+                })?;
+            }
+            term.fmt(formatter)?;
+        }
+        formatter.write_str("]")
+    }
+}
+
+impl Display for AddressTerm {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Immediate(value) => value.fmt(formatter),
+            Self::Symbol(name) | Self::Register(name) => name.fmt(formatter),
+            Self::ScaledRegister { register, scale } => write!(formatter, "{register} * {scale}"),
+        }
+    }
+}
+
 pub fn instruction(asm: &mut String, text: impl Display) {
     let _ = writeln!(asm, "  {text}");
 }
 
-pub fn label(asm: &mut String, name: impl Into<String>) {
-    emit(&Instruction::Label { name: name.into() }, asm);
+pub fn label(asm: &mut String, name: impl Display) {
+    let _ = writeln!(asm, "{name}:");
 }
 
 pub fn nop(asm: &mut String) {
-    emit(&Instruction::Nop, asm);
+    instruction(asm, "nop");
 }
 
 pub fn mov(asm: &mut String, dst: Operand, src: Operand) {
-    emit(&Instruction::Move { dst, src }, asm);
+    instruction(asm, format_args!("mov {dst}, {src}"));
 }
 
 pub fn load(asm: &mut String, dst: Operand, src: Operand) {
-    emit(&Instruction::Load { dst, src }, asm);
+    mov(asm, dst, src);
 }
 
 pub fn store(asm: &mut String, dst: Operand, src: Operand) {
-    emit(&Instruction::Store { dst, src }, asm);
+    mov(asm, dst, src);
 }
 
-pub fn lea(asm: &mut String, dst: Operand, address: impl Into<String>) {
-    emit(
-        &Instruction::LoadAddress {
-            dst,
-            address: address.into(),
-        },
-        asm,
-    );
+pub fn lea(asm: &mut String, dst: Operand, address: impl Display) {
+    instruction(asm, format_args!("lea {dst}, {address}"));
 }
 
-pub fn float_move(asm: &mut String, opcode: impl Into<String>, dst: Operand, src: Operand) {
-    emit(
-        &Instruction::FloatMove {
-            opcode: opcode.into(),
-            dst,
-            src,
-        },
-        asm,
-    );
+pub fn float_move(asm: &mut String, opcode: impl Display, dst: Operand, src: Operand) {
+    instruction(asm, format_args!("{opcode} {dst}, {src}"));
 }
 
-pub fn float_binary(asm: &mut String, opcode: impl Into<String>, dst: Operand, src: Operand) {
-    emit(
-        &Instruction::FloatBinary {
-            opcode: opcode.into(),
-            dst,
-            src,
-        },
-        asm,
-    );
+pub fn float_binary(asm: &mut String, opcode: impl Display, dst: Operand, src: Operand) {
+    instruction(asm, format_args!("{opcode} {dst}, {src}"));
 }
 
-pub fn binary(asm: &mut String, opcode: impl Into<String>, dst: Operand, src: Operand) {
-    emit(
-        &Instruction::Binary {
-            opcode: opcode.into(),
-            dst,
-            src,
-        },
-        asm,
-    );
+pub fn binary(asm: &mut String, opcode: impl Display, dst: Operand, src: Operand) {
+    instruction(asm, format_args!("{opcode} {dst}, {src}"));
 }
 
-pub fn unary(asm: &mut String, opcode: impl Into<String>, operand: Operand) {
-    emit(
-        &Instruction::Unary {
-            opcode: opcode.into(),
-            operand,
-        },
-        asm,
-    );
+pub fn unary(asm: &mut String, opcode: impl Display, operand: Operand) {
+    instruction(asm, format_args!("{opcode} {operand}"));
 }
 
-pub fn compare(asm: &mut String, opcode: impl Into<String>, lhs: Operand, rhs: Operand) {
-    emit(
-        &Instruction::Compare {
-            opcode: opcode.into(),
-            lhs,
-            rhs,
-        },
-        asm,
-    );
+pub fn compare(asm: &mut String, opcode: impl Display, lhs: Operand, rhs: Operand) {
+    instruction(asm, format_args!("{opcode} {lhs}, {rhs}"));
 }
 
 pub fn call(asm: &mut String, target: Operand) {
-    emit(&Instruction::Call { target }, asm);
+    instruction(asm, format_args!("call {target}"));
 }
 
-pub fn runtime_call(asm: &mut String, target: Operand) {
-    emit(&Instruction::RuntimeCall { target }, asm);
-}
-
-pub fn branch(asm: &mut String, opcode: impl Into<String>, target: Operand) {
-    emit(
-        &Instruction::Branch {
-            opcode: opcode.into(),
-            target,
-        },
-        asm,
-    );
+pub fn branch(asm: &mut String, opcode: impl Display, target: Operand) {
+    instruction(asm, format_args!("{opcode} {target}"));
 }
 
 pub fn jump(asm: &mut String, target: Operand) {
-    emit(&Instruction::Jump { target }, asm);
+    instruction(asm, format_args!("jmp {target}"));
 }
 
 pub fn push(asm: &mut String, src: Operand) {
-    emit(&Instruction::Push { src }, asm);
+    instruction(asm, format_args!("push {src}"));
 }
 
 pub fn pop(asm: &mut String, dst: Operand) {
-    emit(&Instruction::Pop { dst }, asm);
+    instruction(asm, format_args!("pop {dst}"));
 }
 
-pub fn stack_adjust(
-    asm: &mut String,
-    opcode: impl Into<String>,
-    register: impl Into<String>,
-    amount: usize,
-) {
-    emit(
-        &Instruction::StackAdjust {
-            opcode: opcode.into(),
-            register: register.into(),
-            amount,
-        },
-        asm,
-    );
+pub fn stack_adjust(asm: &mut String, opcode: impl Display, register: impl Display, amount: usize) {
+    instruction(asm, format_args!("{opcode} {register}, {amount}"));
 }
 
 pub fn syscall(asm: &mut String, number: u64) {
-    emit(&Instruction::Syscall { number }, asm);
+    instruction(asm, format_args!("mov rax, {number}"));
+    instruction(asm, "syscall");
 }
 
 pub fn syscall_trap(asm: &mut String) {
-    emit(&Instruction::SyscallTrap, asm);
+    instruction(asm, "syscall");
 }
 
 pub fn prepare_division(asm: &mut String, signed: bool) {
-    emit(&Instruction::PrepareDivision { signed }, asm);
+    instruction(asm, if signed { "cqo" } else { "xor rdx, rdx" });
 }
 
-pub fn divide(asm: &mut String, opcode: impl Into<String>, divisor: Operand) {
-    emit(
-        &Instruction::Divide {
-            opcode: opcode.into(),
-            divisor,
-        },
-        asm,
-    );
+pub fn divide(asm: &mut String, opcode: impl Display, divisor: Operand) {
+    instruction(asm, format_args!("{opcode} {divisor}"));
 }
 
-pub fn wide_math(asm: &mut String, opcode: impl Into<String>, operand: Operand) {
-    emit(
-        &Instruction::WideMath {
-            opcode: opcode.into(),
-            operand,
-        },
-        asm,
-    );
+pub fn wide_math(asm: &mut String, opcode: impl Display, operand: Operand) {
+    instruction(asm, format_args!("{opcode} {operand}"));
 }
 
 pub fn ret(asm: &mut String) {
-    emit(&Instruction::Return, asm);
+    instruction(asm, "ret");
 }
 
 pub fn intel_syntax(asm: &mut String) {
@@ -337,102 +209,48 @@ pub fn top_level_directive(asm: &mut String, text: impl Display) {
     let _ = writeln!(asm, "{text}");
 }
 
-pub fn emit(instruction: &Instruction, asm: &mut String) {
-    match instruction {
-        Instruction::Label { name } => asm.push_str(&format!("{name}:\n")),
-        Instruction::Nop => asm.push_str("  nop\n"),
-        Instruction::Move { dst, src } => {
-            asm.push_str(&format!("  mov {}, {}\n", display(dst), display(src)));
-        }
-        Instruction::Load { dst, src } | Instruction::Store { dst, src } => {
-            asm.push_str(&format!("  mov {}, {}\n", display(dst), display(src)));
-        }
-        Instruction::LoadAddress { dst, address } => {
-            asm.push_str(&format!("  lea {}, {address}\n", display(dst)));
-        }
-        Instruction::FloatMove { opcode, dst, src }
-        | Instruction::FloatBinary { opcode, dst, src } => {
-            asm.push_str(&format!("  {opcode} {}, {}\n", display(dst), display(src)));
-        }
-        Instruction::Binary { opcode, dst, src } => {
-            asm.push_str(&format!("  {opcode} {}, {}\n", display(dst), display(src)));
-        }
-        Instruction::Unary { opcode, operand } => {
-            asm.push_str(&format!("  {opcode} {}\n", display(operand)));
-        }
-        Instruction::Compare { opcode, lhs, rhs } => {
-            asm.push_str(&format!("  {opcode} {}, {}\n", display(lhs), display(rhs)));
-        }
-        Instruction::Call { target } => {
-            asm.push_str(&format!("  call {}\n", display(target)));
-        }
-        Instruction::RuntimeCall { target } => {
-            asm.push_str(&format!("  call {}\n", display(target)));
-        }
-        Instruction::Branch { opcode, target } => {
-            asm.push_str(&format!("  {opcode} {}\n", display(target)));
-        }
-        Instruction::Jump { target } => {
-            asm.push_str(&format!("  jmp {}\n", display(target)));
-        }
-        Instruction::Push { src } => {
-            asm.push_str(&format!("  push {}\n", display(src)));
-        }
-        Instruction::Pop { dst } => {
-            asm.push_str(&format!("  pop {}\n", display(dst)));
-        }
-        Instruction::StackAdjust {
-            opcode,
-            register,
-            amount,
-        } => {
-            asm.push_str(&format!("  {opcode} {register}, {amount}\n"));
-        }
-        Instruction::Syscall { number } => {
-            asm.push_str(&format!("  mov rax, {number}\n  syscall\n"));
-        }
-        Instruction::SyscallTrap => asm.push_str("  syscall\n"),
-        Instruction::PrepareDivision { signed: true } => asm.push_str("  cqo\n"),
-        Instruction::PrepareDivision { signed: false } => asm.push_str("  xor rdx, rdx\n"),
-        Instruction::Divide { opcode, divisor } => {
-            asm.push_str(&format!("  {opcode} {}\n", display(divisor)));
-        }
-        Instruction::WideMath { opcode, operand } => {
-            asm.push_str(&format!("  {opcode} {}\n", display(operand)));
-        }
-        Instruction::Return => asm.push_str("  ret\n"),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn display(operand: &Operand) -> String {
-    match operand {
-        Operand::Immediate(value) => value.to_string(),
-        Operand::Register(name) | Operand::Address(name) => name.clone(),
-        Operand::Memory(address) => display_memory(address),
-    }
-}
+    #[test]
+    fn helpers_emit_basic_instructions() {
+        let mut asm = String::new();
 
-fn display_memory(address: &MemoryAddress) -> String {
-    let mut expression = String::new();
-    for (index, (operator, term)) in address.terms.iter().enumerate() {
-        if index > 0 {
-            expression.push_str(match operator {
-                AddressOperator::Add => " + ",
-                AddressOperator::Subtract => " - ",
-            });
-        }
-        expression.push_str(&match term {
-            AddressTerm::Immediate(value) => value.to_string(),
-            AddressTerm::Symbol(name) => name.clone(),
-            AddressTerm::Register(name) => name.clone(),
-            AddressTerm::ScaledRegister { register, scale } => {
-                format!("{register} * {scale}")
-            }
-        });
+        mov(
+            &mut asm,
+            Operand::Register("rax".to_owned()),
+            Operand::Immediate(1),
+        );
+        compare(
+            &mut asm,
+            "cmp",
+            Operand::Register("rax".to_owned()),
+            Operand::Immediate(0),
+        );
+        branch(&mut asm, "je", Operand::Address("done".to_owned()));
+        ret(&mut asm);
+
+        assert_eq!(asm, "  mov rax, 1\n  cmp rax, 0\n  je done\n  ret\n");
     }
 
-    match &address.width {
-        Some(width) => format!("{width} ptr [{expression}]"),
-        None => format!("[{expression}]"),
+    #[test]
+    fn helpers_emit_directives_and_sequences() {
+        let mut asm = String::new();
+
+        intel_syntax(&mut asm);
+        section(&mut asm, "rodata");
+        global(&mut asm, "message");
+        label(&mut asm, "message");
+        byte(&mut asm, "1, 2, 3");
+        quad(&mut asm, "target");
+        zero(&mut asm, 8);
+        syscall(&mut asm, 60);
+        prepare_division(&mut asm, true);
+
+        assert_eq!(
+            asm,
+            ".intel_syntax noprefix\n.section .rodata\n.global message\nmessage:\n  .byte 1, 2, 3\n  .quad target\n  .zero 8\n  mov rax, 60\n  syscall\n  cqo\n"
+        );
     }
 }

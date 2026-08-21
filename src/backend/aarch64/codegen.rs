@@ -11,18 +11,7 @@ enum StackSlotKind {
     String,
 }
 
-pub fn emit(program: &ir::Program) -> Result<String, BackendError> {
-    emit_for_target_with_entry(program, crate::backend::Target::AArch64Linux, "_start")
-}
-
-pub fn emit_for_target(
-    program: &ir::Program,
-    target: crate::backend::Target,
-) -> Result<String, BackendError> {
-    emit_for_target_with_entry(program, target, "_start")
-}
-
-pub fn emit_for_target_with_entry(
+pub(crate) fn emit_for_target_with_entry(
     program: &ir::Program,
     target: crate::backend::Target,
     entry_symbol: &str,
