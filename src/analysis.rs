@@ -52,6 +52,16 @@ pub(crate) fn collect_ir_string_bindings(
         .iter()
         .map(|declaration| {
             let (name, width) = match declaration {
+                crate::ir::MemoryDeclaration::Aligned { declaration, .. } => {
+                    match declaration.as_ref() {
+                        crate::ir::MemoryDeclaration::Scalar { name, width, .. }
+                        | crate::ir::MemoryDeclaration::FloatScalar { name, width, .. }
+                        | crate::ir::MemoryDeclaration::Buffer { name, width, .. }
+                        | crate::ir::MemoryDeclaration::Array { name, width, .. }
+                        | crate::ir::MemoryDeclaration::Repeat { name, width, .. } => (name, width),
+                        crate::ir::MemoryDeclaration::Aligned { .. } => unreachable!(),
+                    }
+                }
                 crate::ir::MemoryDeclaration::Scalar { name, width, .. }
                 | crate::ir::MemoryDeclaration::FloatScalar { name, width, .. }
                 | crate::ir::MemoryDeclaration::Buffer { name, width, .. }

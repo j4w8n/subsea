@@ -34,6 +34,10 @@ pub enum DataItem {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum MemoryDeclaration {
+    Aligned {
+        declaration: Box<MemoryDeclaration>,
+        align: usize,
+    },
     Scalar {
         name: String,
         width: MemoryWidth,
@@ -72,6 +76,19 @@ pub enum MemoryValue {
 pub struct Label {
     pub name: String,
     pub instructions: Vec<Instruction>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct FunctionContract {
+    pub inputs: Vec<ContractRegister>,
+    pub outputs: Vec<ContractRegister>,
+    pub clobbers: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ContractRegister {
+    pub name: String,
+    pub width: MemoryWidth,
 }
 
 #[derive(Debug, PartialEq, Clone)]

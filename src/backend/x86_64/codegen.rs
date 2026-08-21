@@ -226,7 +226,7 @@ pub(crate) fn emit_x86_64_asm_with_origins(
 ) -> Result<String, BackendError> {
     let semantic_ir = lower::lower_program(program)
         .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
-    emit_ir_x86_64_asm_with_origins(&semantic_ir, target, entry_symbol, origins)
+    emit_ir_x86_64_asm_with_origins(&semantic_ir, target, entry_symbol, origins, false)
 }
 
 #[cfg(test)]
@@ -235,7 +235,7 @@ pub(crate) fn emit_ir_x86_64_asm(
     target: Target,
     entry_symbol: &str,
 ) -> Result<String, BackendError> {
-    emit_ir_x86_64_asm_impl(program, target, entry_symbol, None)
+    emit_ir_x86_64_asm_impl(program, target, entry_symbol, None, false)
 }
 
 fn emit_x86_64_asm_impl(
@@ -246,7 +246,7 @@ fn emit_x86_64_asm_impl(
 ) -> Result<String, BackendError> {
     let semantic_ir = lower::lower_program(program)
         .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
-    let assembly = emit_ir_x86_64_asm_impl(&semantic_ir, target, entry_symbol, origins)?;
+    let assembly = emit_ir_x86_64_asm_impl(&semantic_ir, target, entry_symbol, origins, false)?;
     validate_x86_ast_labels(program, target)?;
     Ok(assembly)
 }
@@ -281,8 +281,9 @@ pub(crate) fn emit_ir_x86_64_asm_with_origins(
     target: Target,
     entry_symbol: &str,
     origins: &ProgramOrigins,
+    annotate: bool,
 ) -> Result<String, BackendError> {
-    emit_ir_x86_64_asm_impl(program, target, entry_symbol, Some(origins))
+    emit_ir_x86_64_asm_impl(program, target, entry_symbol, Some(origins), annotate)
 }
 
 fn emit_ir_x86_64_asm_impl(
@@ -290,6 +291,7 @@ fn emit_ir_x86_64_asm_impl(
     target: Target,
     entry_symbol: &str,
     origins: Option<&ProgramOrigins>,
+    annotate: bool,
 ) -> Result<String, BackendError> {
     if target.spec().architecture != Architecture::X86_64 {
         return Err(BackendError::new(format!(
@@ -336,6 +338,7 @@ fn emit_ir_x86_64_asm_impl(
         let mut conditional_jump_index = 0;
 
         for (instruction_index, instruction) in label.instructions.iter().enumerate() {
+            let assembly_start = asm.len();
             let result: Result<(), BackendError> = (|| {
                 match instruction {
                     ir::Instruction::Assign { value, .. } => {
@@ -513,6 +516,17 @@ fn emit_ir_x86_64_asm_impl(
                 } else {
                     error
                 });
+            }
+            if annotate && asm.len() > assembly_start {
+                if let Some(origins) = origins {
+                    crate::backend::append_source_annotation(
+                        &mut asm,
+                        "#",
+                        origins,
+                        &label.name,
+                        instruction_index,
+                    );
+                }
             }
         }
 
@@ -1414,17 +1428,25 @@ fn is_shift_math_op(op: MathOp) -> bool {
 }
 
 fn emit_data(asm: &mut String, memory: &[ir::MemoryDeclaration], labels: &LabelSymbols) {
-    if memory
-        .iter()
-        .all(|declaration| matches!(declaration, ir::MemoryDeclaration::Buffer { .. }))
-    {
+    if memory.iter().all(|declaration| {
+        matches!(
+            unwrap_aligned(declaration),
+            ir::MemoryDeclaration::Buffer { .. }
+        )
+    }) {
         return;
     }
 
     asm::section(asm, "data");
 
     for declaration in memory {
+        if let ir::MemoryDeclaration::Aligned { align, .. } = declaration {
+            asm::top_level_directive(asm, format_args!(".balign {align}"));
+        }
         match declaration {
+            ir::MemoryDeclaration::Aligned { declaration, .. } => match declaration.as_ref() {
+                inner => emit_data(asm, std::slice::from_ref(inner), labels),
+            },
             ir::MemoryDeclaration::Scalar { name, width, value } => {
                 asm::label(asm, name);
                 asm::scalar(asm, width.directive(), format_data_scalar(*width, *value));
@@ -1534,29 +1556,41 @@ fn format_data_scalar(width: MemoryWidth, value: i128) -> String {
 }
 
 fn emit_bss(asm: &mut String, memory: &[ir::MemoryDeclaration]) {
-    let buffers: Vec<_> = memory
-        .iter()
-        .filter_map(|declaration| match declaration {
-            ir::MemoryDeclaration::Scalar { .. }
-            | ir::MemoryDeclaration::FloatScalar { .. }
-            | ir::MemoryDeclaration::Array { .. }
-            | ir::MemoryDeclaration::Repeat { .. } => None,
-            ir::MemoryDeclaration::Buffer { name, width, count } => Some((name, width, count)),
-        })
-        .collect();
-
-    if buffers.is_empty() {
+    if !memory.iter().any(|declaration| {
+        matches!(
+            unwrap_aligned(declaration),
+            ir::MemoryDeclaration::Buffer { .. }
+        )
+    }) {
         return;
     }
 
     asm::section(asm, "bss");
 
-    for (name, width, count) in buffers {
-        asm::label(asm, name);
-        asm::zero(asm, width.size() * count);
+    for declaration in memory {
+        let (align, declaration) = match declaration {
+            ir::MemoryDeclaration::Aligned { declaration, align } => {
+                (Some(*align), declaration.as_ref())
+            }
+            other => (None, other),
+        };
+        if let ir::MemoryDeclaration::Buffer { name, width, count } = declaration {
+            if let Some(align) = align {
+                asm::top_level_directive(asm, format_args!(".balign {align}"));
+            }
+            asm::label(asm, name);
+            asm::zero(asm, width.size() * count);
+        }
     }
 
     asm.push('\n');
+}
+
+fn unwrap_aligned(declaration: &ir::MemoryDeclaration) -> &ir::MemoryDeclaration {
+    match declaration {
+        ir::MemoryDeclaration::Aligned { declaration, .. } => unwrap_aligned(declaration),
+        other => other,
+    }
 }
 
 fn emit_rodata(asm: &mut String, strings: &[StringBinding], floats: &[FloatBinding]) {

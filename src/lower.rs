@@ -105,6 +105,12 @@ fn lower_data_declaration(data: &crate::ast::DataDeclaration) -> ir::DataDeclara
 
 fn lower_memory_declaration(memory: &crate::ast::MemoryDeclaration) -> ir::MemoryDeclaration {
     match memory {
+        crate::ast::MemoryDeclaration::Aligned { declaration, align } => {
+            ir::MemoryDeclaration::Aligned {
+                declaration: Box::new(lower_memory_declaration(declaration)),
+                align: *align,
+            }
+        }
         crate::ast::MemoryDeclaration::Scalar { name, width, value } => {
             ir::MemoryDeclaration::Scalar {
                 name: name.clone(),

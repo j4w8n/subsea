@@ -229,6 +229,9 @@ fn merge_module(
     for declaration in &imported.memory {
         let mut declaration = declaration.clone();
         match &mut declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => {
+                rewrite_memory_declaration_name(declaration, &symbol_map);
+            }
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
             | MemoryDeclaration::Buffer { name, .. }
@@ -280,6 +283,7 @@ fn build_symbol_map(imported: &Program, module_id: usize) -> HashMap<String, Str
 
     for declaration in &imported.memory {
         let name = match declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => memory_declaration_name(declaration),
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
             | MemoryDeclaration::Buffer { name, .. }
@@ -297,6 +301,9 @@ fn rewrite_memory_declaration_symbols(
     symbol_map: &HashMap<String, String>,
 ) {
     match declaration {
+        MemoryDeclaration::Aligned { declaration, .. } => {
+            rewrite_memory_declaration_symbols(declaration, symbol_map)
+        }
         MemoryDeclaration::Array { values, .. } => {
             for value in values {
                 rewrite_memory_value_symbols(value, symbol_map);
@@ -304,6 +311,35 @@ fn rewrite_memory_declaration_symbols(
         }
         MemoryDeclaration::Repeat { value, .. } => rewrite_memory_value_symbols(value, symbol_map),
         _ => {}
+    }
+}
+
+fn memory_declaration_name(declaration: &MemoryDeclaration) -> &String {
+    match declaration {
+        MemoryDeclaration::Aligned { declaration, .. } => memory_declaration_name(declaration),
+        MemoryDeclaration::Scalar { name, .. }
+        | MemoryDeclaration::FloatScalar { name, .. }
+        | MemoryDeclaration::Buffer { name, .. }
+        | MemoryDeclaration::Array { name, .. }
+        | MemoryDeclaration::Repeat { name, .. } => name,
+    }
+}
+
+fn rewrite_memory_declaration_name(
+    declaration: &mut MemoryDeclaration,
+    symbols: &HashMap<String, String>,
+) {
+    match declaration {
+        MemoryDeclaration::Aligned { declaration, .. } => {
+            rewrite_memory_declaration_name(declaration, symbols)
+        }
+        MemoryDeclaration::Scalar { name, .. }
+        | MemoryDeclaration::FloatScalar { name, .. }
+        | MemoryDeclaration::Buffer { name, .. }
+        | MemoryDeclaration::Array { name, .. }
+        | MemoryDeclaration::Repeat { name, .. } => {
+            *name = rewrite_symbol_name(name, symbols);
+        }
     }
 }
 

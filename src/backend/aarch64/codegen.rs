@@ -1,5 +1,6 @@
 use crate::ast::{BitwiseUnaryOp, CompareOp, ExprOp, MathOp};
 use crate::backend::{BackendError, RuntimeEmitter};
+use crate::diagnostic::ProgramOrigins;
 use crate::ir;
 use std::collections::HashMap;
 
@@ -12,10 +13,27 @@ enum StackSlotKind {
     String,
 }
 
+#[cfg(test)]
 pub(crate) fn emit_for_target_with_entry(
     program: &ir::Program,
     target: crate::backend::Target,
     entry_symbol: &str,
+) -> Result<String, BackendError> {
+    emit_for_target_with_entry_and_origins(
+        program,
+        target,
+        entry_symbol,
+        &ProgramOrigins::default(),
+        false,
+    )
+}
+
+pub(crate) fn emit_for_target_with_entry_and_origins(
+    program: &ir::Program,
+    target: crate::backend::Target,
+    entry_symbol: &str,
+    origins: &ProgramOrigins,
+    annotate: bool,
 ) -> Result<String, BackendError> {
     const FRAME_PREFIX: usize = 48;
     let mut asm = String::new();
@@ -52,6 +70,7 @@ pub(crate) fn emit_for_target_with_entry(
         );
         emit_stack_buffer_initializers(&mut asm, &label.stack, &slots);
         for (index, instruction) in label.instructions.iter().enumerate() {
+            let assembly_start = asm.len();
             emit_instruction(
                 &mut asm,
                 instruction,
@@ -62,6 +81,15 @@ pub(crate) fn emit_for_target_with_entry(
                 target,
             )
             .map_err(|message| BackendError::new(message).at(&label.name, index))?;
+            if annotate && asm.len() > assembly_start {
+                crate::backend::append_source_annotation(
+                    &mut asm,
+                    "//",
+                    origins,
+                    &label.name,
+                    index,
+                );
+            }
         }
         if !label
             .instructions
@@ -138,7 +166,15 @@ fn emit_data(asm: &mut String, program: &ir::Program, entry_symbol: &str) -> Res
     }
 
     for memory in &program.memory {
+        if let ir::MemoryDeclaration::Aligned { align, .. } = memory {
+            asm::top_level_directive(asm, format_args!(".balign {align}"));
+        }
         match memory {
+            ir::MemoryDeclaration::Aligned { declaration, .. } => {
+                let mut nested = program.clone();
+                nested.memory = vec![declaration.as_ref().clone()];
+                emit_data(asm, &nested, entry_symbol)?;
+            }
             ir::MemoryDeclaration::Buffer { name, width, count } => {
                 asm::section(asm, "bss");
                 asm::label(asm, name);

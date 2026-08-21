@@ -38,6 +38,10 @@ pub enum DataItem {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum MemoryDeclaration {
+    Aligned {
+        declaration: Box<MemoryDeclaration>,
+        align: usize,
+    },
     Scalar {
         name: String,
         width: MemoryWidth,

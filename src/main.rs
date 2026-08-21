@@ -6,7 +6,7 @@ use std::{
 };
 
 use subsea::codegen::Target;
-use subsea::codegen::emit_target_asm_with_origins;
+use subsea::codegen::emit_target_asm_with_origins_options;
 use subsea::driver::{
     self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
     build_executable_for_target, build_freestanding_executable, build_object_for_target,
@@ -20,7 +20,8 @@ fn main() {
             source_path,
             target,
             entry_symbol,
-        }) => match compile_to_asm(&source_path, target, entry_symbol.as_deref()) {
+            annotate,
+        }) => match compile_to_asm(&source_path, target, entry_symbol.as_deref(), annotate) {
             Ok(asm) => print!("{asm}"),
             Err(error) => exit_with_error(error),
         },
@@ -38,7 +39,7 @@ fn main() {
         }) => {
             let started = Instant::now();
 
-            match compile_to_asm_with_timings(&source_path, target, entry_symbol.as_deref())
+            match compile_to_asm_with_timings(&source_path, target, entry_symbol.as_deref(), false)
                 .and_then(|compilation| {
                     build_output(
                         &compilation.asm,
@@ -73,7 +74,7 @@ fn main() {
             }
         }
         Ok(CommandLine::Run { source_path }) => {
-            match compile_to_asm(&source_path, Target::X86_64, None)
+            match compile_to_asm(&source_path, Target::X86_64, None, false)
                 .and_then(|asm| build_executable(&asm, None))
             {
                 Ok(output) => match run_executable(&output.output_path) {
@@ -101,6 +102,7 @@ enum CommandLine {
         source_path: String,
         target: Target,
         entry_symbol: Option<String>,
+        annotate: bool,
     },
     Build {
         source_path: String,
@@ -139,12 +141,14 @@ fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
 }
 
 fn parse_emit_asm_command(args: &[String]) -> Result<CommandLine, String> {
-    let (source_path, target, entry_symbol) = parse_source_target_and_entry(args, "emit-asm")?;
+    let (source_path, target, entry_symbol, annotate) =
+        parse_source_target_and_entry(args, "emit-asm")?;
 
     Ok(CommandLine::EmitAsm {
         source_path,
         target,
         entry_symbol,
+        annotate,
     })
 }
 
@@ -307,15 +311,22 @@ fn parse_build_command(args: &[String]) -> Result<CommandLine, String> {
 fn parse_source_target_and_entry(
     args: &[String],
     command: &str,
-) -> Result<(String, Target, Option<String>), String> {
+) -> Result<(String, Target, Option<String>, bool), String> {
     let mut source_path = None;
     let mut target = Target::X86_64;
     let mut target_provided = false;
     let mut entry_symbol = None;
+    let mut annotate = false;
     let mut position = 0;
 
     while position < args.len() {
         match args[position].as_str() {
+            "--annotate" if command == "emit-asm" => {
+                if annotate {
+                    return Err(String::from("Annotation was already enabled"));
+                }
+                annotate = true;
+            }
             "--target" | "-t" => {
                 position += 1;
 
@@ -361,7 +372,7 @@ fn parse_source_target_and_entry(
 
     let source_path = source_path.ok_or_else(|| format!("Missing {command} source path"))?;
     validate_entry_target(target, entry_symbol.as_deref())?;
-    Ok((source_path, target, entry_symbol))
+    Ok((source_path, target, entry_symbol, annotate))
 }
 
 fn validate_entry_target(target: Target, entry_symbol: Option<&str>) -> Result<(), String> {
@@ -540,8 +551,9 @@ fn compile_to_asm(
     source_path: &str,
     target: Target,
     entry_symbol: Option<&str>,
+    annotate: bool,
 ) -> Result<String, String> {
-    compile_to_asm_with_timings(source_path, target, entry_symbol)
+    compile_to_asm_with_timings(source_path, target, entry_symbol, annotate)
         .map(|compilation| compilation.asm)
 }
 
@@ -561,6 +573,7 @@ fn compile_to_asm_with_timings(
     source_path: &str,
     target: Target,
     entry_symbol: Option<&str>,
+    annotate: bool,
 ) -> Result<CompilationOutput, String> {
     let read_started = Instant::now();
     let source_path = PathBuf::from(source_path);
@@ -576,8 +589,14 @@ fn compile_to_asm_with_timings(
 
     let codegen_started = Instant::now();
     let entry_symbol = entry_symbol.unwrap_or("_start");
-    let asm = emit_target_asm_with_origins(&program, target, entry_symbol, &loaded.origins)
-        .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
+    let asm = emit_target_asm_with_origins_options(
+        &program,
+        target,
+        entry_symbol,
+        &loaded.origins,
+        annotate,
+    )
+    .map_err(|diagnostic| diagnostic.render(loaded.origins.sources()))?;
     let codegen = codegen_started.elapsed();
 
     Ok(CompilationOutput {
@@ -620,6 +639,8 @@ fn print_usage_and_exit(code: i32) -> ! {
     eprintln!(
         "  subsea build [--target|-t x86|x86-free|aarch] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
     );
-    eprintln!("  subsea emit-asm [--target|-t x86|x86-free|aarch] [--entry symbol] <file.ss>");
+    eprintln!(
+        "  subsea emit-asm [--annotate] [--target|-t x86|x86-free|aarch] [--entry symbol] <file.ss>"
+    );
     process::exit(code);
 }

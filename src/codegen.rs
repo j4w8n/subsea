@@ -160,6 +160,16 @@ pub fn emit_target_asm_with_origins(
     entry_symbol: &str,
     origins: &ProgramOrigins,
 ) -> Result<String, Diagnostic> {
+    emit_target_asm_with_origins_options(program, target, entry_symbol, origins, false)
+}
+
+pub fn emit_target_asm_with_origins_options(
+    program: &Program,
+    target: Target,
+    entry_symbol: &str,
+    origins: &ProgramOrigins,
+    annotate: bool,
+) -> Result<String, Diagnostic> {
     validate_program_with_diagnostics_for_target(program, origins, target)?;
     let semantic_ir = lower::lower_program(program).map_err(|error| {
         at_instruction(
@@ -176,12 +186,17 @@ pub fn emit_target_asm_with_origins(
             target,
             entry_symbol,
             origins,
+            annotate,
         )
         .map_err(|error| render_backend_diagnostic(&error, origins)),
-        Architecture::AArch64 => {
-            crate::backend::aarch64::emit_for_target_with_entry(&semantic_ir, target, entry_symbol)
-                .map_err(|error| render_backend_diagnostic(&error, origins))
-        }
+        Architecture::AArch64 => crate::backend::aarch64::emit_for_target_with_entry_and_origins(
+            &semantic_ir,
+            target,
+            entry_symbol,
+            origins,
+            annotate,
+        )
+        .map_err(|error| render_backend_diagnostic(&error, origins)),
     }
 }
 

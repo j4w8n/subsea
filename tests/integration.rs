@@ -6,6 +6,36 @@ use std::sync::Mutex;
 static CLI_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn emit_asm_annotation_includes_source_statement() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--annotate",
+            "examples/x86-vs-subsea/02_arithmetic.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    let assembly = String::from_utf8_lossy(&output.stdout);
+    assert!(assembly.contains("/examples/x86-vs-subsea/02_arithmetic.ss:2"));
+    assert!(assembly.contains("# rax = 10"));
+}
+
+#[test]
+fn layouts_contracts_and_memory_alignment_run() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "examples/layout-contract-demo.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "30\n");
+}
+
+#[test]
 fn compiles_and_runs_example_program() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

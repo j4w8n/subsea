@@ -81,6 +81,7 @@ pub enum Token {
     Export,
     Jmp,
     Keep,
+    Layout,
     LocalIdent(String),
     Mem,
     Out,

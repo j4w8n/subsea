@@ -1,6 +1,50 @@
 pub(crate) mod aarch64;
 pub(crate) mod x86_64;
 
+use crate::diagnostic::ProgramOrigins;
+
+pub(crate) fn append_source_annotation(
+    asm: &mut String,
+    comment: &str,
+    origins: &ProgramOrigins,
+    label: &str,
+    index: usize,
+) {
+    let Some(span) = origins.instruction_span(label, index) else {
+        return;
+    };
+    let Some(file) = origins.sources().get(span.source) else {
+        return;
+    };
+    let start = span.start.min(file.text.len());
+    let end = span.end.min(file.text.len()).max(start);
+    let mut start = start;
+    while start > 0 && !file.text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = end;
+    while end > start && !file.text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let line = file.text[..start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    asm.push_str(comment);
+    asm.push(' ');
+    asm.push_str(&file.name);
+    asm.push(':');
+    asm.push_str(&line.to_string());
+    asm.push('\n');
+    for source_line in file.text[start..end].lines() {
+        asm.push_str(comment);
+        asm.push(' ');
+        asm.push_str(source_line.trim());
+        asm.push('\n');
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Architecture {
     X86_64,

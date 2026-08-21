@@ -1,9 +1,10 @@
 use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
-    CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
-    Expression, FloatMathOp, ImportDeclaration, Instruction, IntrinsicOp, Label, MathOp,
-    MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
-    Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
+    CompareOp, Condition, ConditionExpr, ContractRegister, ControlTarget, DataDeclaration,
+    DataItem, ExprOp, Expression, FloatMathOp, FunctionContract, ImportDeclaration, Instruction,
+    IntrinsicOp, Label, MathOp, MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp,
+    PrintFormat, PrintPart, Program, ReadSource, RegisterPair, StringInitializer, StringProperty,
+    WidthConversion,
 };
 use crate::diagnostic::{Diagnostic, ProgramOrigins, Span};
 use crate::grammar::Token;
@@ -15,6 +16,14 @@ pub struct Parser {
     spans: Option<Vec<Span>>,
     position: usize,
     origins: ProgramOrigins,
+    layouts: HashMap<String, LayoutInfo>,
+}
+
+#[derive(Clone, Debug)]
+struct LayoutInfo {
+    fields: HashMap<String, usize>,
+    size: usize,
+    align: usize,
 }
 
 impl Parser {
@@ -24,6 +33,7 @@ impl Parser {
             spans: None,
             position: 0,
             origins: ProgramOrigins::default(),
+            layouts: HashMap::new(),
         }
     }
 
@@ -37,6 +47,7 @@ impl Parser {
             spans: Some(spans),
             position: 0,
             origins: ProgramOrigins::default(),
+            layouts: HashMap::new(),
         }
     }
 
@@ -90,6 +101,8 @@ impl Parser {
                 data.push(self.parse_data_declaration()?);
             } else if matches!(self.peek(), Some(Token::Mem)) {
                 memory.push(self.parse_memory_declaration()?);
+            } else if matches!(self.peek(), Some(Token::Layout)) {
+                self.parse_layout_declaration()?;
             } else if matches!(self.peek(), Some(Token::Export)) {
                 let label = self.parse_exported_top_level_label()?;
                 exports.push(label.name.clone());
@@ -114,6 +127,64 @@ impl Parser {
             memory,
             labels,
         })
+    }
+
+    fn parse_layout_declaration(&mut self) -> Result<(), String> {
+        self.expect(Token::Layout, "Expected layout declaration")?;
+        let name = self.expect_ident("layout name")?;
+        let requested_align = if matches!(self.peek(), Some(Token::Align)) {
+            self.advance();
+            let align = self.parse_usize_literal("layout alignment")?;
+            validate_alignment(align)?;
+            Some(align)
+        } else {
+            None
+        };
+        self.expect(Token::LBrace, "Expected '{' after layout declaration")?;
+        let mut fields = HashMap::new();
+        let mut offset = 0usize;
+        let mut natural_align = 1usize;
+        while !matches!(self.peek(), Some(Token::RBrace)) {
+            let field = self.expect_ident("layout field name")?;
+            if !fields.is_empty() && fields.contains_key(&field) {
+                return Err(format!("Layout field {field:?} is already defined"));
+            }
+            self.expect(Token::Colon, "Expected ':' after layout field name")?;
+            let width_name = match self.advance() {
+                Some(Token::Ident(value)) => value,
+                Some(token) => return Err(format!("Expected layout field width, found {token:?}")),
+                None => return Err(String::from("Expected layout field width")),
+            };
+            let width = MemoryWidth::parse(&width_name)?;
+            let field_align = width.size();
+            offset = align_up(offset, field_align)?;
+            fields.insert(field, offset);
+            offset = offset
+                .checked_add(field_align)
+                .ok_or_else(|| String::from("Layout size overflow"))?;
+            natural_align = natural_align.max(field_align);
+            if matches!(self.peek(), Some(Token::Comma)) {
+                self.advance();
+            }
+        }
+        self.expect(Token::RBrace, "Expected '}' after layout declaration")?;
+        let align = requested_align.unwrap_or(natural_align).max(natural_align);
+        let size = align_up(offset, align)?;
+        if self
+            .layouts
+            .insert(
+                name.clone(),
+                LayoutInfo {
+                    fields,
+                    size,
+                    align,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("Layout name {name:?} is already defined"));
+        }
+        Ok(())
     }
 
     fn parse_import_declaration(&mut self) -> Result<ImportDeclaration, String> {
@@ -274,9 +345,11 @@ impl Parser {
                 let count = self.parse_usize_literal("zero byte count")?;
                 Ok(DataItem::Zero { count })
             }
-            Some(token) => Err(format!(
-                "Expected data item width, addr, zero, or label in data block {data_name:?}, found {token:?}"
-            )),
+            Some(token) => {
+                return Err(format!(
+                    "Expected data item width, addr, zero, or label in data block {data_name:?}, found {token:?}"
+                ));
+            }
             None => Err(format!(
                 "Expected data item in data block {data_name:?}, found end of input"
             )),
@@ -296,6 +369,8 @@ impl Parser {
         };
 
         self.expect(Token::Colon, "Expected ':' after label name")?;
+
+        let contract = self.parse_optional_function_contract()?;
 
         if !matches!(self.peek(), Some(Token::LBrace)) {
             return Ok(Label {
@@ -319,6 +394,9 @@ impl Parser {
 
         self.expect(Token::RBrace, "Expected '}' after label block")?;
 
+        if let Some(contract) = &contract {
+            validate_function_contract(contract, &instructions, &name)?;
+        }
         Ok(Label { name, instructions })
     }
 
@@ -341,6 +419,7 @@ impl Parser {
         };
 
         self.expect(Token::Colon, "Expected ':' after exported function name")?;
+        let contract = self.parse_optional_function_contract()?;
         if !matches!(self.peek(), Some(Token::LBrace)) {
             return Err(format!("Exported function {name:?} must have a block"));
         }
@@ -363,7 +442,112 @@ impl Parser {
 
         self.expect(Token::RBrace, "Expected '}' after exported function block")?;
 
+        if let Some(contract) = &contract {
+            validate_function_contract(contract, &instructions, &name)?;
+        }
         Ok(Label { name, instructions })
+    }
+
+    fn parse_optional_function_contract(&mut self) -> Result<Option<FunctionContract>, String> {
+        if !matches!(self.peek(), Some(Token::LParen)) {
+            return Ok(None);
+        }
+        self.advance();
+        let inputs = self.parse_contract_registers(Token::RParen)?;
+        self.expect(Token::RParen, "Expected ')' after function inputs")?;
+        self.expect(Token::Minus, "Expected '->' in function contract")?;
+        self.expect(Token::Greater, "Expected '->' in function contract")?;
+        let outputs = if matches!(self.peek(), Some(Token::LParen)) {
+            self.advance();
+            let values = self.parse_contract_registers(Token::RParen)?;
+            self.expect(Token::RParen, "Expected ')' after function outputs")?;
+            values
+        } else {
+            vec![self.parse_contract_register()?]
+        };
+        let mut clobbers = Vec::new();
+        if matches!(self.peek(), Some(Token::LBracket)) {
+            self.advance();
+            while !matches!(self.peek(), Some(Token::RBracket)) {
+                clobbers.push(self.expect_register("clobber register")?);
+                if !matches!(self.peek(), Some(Token::Comma)) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(Token::RBracket, "Expected ']' after clobber registers")?;
+        }
+        let mut inputs_seen = HashSet::new();
+        for register in &inputs {
+            if !inputs_seen.insert(register.name.as_str()) {
+                return Err(format!(
+                    "Register {:?} is duplicated in function inputs",
+                    register.name
+                ));
+            }
+        }
+        let mut outputs_seen = HashSet::new();
+        for register in &outputs {
+            if !outputs_seen.insert(register.name.as_str()) {
+                return Err(format!(
+                    "Register {:?} is duplicated in function outputs",
+                    register.name
+                ));
+            }
+        }
+        let mut clobbers_seen = HashSet::new();
+        for register in &clobbers {
+            if !clobbers_seen.insert(register.as_str()) {
+                return Err(format!(
+                    "Register {:?} is duplicated in function clobbers",
+                    register
+                ));
+            }
+            if outputs_seen.contains(register.as_str()) {
+                return Err(format!(
+                    "Output register {:?} cannot also be a clobber",
+                    register
+                ));
+            }
+        }
+        Ok(Some(FunctionContract {
+            inputs,
+            outputs,
+            clobbers,
+        }))
+    }
+
+    fn parse_contract_registers(&mut self, end: Token) -> Result<Vec<ContractRegister>, String> {
+        let mut registers = Vec::new();
+        if matches!(self.peek(), Some(token) if *token == end) {
+            return Ok(registers);
+        }
+        loop {
+            registers.push(self.parse_contract_register()?);
+            if !matches!(self.peek(), Some(Token::Comma)) {
+                break;
+            }
+            self.advance();
+            if matches!(self.peek(), Some(token) if *token == end) {
+                break;
+            }
+        }
+        Ok(registers)
+    }
+
+    fn parse_contract_register(&mut self) -> Result<ContractRegister, String> {
+        let name = self.expect_register("contract register")?;
+        self.expect(Token::Colon, "Expected ':' after contract register")?;
+        let width = match self.advance() {
+            Some(Token::Ident(width)) => MemoryWidth::parse(&width)?,
+            Some(token) => {
+                return Err(format!(
+                    "Expected width in function contract, found {token:?}"
+                ));
+            }
+            None => return Err(String::from("Expected width in function contract")),
+        };
+        Ok(ContractRegister { name, width })
     }
 
     fn record_instruction_span(&mut self, label: &str, start: usize) {
@@ -398,16 +582,15 @@ impl Parser {
             }
         };
 
-        match self.peek() {
+        let mut inferred_align = None;
+        let declaration = match self.peek() {
             Some(Token::Equals) => {
                 self.advance();
                 if width.is_float() {
                     let value = self.parse_float_literal("memory initializer", width)?;
 
-                    return Ok(MemoryDeclaration::FloatScalar { name, width, value });
-                }
-
-                if matches!(self.peek(), Some(Token::Text(_))) {
+                    MemoryDeclaration::FloatScalar { name, width, value }
+                } else if matches!(self.peek(), Some(Token::Text(_))) {
                     if width != MemoryWidth::U8 {
                         return Err(String::from(
                             "String memory initializers require u8 memory width",
@@ -417,73 +600,92 @@ impl Parser {
                     let Some(Token::Text(value)) = self.advance() else {
                         unreachable!()
                     };
-                    return Ok(MemoryDeclaration::Array {
+                    MemoryDeclaration::Array {
                         name,
                         width,
                         values: value
                             .bytes()
                             .map(|value| MemoryValue::Integer(value as i128))
                             .collect(),
-                    });
-                }
-
-                if matches!(self.peek(), Some(Token::LBracket)) {
+                    }
+                } else if matches!(self.peek(), Some(Token::LBracket)) {
                     let values = self.parse_memory_array_values(width)?;
-                    return Ok(MemoryDeclaration::Array {
+                    MemoryDeclaration::Array {
                         name,
                         width,
                         values,
-                    });
-                }
-
-                if matches!(self.peek(), Some(Token::Repeat)) {
+                    }
+                } else if matches!(self.peek(), Some(Token::Repeat)) {
                     self.advance();
                     self.expect(Token::LParen, "Expected '(' after repeat")?;
                     let count = self.parse_usize_literal("repeat count")?;
                     self.expect(Token::Comma, "Expected ',' after repeat count")?;
                     let value = self.parse_memory_value(width)?;
                     self.expect(Token::RParen, "Expected ')' after repeat value")?;
-                    return Ok(MemoryDeclaration::Repeat {
+                    MemoryDeclaration::Repeat {
                         name,
                         width,
                         count,
                         value,
-                    });
-                }
-
-                if matches!(self.peek(), Some(Token::Addr)) {
+                    }
+                } else if matches!(self.peek(), Some(Token::Addr)) {
                     let value = self.parse_memory_value(width)?;
-                    return Ok(MemoryDeclaration::Array {
+                    MemoryDeclaration::Array {
                         name,
                         width,
                         values: vec![value],
-                    });
-                }
-
-                if width == MemoryWidth::Ptr {
+                    }
+                } else if width == MemoryWidth::Ptr {
                     return Err(String::from(
                         "ptr memory initializers require addr <symbol>",
                     ));
+                } else {
+                    let value = self.parse_integer_literal("memory initializer")?;
+                    validate_integer_binding_width(value, width)?;
+                    MemoryDeclaration::Scalar { name, width, value }
                 }
-
-                let value = self.parse_integer_literal("memory initializer")?;
-                validate_integer_binding_width(value, width)?;
-
-                Ok(MemoryDeclaration::Scalar { name, width, value })
             }
             Some(Token::LParen) => {
                 self.advance();
-                let count = self.parse_buffer_count()?;
+                let count = self.parse_memory_buffer_count(&mut inferred_align)?;
                 self.expect(Token::RParen, "Expected ')' after buffer count")?;
 
-                Ok(MemoryDeclaration::Buffer { name, width, count })
+                MemoryDeclaration::Buffer { name, width, count }
             }
-            Some(token) => Err(format!(
-                "Expected '=' for scalar memory or '(' for buffer memory, found {token:?}"
-            )),
-            None => Err(String::from(
-                "Expected '=' for scalar memory or '(' for buffer memory, found end of input",
-            )),
+            Some(token) => {
+                return Err(format!(
+                    "Expected '=' for scalar memory or '(' for buffer memory, found {token:?}"
+                ));
+            }
+            None => {
+                return Err(String::from(
+                    "Expected '=' for scalar memory or '(' for buffer memory, found end of input",
+                ));
+            }
+        };
+
+        if matches!(self.peek(), Some(Token::Align)) {
+            self.advance();
+            let align = self.parse_usize_literal("memory alignment")?;
+            validate_alignment(align)?;
+            if let Some(required) = inferred_align {
+                if align < required {
+                    return Err(format!(
+                        "Memory alignment {align} is less than layout alignment {required}"
+                    ));
+                }
+            }
+            Ok(MemoryDeclaration::Aligned {
+                declaration: Box::new(declaration),
+                align,
+            })
+        } else if let Some(align) = inferred_align {
+            Ok(MemoryDeclaration::Aligned {
+                declaration: Box::new(declaration),
+                align,
+            })
+        } else {
+            Ok(declaration)
         }
     }
 
@@ -611,9 +813,11 @@ impl Parser {
             Some(token) => Err(format!(
                 "Expected string literal after asm architecture, found {token:?}"
             )),
-            None => Err(String::from(
-                "Expected string literal after asm architecture, found end of input",
-            )),
+            None => {
+                return Err(String::from(
+                    "Expected string literal after asm architecture, found end of input",
+                ));
+            }
         }
     }
 
@@ -1453,6 +1657,7 @@ impl Parser {
             Some(Token::NumberLiteral(value)) => value
                 .parse::<usize>()
                 .map_err(|_| format!("Invalid {context} {value:?}")),
+            Some(Token::Ident(name)) => self.parse_layout_member_value(&name, context),
             Some(Token::Minus) => Err(format!("{context} cannot be negative")),
             Some(token) => Err(format!("Expected {context}, found {token:?}")),
             None => Err(format!("Expected {context}, found end of input")),
@@ -1464,6 +1669,7 @@ impl Parser {
             Some(Token::NumberLiteral(value)) => value
                 .parse::<usize>()
                 .map_err(|_| format!("Invalid buffer count {value:?}"))?,
+            Some(Token::Ident(name)) => self.parse_layout_member_value(&name, "buffer count")?,
             Some(Token::Minus) => return Err(String::from("Buffer count must be greater than 0")),
             Some(token) => return Err(format!("Expected buffer count, found {token:?}")),
             None => return Err(String::from("Expected buffer count, found end of input")),
@@ -1473,6 +1679,46 @@ impl Parser {
             Err(String::from("Buffer count must be greater than 0"))
         } else {
             Ok(value)
+        }
+    }
+
+    fn parse_memory_buffer_count(
+        &mut self,
+        inferred_align: &mut Option<usize>,
+    ) -> Result<usize, String> {
+        if let Some(Token::Ident(name)) = self.peek().cloned() {
+            self.advance();
+            if matches!(self.peek(), Some(Token::LocalIdent(_))) {
+                return self.parse_layout_member_value(&name, "buffer count");
+            }
+            let layout = self
+                .layouts
+                .get(&name)
+                .ok_or_else(|| format!("Unknown layout {name:?}"))?;
+            *inferred_align = Some(layout.align);
+            return Ok(layout.size);
+        }
+        self.parse_buffer_count()
+    }
+
+    fn parse_layout_member_value(&mut self, name: &str, context: &str) -> Result<usize, String> {
+        let Some(Token::LocalIdent(member)) = self.peek().cloned() else {
+            return Err(format!(
+                "Expected layout member after {name:?} in {context}"
+            ));
+        };
+        self.advance();
+        let Some(layout) = self.layouts.get(name) else {
+            return Err(format!("Unknown layout {name:?}"));
+        };
+        match member.as_str() {
+            "size" => Ok(layout.size),
+            "align" => Ok(layout.align),
+            field => layout
+                .fields
+                .get(field)
+                .copied()
+                .ok_or_else(|| format!("Layout {name:?} has no field {field:?}")),
         }
     }
 
@@ -1654,6 +1900,19 @@ impl Parser {
 
         self.advance();
 
+        if let Some(layout) = self.layouts.get(&name) {
+            let value = match property.as_str() {
+                "size" => layout.size,
+                "align" => layout.align,
+                field => layout
+                    .fields
+                    .get(field)
+                    .copied()
+                    .ok_or_else(|| format!("Layout {name:?} has no field {field:?}"))?,
+            };
+            return Ok(Operand::Immediate(value as i128));
+        }
+
         let property = match property.as_str() {
             "len" => StringProperty::Len,
             "ptr" => StringProperty::Ptr,
@@ -1727,7 +1986,25 @@ impl Parser {
                     ));
                 }
 
-                Ok(AddressTerm::Ident(name))
+                if let Some(Token::LocalIdent(property)) = self.peek().cloned() {
+                    self.advance();
+                    let layout = self
+                        .layouts
+                        .get(&name)
+                        .ok_or_else(|| format!("Unknown layout {name:?}"))?;
+                    let value = match property.as_str() {
+                        "size" => layout.size,
+                        "align" => layout.align,
+                        field => layout
+                            .fields
+                            .get(field)
+                            .copied()
+                            .ok_or_else(|| format!("Layout {name:?} has no field {field:?}"))?,
+                    };
+                    Ok(AddressTerm::Immediate(value as i128))
+                } else {
+                    Ok(AddressTerm::Ident(name))
+                }
             }
             Some(Token::LBracket) => Err(String::from("Nested dereference is not supported yet")),
             Some(Token::Ampersand | Token::Pointer(_)) => Err(String::from(
@@ -2125,6 +2402,99 @@ fn validate_integer_binding_width(value: i128, width: MemoryWidth) -> Result<(),
     }
 }
 
+fn validate_function_contract(
+    contract: &FunctionContract,
+    instructions: &[Instruction],
+    function: &str,
+) -> Result<(), String> {
+    let mut allowed: HashSet<&str> = contract
+        .inputs
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect();
+    allowed.extend(contract.outputs.iter().map(|value| value.name.as_str()));
+    allowed.extend(contract.clobbers.iter().map(String::as_str));
+
+    for instruction in instructions {
+        if matches!(
+            instruction,
+            Instruction::Call { .. }
+                | Instruction::InlineAsm { .. }
+                | Instruction::Syscall
+                | Instruction::Read { .. }
+                | Instruction::Print { .. }
+                | Instruction::Exit { .. }
+                | Instruction::Release { .. }
+        ) {
+            return Err(format!(
+                "Function {function:?} contract cannot verify opaque instruction effects"
+            ));
+        }
+        let mut invalid = None;
+        instruction.visit_operands(|operand| {
+            if invalid.is_none() {
+                if let Operand::Register(name) = operand
+                    && !allowed.contains(name.as_str())
+                {
+                    invalid = Some(name.clone());
+                }
+            }
+        });
+        if let Some(name) = invalid {
+            return Err(format!(
+                "Function {function:?} contract does not declare register {name:?}"
+            ));
+        }
+    }
+
+    for output in &contract.outputs {
+        let written = instructions.iter().any(|instruction| match instruction {
+            Instruction::Assign { dst, .. } | Instruction::AssignIf { dst, .. } => match dst {
+                AssignmentTarget::Operand(Operand::Register(name)) => name == &output.name,
+                AssignmentTarget::RegisterPair(pair) => {
+                    pair.high == output.name || pair.low == output.name
+                }
+                _ => false,
+            },
+            _ => false,
+        });
+        if !written {
+            return Err(format!(
+                "Function {function:?} does not assign declared output register {:?}",
+                output.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_alignment(align: usize) -> Result<(), String> {
+    if align == 0 || !align.is_power_of_two() {
+        Err(format!("Alignment {align} must be a non-zero power of two"))
+    } else {
+        Ok(())
+    }
+}
+
+fn memory_declaration_name(declaration: &MemoryDeclaration) -> &String {
+    match declaration {
+        MemoryDeclaration::Aligned { declaration, .. } => memory_declaration_name(declaration),
+        MemoryDeclaration::Scalar { name, .. }
+        | MemoryDeclaration::FloatScalar { name, .. }
+        | MemoryDeclaration::Buffer { name, .. }
+        | MemoryDeclaration::Array { name, .. }
+        | MemoryDeclaration::Repeat { name, .. } => name,
+    }
+}
+
+fn align_up(value: usize, align: usize) -> Result<usize, String> {
+    let mask = align - 1;
+    value
+        .checked_add(mask)
+        .map(|value| value & !mask)
+        .ok_or_else(|| String::from("Layout size overflow"))
+}
+
 fn validate_data_names(data: &[DataDeclaration]) -> Result<(), String> {
     let mut names = HashSet::new();
 
@@ -2153,6 +2523,7 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
 
     for declaration in memory {
         let name = match declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => memory_declaration_name(declaration),
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
             | MemoryDeclaration::Buffer { name, .. }
@@ -2187,6 +2558,7 @@ fn validate_label_storage_names(
     let memory_names: HashSet<_> = memory
         .iter()
         .map(|declaration| match declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => memory_declaration_name(declaration),
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
             | MemoryDeclaration::Buffer { name, .. }
@@ -2246,6 +2618,9 @@ fn validate_memory_address_targets(
     global_symbols: &HashSet<&str>,
 ) -> Result<(), String> {
     match declaration {
+        MemoryDeclaration::Aligned { declaration, .. } => {
+            validate_memory_address_targets(declaration, global_symbols)?;
+        }
         MemoryDeclaration::Array { name, values, .. } => {
             for value in values {
                 validate_memory_address_target(name, value, global_symbols)?;
@@ -2294,6 +2669,9 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
     let memory_names: HashSet<&str> = memory
         .iter()
         .map(|declaration| match declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => {
+                memory_declaration_name(declaration).as_str()
+            }
             MemoryDeclaration::Scalar { name, .. }
             | MemoryDeclaration::FloatScalar { name, .. }
             | MemoryDeclaration::Buffer { name, .. }
