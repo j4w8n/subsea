@@ -13,6 +13,7 @@ The goal is not only fewer lines of code. The goal is to show where Subsea keeps
 | Array sum | `03_array_sum.asm` | `03_array_sum.ss` | memory, indexed loads, loops, formatted output |
 | Function comparison | `04_function_compare.asm` | `04_function_compare.ss` | functions, explicit result registers, basic addition |
 | Dispatch table | `05_dispatch_table.asm` | `05_dispatch_table.ss` | functions, function pointers, indirect calls |
+| Layout | `06_layout.asm` | `06_layout.ss` | padded memory layouts, symbolic offsets, alignment |
 
 ## Try The Subsea Versions
 
@@ -24,6 +25,7 @@ subsea run examples/x86-vs-subsea/02_arithmetic.ss
 subsea run examples/x86-vs-subsea/03_array_sum.ss
 subsea run examples/x86-vs-subsea/04_function_compare.ss
 subsea run examples/x86-vs-subsea/05_dispatch_table.ss
+subsea run examples/x86-vs-subsea/06_layout.ss
 ```
 
 If you are developing Subsea from this checkout, use Cargo:
