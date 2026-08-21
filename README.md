@@ -449,9 +449,8 @@ Done
 ```
 
 Functions use a mixed caller/callee preservation convention.
-- A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning.
+- A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. So, callers must save those registers themselves if they need their values after `call`.
 - Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning. 
-- Callers must save those registers themselves if they need their values after `call`.
 
 ```ss
 main: {
