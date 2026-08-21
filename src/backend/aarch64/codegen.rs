@@ -8,6 +8,7 @@ use super::asm;
 #[derive(Clone, Copy)]
 enum StackSlotKind {
     Scalar(crate::ast::MemoryWidth),
+    Buffer,
     String,
 }
 
@@ -49,6 +50,7 @@ pub(crate) fn emit_for_target_with_entry(
                 "sub sp, sp, #{frame_size}\n  stp x29, x30, [sp]\n  mov x29, sp\n  stp x19, x20, [sp, #16]\n  str x21, [sp, #32]"
             ),
         );
+        emit_stack_buffer_initializers(&mut asm, &label.stack, &slots);
         for (index, instruction) in label.instructions.iter().enumerate() {
             emit_instruction(
                 &mut asm,
@@ -76,6 +78,27 @@ pub(crate) fn emit_for_target_with_entry(
     }
 
     Ok(asm)
+}
+
+fn emit_stack_buffer_initializers(
+    asm: &mut String,
+    layout: &ir::StackLayout,
+    slots: &HashMap<String, usize>,
+) {
+    for slot in &layout.slots {
+        let ir::StackSlot::Buffer { name, count } = slot else {
+            continue;
+        };
+        let offset = slots[name];
+        let loop_label = format!(".L.__subsea.stack_buffer_zero_{}", asm.len());
+        asm::mov(asm, "x16", format_args!("#{offset}"));
+        asm::instruction(asm, "add x16, x29, x16");
+        asm::mov(asm, "x17", format_args!("#{count}"));
+        asm::label(asm, &loop_label);
+        asm::store(asm, "strb", "wzr", "[x16]");
+        asm::instruction(asm, "add x16, x16, #1\n  subs x17, x17, #1");
+        asm::branch(asm, "b.ne", &loop_label);
+    }
 }
 
 fn emit_data(asm: &mut String, program: &ir::Program, entry_symbol: &str) -> Result<(), String> {
@@ -392,6 +415,7 @@ fn emit_instruction(
             )
         }
         ir::Instruction::Const { .. } => Ok(()),
+        ir::Instruction::StackBuffer { .. } => Ok(()),
         ir::Instruction::StackString { name, value } => emit_stack_string(asm, name, value, slots),
         ir::Instruction::Push { src } => {
             validate_stack_value(src, slots, slot_kinds, "push")?;
@@ -414,7 +438,7 @@ fn emit_instruction(
                     ),
             } => {
                 asm::load(asm, "ldr", "x16", "[sp], #16");
-                let address = memory_address_or_materialize(asm, address)?;
+                let address = memory_address_or_materialize(asm, address, slots)?;
                 asm::store(asm, "str", "x16", address);
                 Ok(())
             }
@@ -541,6 +565,11 @@ fn emit_runtime_operation(
                                     slots,
                                     slot_kinds,
                                 )?,
+                                Some(StackSlotKind::Buffer) => {
+                                    return Err(format!(
+                                        "Stack byte buffer {name:?} cannot be printed as a string"
+                                    ));
+                                }
                                 None => return Err(format!("Unknown print binding {name:?}")),
                             }
                         } else {
@@ -1056,9 +1085,9 @@ fn emit_value(
                 width,
                 Some(crate::ast::MemoryWidth::F32 | crate::ast::MemoryWidth::F64)
             ) {
-                emit_float_memory_load(asm, destination, address, width.unwrap())?;
+                emit_float_memory_load(asm, destination, address, width.unwrap(), slots)?;
             } else if width.is_some() {
-                let address = memory_address_or_materialize(asm, address)?;
+                let address = memory_address_or_materialize(asm, address, slots)?;
                 asm::load(
                     asm,
                     integer_load_opcode(*width)?,
@@ -1066,7 +1095,7 @@ fn emit_value(
                     address,
                 );
             } else {
-                let address = memory_address_or_materialize(asm, address)?;
+                let address = memory_address_or_materialize(asm, address, slots)?;
                 asm::load(asm, "ldr", destination, address);
             }
         }
@@ -1086,14 +1115,19 @@ fn emit_value(
             asm::load(asm, "ldr", destination, format_args!("[x29, #{offset}]"));
         }
         ir::Operand::Pointer(name) => {
-            asm::instruction(
-                asm,
-                format_args!(
-                    "adrp {destination}, {name}\n  add {destination}, {destination}, :lo12:{name}"
-                ),
-            );
+            if let Some(offset) = slots.get(name) {
+                asm::mov(asm, destination, format_args!("#{offset}"));
+                asm::instruction(asm, format_args!("add {destination}, x29, {destination}"));
+            } else {
+                asm::instruction(
+                    asm,
+                    format_args!(
+                        "adrp {destination}, {name}\n  add {destination}, {destination}, :lo12:{name}"
+                    ),
+                );
+            }
         }
-        ir::Operand::AddressOf(address) => emit_address(asm, destination, address)?,
+        ir::Operand::AddressOf(address) => emit_address(asm, destination, address, slots)?,
         _ => return unsupported("runtime operand"),
     }
     Ok(())
@@ -1106,19 +1140,24 @@ fn emit_address_or_value(
     slots: &HashMap<String, usize>,
 ) -> Result<(), String> {
     match source {
-        ir::Operand::Memory { address, .. } => emit_address(asm, destination, address),
+        ir::Operand::Memory { address, .. } => emit_address(asm, destination, address, slots),
         ir::Operand::Name(name) => {
             let slot = stack_operand(name, None, slots)?;
             let ir::Operand::Memory { address, .. } = slot else {
                 unreachable!()
             };
-            emit_address(asm, destination, &address)
+            emit_address(asm, destination, &address, slots)
         }
         _ => emit_value(asm, destination, source, slots),
     }
 }
 
-fn emit_address(asm: &mut String, destination: &str, address: &ir::Address) -> Result<(), String> {
+fn emit_address(
+    asm: &mut String,
+    destination: &str,
+    address: &ir::Address,
+    slots: &HashMap<String, usize>,
+) -> Result<(), String> {
     validate_address_registers(address)?;
     match &address.first {
         ir::AddressTerm::TargetRegister(register) => {
@@ -1127,12 +1166,17 @@ fn emit_address(asm: &mut String, destination: &str, address: &ir::Address) -> R
             }
         }
         ir::AddressTerm::Name(name) => {
-            asm::instruction(
-                asm,
-                format_args!(
-                    "adrp {destination}, {name}\n  add {destination}, {destination}, :lo12:{name}"
-                ),
-            );
+            if let Some(offset) = slots.get(name) {
+                asm::mov(asm, destination, format_args!("#{offset}"));
+                asm::instruction(asm, format_args!("add {destination}, x29, {destination}"));
+            } else {
+                asm::instruction(
+                    asm,
+                    format_args!(
+                        "adrp {destination}, {name}\n  add {destination}, {destination}, :lo12:{name}"
+                    ),
+                );
+            }
         }
         ir::AddressTerm::Immediate(value) => {
             asm::mov(asm, destination, format_args!("#{value}"));
@@ -1258,7 +1302,7 @@ fn emit_assignment(
             } else {
                 integer_store_opcode(Some(*value_width))?
             };
-            let address = memory_address_or_materialize(asm, address)?;
+            let address = memory_address_or_materialize(asm, address, slots)?;
             asm::store(asm, opcode, register, address);
             return Ok(());
         }
@@ -1266,7 +1310,7 @@ fn emit_assignment(
             if value.is_empty() {
                 return Ok(());
             }
-            emit_address(asm, "x16", address)?;
+            emit_address(asm, "x16", address, slots)?;
             for (index, byte) in value.as_bytes().iter().enumerate() {
                 asm::mov(asm, "w17", format_args!("#{byte}"));
                 if index == 0 {
@@ -1295,7 +1339,7 @@ fn emit_assignment(
                 "d"
             };
             emit_float_operand(asm, "v16", suffix, src, slots)?;
-            let address = memory_address_or_materialize(asm, address)?;
+            let address = memory_address_or_materialize(asm, address, slots)?;
             asm::store(asm, "str", format_args!("{suffix}16"), address);
         } else {
             let destination_width = width
@@ -1307,7 +1351,7 @@ fn emit_assignment(
                 emit_value(asm, "x16", src, slots)?;
                 narrow_register("x16", *width)
             };
-            let address = memory_address_or_materialize(asm, address)?;
+            let address = memory_address_or_materialize(asm, address, slots)?;
             asm::store(asm, integer_store_opcode(*width)?, source, address);
         }
         return Ok(());
@@ -1358,9 +1402,9 @@ fn emit_assignment(
                 width,
                 Some(crate::ast::MemoryWidth::F32 | crate::ast::MemoryWidth::F64)
             ) {
-                emit_float_memory_load(asm, dst, address, width.unwrap())?;
+                emit_float_memory_load(asm, dst, address, width.unwrap(), slots)?;
             } else {
-                let address = memory_address_or_materialize(asm, address)?;
+                let address = memory_address_or_materialize(asm, address, slots)?;
                 asm::load(
                     asm,
                     integer_load_opcode(*width)?,
@@ -1692,6 +1736,7 @@ fn emit_float_memory_load(
     destination: &str,
     address: &ir::Address,
     width: crate::ast::MemoryWidth,
+    slots: &HashMap<String, usize>,
 ) -> Result<(), String> {
     let suffix = match width {
         crate::ast::MemoryWidth::F32 => "s",
@@ -1699,7 +1744,7 @@ fn emit_float_memory_load(
         _ => return unsupported("floating-point memory width"),
     };
     let destination = float_register(destination, suffix)?;
-    let address = memory_address_or_materialize(asm, address)?;
+    let address = memory_address_or_materialize(asm, address, slots)?;
     asm::load(asm, "ldr", destination, address);
     Ok(())
 }
@@ -1719,7 +1764,7 @@ fn emit_float_operand(
             asm::instruction(asm, format_args!("fmov {register}, {source}"));
         }
         ir::Operand::Memory { address, .. } => {
-            let address = memory_address_or_materialize(asm, address)?;
+            let address = memory_address_or_materialize(asm, address, slots)?;
             asm::load(asm, "ldr", register, address);
         }
         ir::Operand::FloatLiteral(value) => {
@@ -2383,7 +2428,9 @@ fn stack_slots(layout: &ir::StackLayout, base: usize) -> HashMap<String, usize> 
     let mut slots = HashMap::new();
     for slot in &layout.slots {
         let name = match slot {
-            ir::StackSlot::Scalar { name, .. } | ir::StackSlot::String { name } => name,
+            ir::StackSlot::Scalar { name, .. }
+            | ir::StackSlot::Buffer { name, .. }
+            | ir::StackSlot::String { name } => name,
         };
         slots.insert(name.clone(), offset);
         offset += if matches!(slot, ir::StackSlot::String { .. }) {
@@ -2401,6 +2448,7 @@ fn stack_slot_kinds(layout: &ir::StackLayout) -> HashMap<String, StackSlotKind> 
         .iter()
         .map(|slot| match slot {
             ir::StackSlot::Scalar { name, width } => (name.clone(), StackSlotKind::Scalar(*width)),
+            ir::StackSlot::Buffer { name, .. } => (name.clone(), StackSlotKind::Buffer),
             ir::StackSlot::String { name } => (name.clone(), StackSlotKind::String),
         })
         .collect()
@@ -2412,6 +2460,7 @@ fn stack_frame_size(layout: &ir::StackLayout) -> usize {
         .iter()
         .map(|slot| match slot {
             ir::StackSlot::Scalar { .. } => 8,
+            ir::StackSlot::Buffer { count, .. } => *count,
             ir::StackSlot::String { .. } => 16,
         })
         .sum::<usize>();
@@ -2520,6 +2569,7 @@ fn memory_address(address: &ir::Address) -> Result<String, String> {
 fn memory_address_or_materialize(
     asm: &mut String,
     address: &ir::Address,
+    slots: &HashMap<String, usize>,
 ) -> Result<String, String> {
     if matches!(address.first, ir::AddressTerm::TargetRegister(_))
         && let Ok(address) = memory_address(address)
@@ -2531,7 +2581,7 @@ fn memory_address_or_materialize(
     if address_uses_register(address, SCRATCH) {
         return unsupported("address uses the address scratch register");
     }
-    emit_address(asm, SCRATCH, address)?;
+    emit_address(asm, SCRATCH, address, slots)?;
     Ok(format!("[{SCRATCH}]"))
 }
 

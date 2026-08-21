@@ -131,6 +131,10 @@ pub enum Instruction {
         width: MemoryWidth,
         value: Operand,
     },
+    StackBuffer {
+        name: String,
+        count: usize,
+    },
     StackString {
         name: String,
         value: StringInitializer,
@@ -190,6 +194,7 @@ impl Instruction {
                 visit(len);
             }
             Instruction::Stack { value, .. } => visit(value),
+            Instruction::StackBuffer { .. } => {}
             Instruction::StackString {
                 value: StringInitializer::Slice { ptr, len },
                 ..
@@ -246,6 +251,7 @@ impl Instruction {
                 visit(len);
             }
             Instruction::Stack { value, .. } => visit(value),
+            Instruction::StackBuffer { .. } => {}
             Instruction::StackString {
                 value: StringInitializer::Slice { ptr, len },
                 ..

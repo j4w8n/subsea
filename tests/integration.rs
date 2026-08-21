@@ -273,6 +273,22 @@ fn assigns_string_bytes_to_memory() {
 }
 
 #[test]
+fn uses_stack_byte_buffer_as_string_backing_storage() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "tests/fixtures/stack_buffer.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hello\nJello\n");
+}
+
+#[test]
 fn reads_stack_string_properties() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

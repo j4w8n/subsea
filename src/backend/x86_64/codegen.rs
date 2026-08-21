@@ -6,8 +6,8 @@ use super::{
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
     build_stack_frame_from_layout, collect_ir_string_bindings, memory_width_bits,
-    stack_scalar_slot, stack_string_slot, validate_float_literal, validate_float_width,
-    validate_label,
+    stack_buffer_slot, stack_scalar_slot, stack_string_slot, validate_float_literal,
+    validate_float_width, validate_label,
 };
 use crate::ast::{
     BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth, PairBinaryOp,
@@ -73,6 +73,11 @@ impl RuntimeEmitter for X86RuntimeEmitter<'_> {
                                     }
                                     StackSlot::String { .. } => {
                                         emit_print_stack_string_instruction(asm, name, self.stack)?;
+                                    }
+                                    StackSlot::Buffer { .. } => {
+                                        return Err(BackendError::new(format!(
+                                            "Stack byte buffer {name:?} cannot be printed as a string"
+                                        )));
                                     }
                                 }
                             } else {
@@ -317,6 +322,7 @@ fn emit_ir_x86_64_asm_impl(
 
         if stack.has_slots() {
             emit_frame_prologue(&mut asm, &stack, target.spec());
+            emit_ir_stack_buffer_initializers(&mut asm, &stack);
             emit_ir_stack_initializers(
                 &mut asm,
                 &label.instructions,
@@ -431,7 +437,9 @@ fn emit_ir_x86_64_asm_impl(
                     ir::Instruction::Nop => {
                         asm::nop(&mut asm);
                     }
-                    ir::Instruction::Const { .. } | ir::Instruction::Stack { .. } => {}
+                    ir::Instruction::Const { .. }
+                    | ir::Instruction::Stack { .. }
+                    | ir::Instruction::StackBuffer { .. } => {}
                     ir::Instruction::StackString { name, value } => {
                         emit_ir_stack_string_initializer(
                             &mut asm,
@@ -512,6 +520,29 @@ fn emit_ir_x86_64_asm_impl(
     }
 
     Ok(asm)
+}
+
+fn emit_ir_stack_buffer_initializers(asm: &mut String, stack: &StackFrame) {
+    for slot in stack.slots.values() {
+        if let StackSlot::Buffer { offset, count } = slot {
+            asm::push(asm, asm::Operand::Register(String::from("rdi")));
+            asm::push(asm, asm::Operand::Register(String::from("rcx")));
+            asm::instruction(asm, "xor eax, eax");
+            asm::lea(
+                asm,
+                asm::Operand::Register(String::from("rdi")),
+                format!("[rbp - {offset}]"),
+            );
+            asm::mov(
+                asm,
+                asm::Operand::Register(String::from("rcx")),
+                asm::Operand::Immediate(*count as i128),
+            );
+            asm::instruction(asm, "rep stosb");
+            asm::pop(asm, asm::Operand::Register(String::from("rcx")));
+            asm::pop(asm, asm::Operand::Register(String::from("rdi")));
+        }
+    }
 }
 
 fn emit_ir_stack_initializers(
@@ -2075,7 +2106,22 @@ fn emit_ir_stack_string_slice_pointer(
 ) -> Result<(), String> {
     match ptr {
         ir::Operand::Pointer(name) => {
-            emit_stack_string_address(asm, name, ptr_offset);
+            if let Some((buffer_offset, _)) = stack_buffer_slot(stack, name) {
+                asm::push(asm, asm::Operand::Register(String::from("r10")));
+                asm::lea(
+                    asm,
+                    asm::Operand::Register(String::from("r10")),
+                    format!("[rbp - {buffer_offset}]"),
+                );
+                asm::mov(
+                    asm,
+                    asm::Operand::Address(format!("qword ptr [rbp - {ptr_offset}]")),
+                    asm::Operand::Register(String::from("r10")),
+                );
+                asm::pop(asm, asm::Operand::Register(String::from("r10")));
+            } else {
+                emit_stack_string_address(asm, name, ptr_offset);
+            }
             Ok(())
         }
         ir::Operand::AddressOf(address) => {
@@ -2083,7 +2129,7 @@ fn emit_ir_stack_string_slice_pointer(
             asm::lea(
                 asm,
                 asm::Operand::Register(String::from("r10")),
-                format!("[{}]", emit_ir_address(address)),
+                format!("[{}]", emit_ir_address(address, stack)),
             );
             asm::mov(
                 asm,
@@ -2182,7 +2228,7 @@ fn emit_read_instruction(
     stack: &StackFrame,
 ) -> Result<(), BackendError> {
     emit_read_len_arg(asm, len, strings, label_name, stack)?;
-    emit_read_dst_arg(asm, dst)?;
+    emit_read_dst_arg(asm, dst, stack)?;
     emit_read_src_arg(asm, src);
     emit_linux_read(asm);
 
@@ -2239,6 +2285,11 @@ fn emit_ir_linux_memory_pointer_arg(
 ) -> Result<(), String> {
     match ptr {
         ir::Operand::Pointer(name) => {
+            if stack_buffer_slot(stack, name).is_some() {
+                return Err(String::from(
+                    "release pointer cannot refer to a stack byte buffer",
+                ));
+            }
             asm::lea(
                 asm,
                 asm::Operand::Register(String::from("rdi")),
@@ -2316,14 +2367,26 @@ fn emit_read_src_arg(asm: &mut String, src: &ir::ReadSource) {
     }
 }
 
-fn emit_read_dst_arg(asm: &mut String, dst: &ir::Operand) -> Result<(), String> {
+fn emit_read_dst_arg(
+    asm: &mut String,
+    dst: &ir::Operand,
+    stack: &StackFrame,
+) -> Result<(), String> {
     match dst {
         ir::Operand::Pointer(name) => {
-            asm::lea(
-                asm,
-                asm::Operand::Register(String::from("rsi")),
-                format!("[rip + {name}]"),
-            );
+            if let Some((offset, _)) = stack_buffer_slot(stack, name) {
+                asm::lea(
+                    asm,
+                    asm::Operand::Register(String::from("rsi")),
+                    format!("[rbp - {offset}]"),
+                );
+            } else {
+                asm::lea(
+                    asm,
+                    asm::Operand::Register(String::from("rsi")),
+                    format!("[rip + {name}]"),
+                );
+            }
             Ok(())
         }
         ir::Operand::TargetRegister(name) => {
@@ -2479,7 +2542,7 @@ fn emit_ir_assignment(
         ir::Value::IntrinsicCall { op, width, args } => emit_ir_intrinsic_call_assignment(
             asm, dst, *op, *width, args, strings, label_name, stack,
         ),
-        ir::Value::StringBytes { value } => emit_ir_string_bytes_assignment(asm, dst, value),
+        ir::Value::StringBytes { value } => emit_ir_string_bytes_assignment(asm, dst, value, stack),
         ir::Value::PlatformReserve { len } => {
             emit_ir_platform_reserve_assignment(asm, dst, len, strings, label_name, stack)
         }
@@ -2508,7 +2571,7 @@ fn emit_ir_operand_assignment(
             if binding.value.is_empty() {
                 return Err(String::from("String byte assignment cannot be empty"));
             }
-            return emit_ir_string_bytes_assignment(asm, dst, &binding.value);
+            return emit_ir_string_bytes_assignment(asm, dst, &binding.value, stack);
         }
     }
     if matches!(
@@ -2568,12 +2631,16 @@ fn emit_ir_special_copy(
         ir::Operand::Pointer(name) => {
             validate_ir_address_copy_dst(dst)?;
             let dst = emit_ir_operand(dst, strings, label_name, stack)?;
-            asm::instruction(asm, format_args!("lea {dst}, [rip + {name}]"));
+            if let Some((offset, _)) = stack_buffer_slot(stack, name) {
+                asm::instruction(asm, format_args!("lea {dst}, [rbp - {offset}]"));
+            } else {
+                asm::instruction(asm, format_args!("lea {dst}, [rip + {name}]"));
+            }
         }
         ir::Operand::AddressOf(address) => {
             validate_ir_address_copy_dst(dst)?;
             let dst = emit_ir_operand(dst, strings, label_name, stack)?;
-            let address = emit_ir_address(address);
+            let address = emit_ir_address(address, stack);
             asm::instruction(asm, format_args!("lea {dst}, [{address}]"));
         }
         ir::Operand::Converted {
@@ -3554,6 +3621,7 @@ fn emit_ir_string_bytes_assignment(
     asm: &mut String,
     dst: &ir::Operand,
     value: &str,
+    stack: &StackFrame,
 ) -> Result<(), String> {
     let ir::Operand::Memory { address, width } = dst else {
         return Err(String::from(
@@ -3567,7 +3635,7 @@ fn emit_ir_string_bytes_assignment(
         ));
     }
 
-    let base = emit_ir_address(address);
+    let base = emit_ir_address(address, stack);
     for (index, byte) in value.bytes().enumerate() {
         let address = if index == 0 {
             base.clone()
@@ -4321,6 +4389,7 @@ fn ir_machine_operand(
         } => Ok(asm::Operand::Memory(ir_machine_memory_address(
             address,
             Some(*width),
+            stack,
         ))),
         _ => Ok(asm::Operand::Address(emit_ir_operand(
             operand, strings, label_name, stack,
@@ -4331,12 +4400,13 @@ fn ir_machine_operand(
 fn ir_machine_memory_address(
     address: &ir::Address,
     width: Option<MemoryWidth>,
+    stack: &StackFrame,
 ) -> asm::MemoryAddress {
     asm::MemoryAddress {
         width: width.map(|width| width.ptr().to_owned()),
         terms: std::iter::once((
             asm::AddressOperator::Add,
-            ir_machine_address_term(&address.first),
+            ir_machine_address_term(&address.first, stack),
         ))
         .chain(address.rest.iter().map(|(operator, term)| {
             (
@@ -4344,17 +4414,19 @@ fn ir_machine_memory_address(
                     ir::AddressOperator::Add => asm::AddressOperator::Add,
                     ir::AddressOperator::Subtract => asm::AddressOperator::Subtract,
                 },
-                ir_machine_address_term(term),
+                ir_machine_address_term(term, stack),
             )
         }))
         .collect(),
     }
 }
 
-fn ir_machine_address_term(term: &ir::AddressTerm) -> asm::AddressTerm {
+fn ir_machine_address_term(term: &ir::AddressTerm, stack: &StackFrame) -> asm::AddressTerm {
     match term {
         ir::AddressTerm::Immediate(value) => asm::AddressTerm::Immediate(*value),
-        ir::AddressTerm::Name(name) => asm::AddressTerm::Symbol(name.clone()),
+        ir::AddressTerm::Name(name) => stack_buffer_slot(stack, name)
+            .map(|(offset, _)| asm::AddressTerm::Register(format!("rbp - {offset}")))
+            .unwrap_or_else(|| asm::AddressTerm::Symbol(name.clone())),
         ir::AddressTerm::TargetRegister(register) => asm::AddressTerm::Register(register.clone()),
         ir::AddressTerm::ScaledTargetRegister { register, scale } => {
             asm::AddressTerm::ScaledRegister {
@@ -5542,7 +5614,7 @@ pub(crate) fn emit_ir_operand(
             },
         },
         ir::Operand::Memory { address, .. } => {
-            let emitted_address = emit_ir_address(address);
+            let emitted_address = emit_ir_address(address, stack);
             Ok(match ir_operand_memory_width(operand, strings, stack) {
                 Some(width) => format!("{} ptr [{}]", width.ptr(), emitted_address),
                 None => format!("[{emitted_address}]"),
@@ -5586,24 +5658,26 @@ pub(crate) fn emit_ir_operand(
     }
 }
 
-fn emit_ir_address(address: &ir::Address) -> String {
-    let mut value = emit_ir_address_term(&address.first);
+fn emit_ir_address(address: &ir::Address, stack: &StackFrame) -> String {
+    let mut value = emit_ir_address_term(&address.first, stack);
 
     for (operator, term) in &address.rest {
         value.push_str(match operator {
             ir::AddressOperator::Add => " + ",
             ir::AddressOperator::Subtract => " - ",
         });
-        value.push_str(&emit_ir_address_term(term));
+        value.push_str(&emit_ir_address_term(term, stack));
     }
 
     value
 }
 
-fn emit_ir_address_term(term: &ir::AddressTerm) -> String {
+fn emit_ir_address_term(term: &ir::AddressTerm, stack: &StackFrame) -> String {
     match term {
         ir::AddressTerm::Immediate(value) => value.to_string(),
-        ir::AddressTerm::Name(name) => name.clone(),
+        ir::AddressTerm::Name(name) => stack_buffer_slot(stack, name)
+            .map(|(offset, _)| format!("rbp - {offset}"))
+            .unwrap_or_else(|| name.clone()),
         ir::AddressTerm::TargetRegister(name) => name.clone(),
         ir::AddressTerm::ScaledTargetRegister { register, scale } => {
             format!("{register} * {scale}")

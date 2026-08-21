@@ -50,6 +50,10 @@ pub fn lower_stack_layout(label: &crate::ast::Label) -> ir::StackLayout {
                 name: name.clone(),
                 width: *width,
             }),
+            Instruction::StackBuffer { name, count } => Some(ir::StackSlot::Buffer {
+                name: name.clone(),
+                count: *count,
+            }),
             Instruction::StackString { name, .. } => {
                 Some(ir::StackSlot::String { name: name.clone() })
             }
@@ -222,6 +226,10 @@ fn lower_instruction(
             name: name.clone(),
             width: *width,
             value: lower_operand(value),
+        }),
+        Instruction::StackBuffer { name, count } => Ok(ir::Instruction::StackBuffer {
+            name: name.clone(),
+            count: *count,
         }),
         Instruction::StackString { name, value } => Ok(ir::Instruction::StackString {
             name: name.clone(),

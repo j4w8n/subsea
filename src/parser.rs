@@ -777,6 +777,19 @@ impl Parser {
 
         let width = MemoryWidth::parse(&width_name)?;
 
+        if matches!(self.peek(), Some(Token::LParen)) {
+            if width != MemoryWidth::U8 {
+                return Err(String::from(
+                    "Stack buffer declarations require u8 element width",
+                ));
+            }
+
+            self.advance();
+            let count = self.parse_buffer_count()?;
+            self.expect(Token::RParen, "Expected ')' after stack buffer count")?;
+            return Ok(Instruction::StackBuffer { name, count });
+        }
+
         self.expect(Token::Equals, "Expected '=' after stack variable width")?;
         let value = self.parse_operand()?;
 
@@ -2189,6 +2202,7 @@ fn validate_label_storage_names(
             match instruction {
                 Instruction::Const { name, .. }
                 | Instruction::Stack { name, .. }
+                | Instruction::StackBuffer { name, .. }
                 | Instruction::StackString { name, .. } => {
                     if data_names.contains(name.as_str()) {
                         return Err(format!(
@@ -2354,6 +2368,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
         let mut bindings = HashSet::new();
         let mut operand_bindings = HashSet::new();
         let mut string_bindings = HashSet::new();
+        let mut stack_buffers = HashSet::new();
         for instruction in &label.instructions {
             match instruction {
                 Instruction::Const { name, value } => {
@@ -2399,6 +2414,24 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                     bindings.insert(name.as_str());
                     operand_bindings.insert(name.as_str());
                 }
+                Instruction::StackBuffer { name, .. } => {
+                    if data_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level data",
+                            label.name
+                        ));
+                    }
+
+                    if label_names.contains(name.as_str()) {
+                        return Err(format!(
+                            "Name {name:?} in label {:?} conflicts with top-level label",
+                            label.name
+                        ));
+                    }
+
+                    bindings.insert(name.as_str());
+                    stack_buffers.insert(name.as_str());
+                }
                 Instruction::StackString { name, .. } => {
                     if data_names.contains(name.as_str()) {
                         return Err(format!(
@@ -2427,6 +2460,7 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
                 &bindings,
                 &operand_bindings,
                 &string_bindings,
+                &stack_buffers,
                 &memory_names,
                 &global_symbols,
                 &top_level_label_names,
@@ -2443,6 +2477,7 @@ fn validate_instruction_symbols(
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
     string_bindings: &HashSet<&str>,
+    stack_buffers: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     top_level_labels: &HashSet<&str>,
@@ -2488,9 +2523,10 @@ fn validate_instruction_symbols(
         Instruction::Read { dst, .. } => {
             if let Operand::Pointer(name) = dst
                 && !memory.contains(name.as_str())
+                && !stack_buffers.contains(name.as_str())
             {
                 return Err(format!(
-                    "Read destination {name:?} in label {current_label:?} must be top-level memory"
+                    "Read destination {name:?} in label {current_label:?} must be memory or a stack buffer"
                 ));
             }
         }
@@ -2512,6 +2548,7 @@ fn validate_instruction_symbols(
             bindings,
             operand_bindings,
             string_bindings,
+            stack_buffers,
             memory,
             labels,
             current_label,
@@ -2553,6 +2590,7 @@ fn validate_operand_symbol(
     bindings: &HashSet<&str>,
     operand_bindings: &HashSet<&str>,
     string_bindings: &HashSet<&str>,
+    stack_buffers: &HashSet<&str>,
     memory: &HashSet<&str>,
     labels: &HashSet<&str>,
     current_label: &str,
@@ -2564,6 +2602,7 @@ fn validate_operand_symbol(
                 bindings,
                 operand_bindings,
                 string_bindings,
+                stack_buffers,
                 memory,
                 labels,
                 current_label,
@@ -2587,7 +2626,9 @@ fn validate_operand_symbol(
             format!("Binding {name:?} in label {current_label:?} is not a string"),
         ),
         Operand::Pointer(name)
-            if !memory.contains(name.as_str()) && !labels.contains(name.as_str()) =>
+            if !memory.contains(name.as_str())
+                && !labels.contains(name.as_str())
+                && !stack_buffers.contains(name.as_str()) =>
         {
             Err(format!(
                 "Unknown address target {name:?} in label {current_label:?}"
@@ -2600,6 +2641,7 @@ fn validate_operand_symbol(
                 if let AddressTerm::Ident(name) = term
                     && !memory.contains(name.as_str())
                     && !labels.contains(name.as_str())
+                    && !stack_buffers.contains(name.as_str())
                 {
                     return Err(format!(
                         "Unknown address symbol {name:?} in label {current_label:?}"

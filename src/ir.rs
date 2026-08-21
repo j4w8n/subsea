@@ -80,6 +80,7 @@ pub struct StackLayout {
 #[derive(Debug, PartialEq, Clone)]
 pub enum StackSlot {
     Scalar { name: String, width: MemoryWidth },
+    Buffer { name: String, count: usize },
     String { name: String },
 }
 
@@ -130,6 +131,10 @@ pub enum Instruction {
         name: String,
         width: MemoryWidth,
         value: Operand,
+    },
+    StackBuffer {
+        name: String,
+        count: usize,
     },
     StackString {
         name: String,

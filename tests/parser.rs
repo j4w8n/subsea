@@ -465,6 +465,49 @@ fn parses_stack_declaration() {
 }
 
 #[test]
+fn parses_stack_byte_buffer_declaration() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        tid("buffer"),
+        Token::Colon,
+        tid("u8"),
+        Token::LParen,
+        tnum("16"),
+        Token::RParen,
+    ]);
+
+    let program = parse(finish_label(tokens)).unwrap();
+
+    assert_eq!(
+        program.labels[0].instructions,
+        vec![Instruction::StackBuffer {
+            name: s("buffer"),
+            count: 16,
+        }]
+    );
+}
+
+#[test]
+fn rejects_non_byte_stack_buffer() {
+    let mut tokens = empty_main_prefix();
+    tokens.extend([
+        Token::Stack,
+        tid("buffer"),
+        Token::Colon,
+        tid("u16"),
+        Token::LParen,
+        tnum("16"),
+        Token::RParen,
+    ]);
+
+    assert_eq!(
+        parse(finish_label(tokens)).unwrap_err(),
+        "Stack buffer declarations require u8 element width"
+    );
+}
+
+#[test]
 fn parses_stack_string_literal() {
     let mut tokens = empty_main_prefix();
     tokens.extend([

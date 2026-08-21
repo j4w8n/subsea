@@ -328,6 +328,10 @@ pub(crate) enum StackSlot {
         offset: usize,
         width: MemoryWidth,
     },
+    Buffer {
+        offset: usize,
+        count: usize,
+    },
     String {
         ptr_offset: usize,
         len_offset: usize,
@@ -349,7 +353,7 @@ impl StackSlot {
     pub(crate) fn scalar(self) -> Option<(usize, MemoryWidth)> {
         match self {
             StackSlot::Scalar { offset, width } => Some((offset, width)),
-            StackSlot::String { .. } => None,
+            StackSlot::Buffer { .. } | StackSlot::String { .. } => None,
         }
     }
 
@@ -359,7 +363,7 @@ impl StackSlot {
                 ptr_offset,
                 len_offset,
             } => Some((ptr_offset, len_offset)),
-            StackSlot::Scalar { .. } => None,
+            StackSlot::Scalar { .. } | StackSlot::Buffer { .. } => None,
         }
     }
 }
@@ -370,6 +374,13 @@ pub(crate) fn stack_scalar_slot(stack: &StackFrame, name: &str) -> Option<(usize
 
 pub(crate) fn stack_string_slot(stack: &StackFrame, name: &str) -> Option<(usize, usize)> {
     stack.slots.get(name).and_then(|slot| slot.string())
+}
+
+pub(crate) fn stack_buffer_slot(stack: &StackFrame, name: &str) -> Option<(usize, usize)> {
+    stack.slots.get(name).and_then(|slot| match slot {
+        StackSlot::Buffer { offset, count } => Some((*offset, *count)),
+        StackSlot::Scalar { .. } | StackSlot::String { .. } => None,
+    })
 }
 
 pub(crate) fn build_stack_frame_from_layout(
@@ -387,6 +398,15 @@ pub(crate) fn build_stack_frame_from_layout(
                 StackSlot::Scalar {
                     offset,
                     width: *width,
+                },
+            );
+        } else if let crate::ir::StackSlot::Buffer { name, count } = slot {
+            offset += *count;
+            slots.insert(
+                name.clone(),
+                StackSlot::Buffer {
+                    offset,
+                    count: *count,
                 },
             );
         } else if let crate::ir::StackSlot::String { name } = slot {
