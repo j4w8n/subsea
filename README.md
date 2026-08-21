@@ -923,7 +923,7 @@ xmm0 = eax::f32
 xmm1 = rax::f64
 ```
 
-Use `::i8`, `::i16`, `::i32`, `::i64`, or the corresponding unsigned widths to cast typed floating-point memory operands into integer registers. Float-to-int casts use x86 truncating conversion semantics:
+Use `::i8`, `::i16`, `::i32`, `::i64`, or the corresponding unsigned widths to cast floating-point operands into integer registers. Float-to-int casts truncate toward zero. Register sources must carry an explicit floating-point width (`s`/`d` on AArch64); XMM sources default to `f64` on x86-64.
 
 ```ss
 mem ratio:f64 = 1.5
@@ -931,7 +931,16 @@ rax = [ratio]::i64
 ecx = [ratio]::i32
 ```
 
-Casting directly from an XMM register to an integer register is not supported yet because XMM registers do not carry an `f32` or `f64` source width in the syntax.
+Direct floating-register-to-integer casts are supported on both backends:
+
+```ss
+rax = xmm0::i64       // x86-64, defaults to f64
+x0 = s0::i32          // AArch64, f32 source
+```
+
+Runtime float-to-integer casts truncate toward zero when the value is within
+the destination range. NaN, negative unsigned values, and out-of-range values
+error.
 
 Floating-point literals and const operands lower to compiler-emitted readonly storage because x86-64 scalar floating-point instructions do not encode decimal float immediates directly. Plain `+`, `-`, and `*` can be used for floating-point arithmetic when an operand supplies an unambiguous `f32` or `f64` width. Use width-prefixed operators when both operands are ambiguous, such as XMM register-to-register or XMM register-to-float-literal arithmetic:
 
