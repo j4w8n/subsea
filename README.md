@@ -448,6 +448,31 @@ Helping!
 Done
 ```
 
+### Function Contracts
+
+Functions may optionally document their physical register interface. This does not introduce argument-passing or call syntax: `call` still transfers control to the named function, and the registers remain visible at the call site.
+
+```ss
+add: (rdi:u64, rsi:u64) -> rax:u64 [rcx, r8] {
+  rax = rdi + rsi
+  ret
+}
+```
+
+The parenthesized registers are inputs, the arrow registers are outputs, and
+the optional bracketed registers are clobbers. Multiple outputs use a tuple:
+
+```ss
+divide: (rax:u64, rdi:u64) -> (rax:u64, rdx:u64) [rcx] {
+  rax = rax
+  rdx = rdx
+  ret
+}
+```
+
+Contracts are checked conservatively. A contracted function cannot contain opaque calls, inline assembly, syscalls, or runtime helpers, and source-visible registers must be declared by the contract. Uncontracted functions remain valid and retain the normal Subsea behavior.
+
+
 Functions use a mixed caller/callee preservation convention.
 - A callee may freely modify caller-preserved registers `rax`, `rcx`, `rdx`, `rdi`, `rsi`, and `r8`-`r11` without restoring their values before returning. So, callers must save those registers themselves if they need their values after `call`.
 - Registers `rbx`, `rbp`, and `r12`-`r15` are callee-preserved, so a callee that changes them must restore their original values before returning. 
@@ -625,6 +650,15 @@ An indirect `jmp` transfers control to an unknown destination, so the manual pus
 
 Top-level `mem` declarations allocate static writable memory for the lifetime of the program, similar to Assembly `.data` or `.bss` storage, not heap allocation. Bracketed memory operands load from or store through memory, while `&` computes an address without reading memory.
 
+Use `align` to control the starting address independently of the element width:
+
+```ss
+mem packet_buffer:u8(2048) align 64
+mem page:u8(4096) align 4096
+```
+
+Alignment must be a non-zero power of two and may use a compile-time layout constant. It changes the declaration's starting address, not the number of bytes or the spacing between array elements.
+
 Memory operands rooted at declared `mem` storage infer the declaration width:
 
 ```ss
@@ -799,6 +833,27 @@ Nested dereferences and address-of inside memory operands are not supported:
 rbx = [[rax]]
 rbx = [&buf]
 ```
+
+## Compile-Time Layouts
+
+`layout` defines named byte offsets, sizes, and alignments. It does not create a runtime aggregate value and does not add implicit `point.x` memory access.
+
+```ss
+layout Point align 8 {
+  x:i64
+  y:i64
+}
+
+mem point:u8(Point.size) align Point.align
+
+[point + Point.x]:i64 = 10
+[point + Point.y]:i64 = 20
+```
+
+For a byte buffer whose size and alignment are entirely supplied by a layout, the shorthand `mem point:u8(Point)` is equivalent to the declaration above. An explicit larger alignment may still be supplied; a smaller one is rejected.
+
+Fields use natural alignment and padding. The synthesized constants
+`Point.x`, `Point.y`, `Point.size`, and `Point.align` are folded into ordinary integer offsets during parsing. Layout declarations currently use scalar widths, are module-local, and must appear before use. `layout` alignment may increase natural alignment but cannot reduce a field's required alignment.
 
 ## Stack Variables
 
@@ -1354,7 +1409,10 @@ rax = 2147483648
 subsea run main.ss        // Build and execute the program
 subsea build main.ss      // Compile, assemble, and link an executable
 subsea emit-asm main.ss   // Compile to target assembly and print it
+subsea emit-asm --annotate main.ss // Include source locations and statements
 ```
+
+`--annotate` adds source comments to emitted assembly. Imported instructions retain their source file locations, making the output useful when learning or auditing the generated machine code.
 
 > `run` exits with the compiled program's exit code.
 
