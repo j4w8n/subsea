@@ -24,7 +24,7 @@ Their implementations remain architecture-specific.
 `mod.rs` is the architecture module boundary. It should:
 
 - Declare `codegen`, `asm`, and `registers`.
-- Re-export the backend's public entry points.
+- Re-export crate-visible entry points needed by shared dispatch when useful.
 - Re-export register predicates needed by shared target validation.
 - Contain only small architecture-wide helpers that are shared by `codegen`
   and `asm`.
@@ -43,9 +43,9 @@ It should not contain the main semantic-IR-to-assembly lowering loop.
 - Convert backend failures into `BackendError` values with source context when
   available.
 
-The x86-64 backend also retains AST-based public wrapper functions for
-compatibility. Those wrappers lower the AST first and then call the same IR
-entry point; the backend's primary implementation must remain the IR path.
+The shared `src/codegen.rs` module owns public AST and IR dispatch. The
+architecture modules expose only crate-visible entry points; their primary
+implementation path consumes semantic IR.
 
 This is the policy and lowering layer. It decides *what* needs to be emitted,
 not the spelling of every assembly instruction.
@@ -95,12 +95,24 @@ source AST
 ```
 
 `src/codegen.rs` dispatches between architectures and owns shared diagnostics.
+Its public target-independent entry points accept source AST programs. It also
+owns the private semantic-IR dispatch used after lowering and by backend-focused
+unit tests.
 `src/backend/mod.rs` owns target descriptions and backend-wide contracts.
 `src/platform/` owns platform metadata such as syscall numbers; it should not
 own architecture-specific register setup or trap instructions.
 
-## Compatibility
+## Tests
 
-The x86-64 backend historically exposed a `backend::x86_64_machine` module.
-When replacing or relocating its formatter, preserve that path as a
-compatibility re-export until intentionally making a public API change.
+Public AST-level code-generation tests belong in `tests/codegen.rs`. Tests for
+private semantic IR, backend dispatch, lowering, or syntax helpers belong as
+unit tests beside the implementation they exercise. Keep CLI, assembler,
+linker, and runtime tests in `tests/integration.rs`.
+
+## Visibility
+
+Architecture modules, codegen modules, assembly helpers, register vocabularies,
+lowering, and semantic IR are crate-private implementation details. Public
+entry points should live in `src/codegen.rs` and expose target-independent
+operations rather than an architecture formatter, machine representation, or
+internal IR.
