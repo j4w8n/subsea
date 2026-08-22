@@ -32,7 +32,10 @@ jobs:
           set -euxo pipefail
           version="$(cargo +1.85.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "subsea") | .version')"
           test "$GITHUB_REF_NAME" = "v$version"
-          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$GITHUB_REF_NAME^{}" >/dev/null; then
+            echo "::error::Release tag $GITHUB_REF_NAME must be an annotated tag"
+            exit 1
+          fi
           git fetch origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           test -f "docs/releases/$version.md"
