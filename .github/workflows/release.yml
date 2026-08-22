@@ -61,11 +61,15 @@ jobs:
         run: |
           set -euxo pipefail
           binary=target/x86_64-unknown-linux-musl/release/subsea
-          file "$binary" | grep -Eq 'ELF 64-bit LSB.*x86-64.*(statically linked|static-pie linked)'
-          ! readelf -l "$binary" | grep -q INTERP
-          ! readelf -d "$binary" | grep -q NEEDED
+          file "$binary" > "$RUNNER_TEMP/subsea-file-type"
+          grep -Eq 'ELF 64-bit LSB.*x86-64.*(statically linked|static-pie linked)' "$RUNNER_TEMP/subsea-file-type"
+          readelf -l "$binary" > "$RUNNER_TEMP/subsea-program-headers"
+          ! grep -q INTERP "$RUNNER_TEMP/subsea-program-headers"
+          readelf -d "$binary" > "$RUNNER_TEMP/subsea-dynamic-section"
+          ! grep -q NEEDED "$RUNNER_TEMP/subsea-dynamic-section"
           test "$("$binary" --version)" = "subsea $VERSION"
-          "$binary" --help | grep -q 'compile and run Subsea programs'
+          "$binary" --help > "$RUNNER_TEMP/subsea-help"
+          grep -q 'compile and run Subsea programs' "$RUNNER_TEMP/subsea-help"
           test "$("$binary" run examples/subsea-vs-x86/01_hello.ss)" = 'Hello from Subsea!'
       - name: Package release assets
         id: assets
@@ -80,10 +84,12 @@ jobs:
           install -m 0755 target/x86_64-unknown-linux-musl/release/subsea "$stage/subsea"
           install -m 0644 README.md LICENSE "$stage/"
           tar -C "$stage" -czf "$archive" subsea README.md LICENSE
-          test "$(tar -tzf "$archive" | wc -l)" -eq 3
-          tar -tzf "$archive" | grep -Fxq subsea
-          tar -tzf "$archive" | grep -Fxq README.md
-          tar -tzf "$archive" | grep -Fxq LICENSE
+          contents="$RUNNER_TEMP/subsea-archive-contents"
+          tar -tzf "$archive" > "$contents"
+          test "$(wc -l < "$contents")" -eq 3
+          grep -Fxq subsea "$contents"
+          grep -Fxq README.md "$contents"
+          grep -Fxq LICENSE "$contents"
           sha256sum "$archive" > "$archive.sha256"
           sha256sum --check "$archive.sha256"
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
