@@ -1,4 +1,4 @@
-# Backend Feature Matrix
+# Backend Implementation Feature Matrix
  
 Status meanings:
 
@@ -8,11 +8,25 @@ Status meanings:
 - **Partial**: one or more valid source/IR forms are still unsupported or have
   different semantics.
 
-This matrix tracks semantic feature parity between the x86-64 and AArch64
-backends. Target-specific register names, instruction spelling, ABI details,
-and syscall conventions are expected differences. A feature is complete only
-when both backends accept the same valid source/IR forms, reject invalid forms
+This matrix tracks implementation completion and semantic feature parity between
+the x86-64 and AArch64 backends. It does not assign public release stability.
+Target-specific register names, instruction spelling, ABI details, and syscall
+conventions are expected differences. A feature is complete only when both
+backends accept the same valid source/IR forms, reject invalid forms
 consistently, and have regression coverage.
+
+## Release Stability
+
+| Target | v0.1.0 release status |
+| --- | --- |
+| `x86` | Stable |
+| `x86-free` | Experimental |
+| `aarch` | Experimental |
+| `aarch-free` | Experimental |
+
+An experimental target can have a **Complete** implementation row below. That
+means the tested feature meets backend parity criteria, not that the target's
+toolchain, runtime behavior, interface, or support commitment is stable.
 
 | Area | x86-64 | AArch64 | Current Status |
 | --- | --- | --- | --- |
@@ -46,4 +60,5 @@ consistently, and have regression coverage.
 - Generated assembly is assembled by the target assembler where available.
 - Runtime behavior is covered for Linux targets and QEMU-backed AArch64 tests
   where the toolchain is available.
-- README claims describe partial support accurately until a row is complete.
+- Public documentation describes implementation gaps accurately and states
+  release stability independently of this matrix.
