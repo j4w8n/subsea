@@ -41,7 +41,8 @@ jobs:
           test -f "docs/releases/$version.md"
           grep -Fxq "# Subsea $version" "docs/releases/$version.md"
           grep -Eq "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md
-          grep -Fq "subsea-${version}-x86_64-linux.tar.gz" README.md
+          grep -Fxq "version=$version" README.md
+          grep -Fxq 'asset="subsea-${version}-x86_64-linux.tar.gz"' README.md
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Run release gates
         env:
