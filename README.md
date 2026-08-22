@@ -1412,7 +1412,7 @@ subsea emit-asm main.ss   // Compile to target assembly and print it
 subsea emit-asm --annotate main.ss // Include source locations and statements
 ```
 
-`--annotate` adds source comments to emitted assembly. Imported instructions retain their source file locations, making the output useful when learning or auditing the generated machine code.
+`--annotate` adds source comments to emitted assembly. Comments appear before the assembly they describe, imported instructions retain their source file locations, and compiler-generated regions are marked explicitly. This makes the output useful when learning or auditing the generated machine code.
 
 > `run` exits with the compiled program's exit code.
 

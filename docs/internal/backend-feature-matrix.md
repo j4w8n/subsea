@@ -29,7 +29,7 @@ consistently, and have regression coverage.
 | Memory moves and operand legality | Complete | Complete | Register classes, widths, and memory moves are covered |
 | Push/pop | Complete | Complete | 64-bit register/memory legality and assembler coverage are tested |
 | Static data sections and retention | Complete | Complete | Data sections, retention, and assembler coverage are tested |
-| Source annotations | Implemented | Implemented | Optional source comments are emitted after source instructions |
+| Source annotations | Complete | Complete | Source, declaration, imported-source, and generated-region comments are emitted before assembly |
 | Stack strings and string properties | Complete | Complete | Forward constants, properties, and empty-string edges are covered |
 | Runtime print formatting | Complete | Complete | Width normalization, inference, and runtime coverage are tested |
 | Linux read/reserve/release | Complete | Complete | Pointer, length, destination, and runtime coverage are tested |
