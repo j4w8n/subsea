@@ -14,7 +14,8 @@ use crate::ast::{
     Program,
 };
 use crate::backend::{
-    Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target, TargetSpec,
+    AnnotationCollector, Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target,
+    TargetSpec,
 };
 use crate::diagnostic::ProgramOrigins;
 use crate::ir;
@@ -303,15 +304,23 @@ fn emit_ir_x86_64_asm_impl(
     let strings = collect_ir_string_bindings(program)?;
     let mut literal_indexes = HashMap::new();
     let mut asm = String::new();
+    let mut annotations = AnnotationCollector::new(annotate);
     let labels = LabelSymbols {
         source_entry: &program.entry,
         entry_symbol,
     };
 
     asm::intel_syntax(&mut asm);
-    emit_static_data(&mut asm, &program.data, &labels);
-    emit_data(&mut asm, &program.memory, &labels);
-    emit_bss(&mut asm, &program.memory);
+    annotations.generated(&asm, "# compiler-generated: static data and text setup");
+    emit_static_data(&mut asm, &program.data, &labels, &mut annotations, origins);
+    emit_data(
+        &mut asm,
+        &program.memory,
+        &labels,
+        &mut annotations,
+        origins,
+    );
+    emit_bss(&mut asm, &program.memory, &mut annotations, origins);
     emit_rodata(&mut asm, &strings.all, &strings.floats);
     asm::text(&mut asm);
     asm::global(&mut asm, entry_symbol);
@@ -320,17 +329,30 @@ fn emit_ir_x86_64_asm_impl(
     for label in &program.labels {
         let stack = build_stack_frame_from_layout(&label.stack, target.spec().stack_alignment);
 
+        if let Some(origins) = origins {
+            annotations.source_label(&asm, "#", origins, &label.name);
+        }
         asm::label(&mut asm, labels.emit_label(&label.name));
 
         if stack.has_slots() {
+            annotations.generated(&asm, "# compiler-generated: function prologue");
             emit_frame_prologue(&mut asm, &stack, target.spec());
-            emit_ir_stack_buffer_initializers(&mut asm, &stack);
+            emit_ir_stack_buffer_initializers(
+                &mut asm,
+                &stack,
+                &label.instructions,
+                &label.name,
+                &mut annotations,
+                origins,
+            );
             emit_ir_stack_initializers(
                 &mut asm,
                 &label.instructions,
                 &strings,
                 &label.name,
                 &stack,
+                &mut annotations,
+                origins,
             )?;
         }
 
@@ -338,7 +360,20 @@ fn emit_ir_x86_64_asm_impl(
         let mut conditional_jump_index = 0;
 
         for (instruction_index, instruction) in label.instructions.iter().enumerate() {
-            let assembly_start = asm.len();
+            if !matches!(
+                instruction,
+                ir::Instruction::Stack { .. } | ir::Instruction::StackBuffer { .. }
+            ) {
+                if let Some(origins) = origins {
+                    annotations.source_instruction(
+                        &asm,
+                        "#",
+                        origins,
+                        &label.name,
+                        instruction_index,
+                    );
+                }
+            }
             let result: Result<(), BackendError> = (|| {
                 match instruction {
                     ir::Instruction::Assign { value, .. } => {
@@ -517,28 +552,33 @@ fn emit_ir_x86_64_asm_impl(
                     error
                 });
             }
-            if annotate && asm.len() > assembly_start {
-                if let Some(origins) = origins {
-                    crate::backend::append_source_annotation(
-                        &mut asm,
-                        "#",
-                        origins,
-                        &label.name,
-                        instruction_index,
-                    );
-                }
-            }
         }
 
         asm.push('\n');
     }
 
+    annotations.apply(&mut asm);
     Ok(asm)
 }
 
-fn emit_ir_stack_buffer_initializers(asm: &mut String, stack: &StackFrame) {
-    for slot in stack.slots.values() {
+fn emit_ir_stack_buffer_initializers(
+    asm: &mut String,
+    stack: &StackFrame,
+    instructions: &[ir::Instruction],
+    label_name: &str,
+    annotations: &mut AnnotationCollector,
+    origins: Option<&ProgramOrigins>,
+) {
+    for (name, slot) in &stack.slots {
         if let StackSlot::Buffer { offset, count } = slot {
+            if let Some(index) = instructions.iter().position(|instruction| {
+                matches!(instruction, ir::Instruction::StackBuffer { name: instruction_name, .. } if instruction_name == name)
+            }) {
+                if let Some(origins) = origins {
+                    annotations.source_instruction(asm, "#", origins, label_name, index);
+                }
+            }
+            annotations.generated(asm, "# compiler-generated: stack buffer initialization");
             asm::push(asm, asm::Operand::Register(String::from("rdi")));
             asm::push(asm, asm::Operand::Register(String::from("rcx")));
             asm::instruction(asm, "xor eax, eax");
@@ -565,9 +605,14 @@ fn emit_ir_stack_initializers(
     strings: &StringTable,
     label_name: &str,
     stack: &StackFrame,
+    annotations: &mut AnnotationCollector,
+    origins: Option<&ProgramOrigins>,
 ) -> Result<(), String> {
-    for instruction in instructions {
+    for (index, instruction) in instructions.iter().enumerate() {
         if let ir::Instruction::Stack { name, width, value } = instruction {
+            if let Some(origins) = origins {
+                annotations.source_instruction(asm, "#", origins, label_name, index);
+            }
             if width.is_float() {
                 emit_ir_stack_float_initializer(
                     asm, name, *width, value, strings, label_name, stack,
@@ -1427,7 +1472,13 @@ fn is_shift_math_op(op: MathOp) -> bool {
     )
 }
 
-fn emit_data(asm: &mut String, memory: &[ir::MemoryDeclaration], labels: &LabelSymbols) {
+fn emit_data(
+    asm: &mut String,
+    memory: &[ir::MemoryDeclaration],
+    labels: &LabelSymbols,
+    annotations: &mut AnnotationCollector,
+    origins: Option<&ProgramOrigins>,
+) {
     if memory.iter().all(|declaration| {
         matches!(
             unwrap_aligned(declaration),
@@ -1440,12 +1491,21 @@ fn emit_data(asm: &mut String, memory: &[ir::MemoryDeclaration], labels: &LabelS
     asm::section(asm, "data");
 
     for declaration in memory {
+        if let Some(origins) = origins {
+            annotations.source_declaration(asm, "#", origins, memory_name(declaration));
+        }
         if let ir::MemoryDeclaration::Aligned { align, .. } = declaration {
             asm::top_level_directive(asm, format_args!(".balign {align}"));
         }
         match declaration {
             ir::MemoryDeclaration::Aligned { declaration, .. } => match declaration.as_ref() {
-                inner => emit_data(asm, std::slice::from_ref(inner), labels),
+                inner => emit_data(
+                    asm,
+                    std::slice::from_ref(inner),
+                    labels,
+                    annotations,
+                    origins,
+                ),
             },
             ir::MemoryDeclaration::Scalar { name, width, value } => {
                 asm::label(asm, name);
@@ -1508,8 +1568,17 @@ fn emit_memory_value(
     }
 }
 
-fn emit_static_data(asm: &mut String, data: &[ir::DataDeclaration], labels: &LabelSymbols) {
+fn emit_static_data(
+    asm: &mut String,
+    data: &[ir::DataDeclaration],
+    labels: &LabelSymbols,
+    annotations: &mut AnnotationCollector,
+    origins: Option<&ProgramOrigins>,
+) {
     for declaration in data {
+        if let Some(origins) = origins {
+            annotations.source_declaration(asm, "#", origins, &declaration.name);
+        }
         let flags = if declaration.keep { "aR" } else { "a" };
         asm::top_level_directive(
             asm,
@@ -1555,7 +1624,12 @@ fn format_data_scalar(width: MemoryWidth, value: i128) -> String {
     }
 }
 
-fn emit_bss(asm: &mut String, memory: &[ir::MemoryDeclaration]) {
+fn emit_bss(
+    asm: &mut String,
+    memory: &[ir::MemoryDeclaration],
+    annotations: &mut AnnotationCollector,
+    origins: Option<&ProgramOrigins>,
+) {
     if !memory.iter().any(|declaration| {
         matches!(
             unwrap_aligned(declaration),
@@ -1568,6 +1642,9 @@ fn emit_bss(asm: &mut String, memory: &[ir::MemoryDeclaration]) {
     asm::section(asm, "bss");
 
     for declaration in memory {
+        if let Some(origins) = origins {
+            annotations.source_declaration(asm, "#", origins, memory_name(declaration));
+        }
         let (align, declaration) = match declaration {
             ir::MemoryDeclaration::Aligned { declaration, align } => {
                 (Some(*align), declaration.as_ref())
@@ -1590,6 +1667,17 @@ fn unwrap_aligned(declaration: &ir::MemoryDeclaration) -> &ir::MemoryDeclaration
     match declaration {
         ir::MemoryDeclaration::Aligned { declaration, .. } => unwrap_aligned(declaration),
         other => other,
+    }
+}
+
+fn memory_name(declaration: &ir::MemoryDeclaration) -> &str {
+    match unwrap_aligned(declaration) {
+        ir::MemoryDeclaration::Scalar { name, .. }
+        | ir::MemoryDeclaration::FloatScalar { name, .. }
+        | ir::MemoryDeclaration::Buffer { name, .. }
+        | ir::MemoryDeclaration::Array { name, .. }
+        | ir::MemoryDeclaration::Repeat { name, .. } => name,
+        ir::MemoryDeclaration::Aligned { .. } => unreachable!(),
     }
 }
 

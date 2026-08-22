@@ -1,47 +1,113 @@
 pub(crate) mod aarch64;
 pub(crate) mod x86_64;
 
-use crate::diagnostic::ProgramOrigins;
+use crate::diagnostic::{ProgramOrigins, Span};
 
-pub(crate) fn append_source_annotation(
-    asm: &mut String,
-    comment: &str,
-    origins: &ProgramOrigins,
-    label: &str,
-    index: usize,
-) {
-    let Some(span) = origins.instruction_span(label, index) else {
-        return;
-    };
-    let Some(file) = origins.sources().get(span.source) else {
-        return;
-    };
-    let start = span.start.min(file.text.len());
-    let end = span.end.min(file.text.len()).max(start);
-    let mut start = start;
-    while start > 0 && !file.text.is_char_boundary(start) {
-        start -= 1;
+pub(crate) struct AnnotationCollector {
+    enabled: bool,
+    events: Vec<(usize, usize, String)>,
+}
+
+impl AnnotationCollector {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            events: Vec::new(),
+        }
     }
-    let mut end = end;
-    while end > start && !file.text.is_char_boundary(end) {
-        end -= 1;
+
+    pub(crate) fn source_instruction(
+        &mut self,
+        asm: &String,
+        comment: &str,
+        origins: &ProgramOrigins,
+        label: &str,
+        index: usize,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(span) = origins.instruction_span(label, index) else {
+            return;
+        };
+        self.source_span(asm, comment, origins, span);
     }
-    let line = file.text[..start]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1;
-    asm.push_str(comment);
-    asm.push(' ');
-    asm.push_str(&file.name);
-    asm.push(':');
-    asm.push_str(&line.to_string());
-    asm.push('\n');
-    for source_line in file.text[start..end].lines() {
-        asm.push_str(comment);
-        asm.push(' ');
-        asm.push_str(source_line.trim());
-        asm.push('\n');
+
+    pub(crate) fn source_declaration(
+        &mut self,
+        asm: &String,
+        comment: &str,
+        origins: &ProgramOrigins,
+        name: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(span) = origins.declaration_span(name) else {
+            return;
+        };
+        self.source_span(asm, comment, origins, span);
+    }
+
+    pub(crate) fn source_label(
+        &mut self,
+        asm: &String,
+        comment: &str,
+        origins: &ProgramOrigins,
+        label: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let Some(span) = origins.label_span(label) else {
+            return;
+        };
+        self.source_span(asm, comment, origins, span);
+    }
+
+    pub(crate) fn generated(&mut self, asm: &String, comment: &str) {
+        if self.enabled {
+            self.events
+                .push((asm.len(), self.events.len(), format!("{comment}\n")));
+        }
+    }
+
+    pub(crate) fn apply(mut self, asm: &mut String) {
+        if !self.enabled {
+            return;
+        }
+        self.events
+            .sort_by_key(|(offset, order, _)| (*offset, *order));
+        for (offset, _, text) in self.events.into_iter().rev() {
+            asm.insert_str(offset, &text);
+        }
+    }
+
+    fn source_span(&mut self, asm: &String, comment: &str, origins: &ProgramOrigins, span: Span) {
+        let Some(file) = origins.sources().get(span.source) else {
+            return;
+        };
+        let mut start = span.start.min(file.text.len());
+        let mut end = span.end.min(file.text.len()).max(start);
+        while start > 0 && !file.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end > start && !file.text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let line = file.text[..start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
+        let mut text = format!("{comment} {}:{}\n", file.name, line);
+        for source_line in file.text[start..end].lines() {
+            text.push_str(comment);
+            text.push(' ');
+            text.push_str(source_line.trim());
+            text.push('\n');
+        }
+        self.events.push((asm.len(), self.events.len(), text));
     }
 }
 

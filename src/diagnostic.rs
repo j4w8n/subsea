@@ -15,6 +15,8 @@ pub struct Span {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramOrigins {
     instruction_spans: HashMap<String, Vec<Span>>,
+    declaration_spans: HashMap<String, Span>,
+    label_spans: HashMap<String, Span>,
     sources: SourceMap,
 }
 
@@ -42,6 +44,14 @@ impl ProgramOrigins {
             .copied()
     }
 
+    pub fn declaration_span(&self, name: &str) -> Option<Span> {
+        self.declaration_spans.get(name).copied()
+    }
+
+    pub fn label_span(&self, label: &str) -> Option<Span> {
+        self.label_spans.get(label).copied()
+    }
+
     pub(crate) fn merge_label_origins(
         &mut self,
         other: &ProgramOrigins,
@@ -56,6 +66,28 @@ impl ProgramOrigins {
                 .collect();
             self.instruction_spans.insert(merged_label.clone(), spans);
         }
+        for (name, span) in &other.declaration_spans {
+            let merged_name = label_map.get(name).unwrap_or(name);
+            self.declaration_spans.insert(
+                merged_name.clone(),
+                Span::new(source_ids[&span.source], span.start, span.end),
+            );
+        }
+        for (label, span) in &other.label_spans {
+            let merged_label = label_map.get(label).unwrap_or(label);
+            self.label_spans.insert(
+                merged_label.clone(),
+                Span::new(source_ids[&span.source], span.start, span.end),
+            );
+        }
+    }
+
+    pub(crate) fn record_declaration(&mut self, name: &str, span: Span) {
+        self.declaration_spans.insert(name.to_owned(), span);
+    }
+
+    pub(crate) fn record_label(&mut self, label: &str, span: Span) {
+        self.label_spans.insert(label.to_owned(), span);
     }
 }
 

@@ -95,12 +95,17 @@ impl Parser {
         let mut labels = Vec::new();
 
         while !self.is_at_end() {
+            let declaration_start = self.position;
             if matches!(self.peek(), Some(Token::Import)) {
                 imports.push(self.parse_import_declaration()?);
             } else if matches!(self.peek(), Some(Token::Data)) {
-                data.push(self.parse_data_declaration()?);
+                let declaration = self.parse_data_declaration()?;
+                self.record_named_span(&declaration.name, declaration_start);
+                data.push(declaration);
             } else if matches!(self.peek(), Some(Token::Mem)) {
-                memory.push(self.parse_memory_declaration()?);
+                let declaration = self.parse_memory_declaration()?;
+                self.record_named_span(memory_declaration_name(&declaration), declaration_start);
+                memory.push(declaration);
             } else if matches!(self.peek(), Some(Token::Layout)) {
                 self.parse_layout_declaration()?;
             } else if matches!(self.peek(), Some(Token::Export)) {
@@ -357,6 +362,7 @@ impl Parser {
     }
 
     fn parse_top_level_label(&mut self) -> Result<Label, String> {
+        let name_position = self.position;
         let name = match self.advance() {
             Some(Token::Ident(name)) => name,
             Some(Token::LocalIdent(name)) => {
@@ -371,6 +377,7 @@ impl Parser {
         self.expect(Token::Colon, "Expected ':' after label name")?;
 
         let contract = self.parse_optional_function_contract()?;
+        self.record_label_span(&name, name_position);
 
         if !matches!(self.peek(), Some(Token::LBrace)) {
             return Ok(Label {
@@ -403,6 +410,7 @@ impl Parser {
     fn parse_exported_top_level_label(&mut self) -> Result<Label, String> {
         self.expect(Token::Export, "Expected export")?;
 
+        let name_position = self.position;
         let name = match self.advance() {
             Some(Token::Ident(name)) => name,
             Some(Token::LocalIdent(name)) => {
@@ -420,6 +428,7 @@ impl Parser {
 
         self.expect(Token::Colon, "Expected ':' after exported function name")?;
         let contract = self.parse_optional_function_contract()?;
+        self.record_label_span(&name, name_position);
         if !matches!(self.peek(), Some(Token::LBrace)) {
             return Err(format!("Exported function {name:?} must have a block"));
         }
@@ -563,6 +572,36 @@ impl Parser {
             .min(spans.len().saturating_sub(1));
         self.origins
             .record_instruction(label, Span::new(first.source, first.start, spans[end].end));
+    }
+
+    fn record_named_span(&mut self, name: &str, start: usize) {
+        let Some(spans) = &self.spans else {
+            return;
+        };
+        let Some(first) = spans.get(start) else {
+            return;
+        };
+        let end = self
+            .position
+            .saturating_sub(1)
+            .min(spans.len().saturating_sub(1));
+        self.origins
+            .record_declaration(name, Span::new(first.source, first.start, spans[end].end));
+    }
+
+    fn record_label_span(&mut self, name: &str, start: usize) {
+        let Some(spans) = &self.spans else {
+            return;
+        };
+        let Some(first) = spans.get(start) else {
+            return;
+        };
+        let end = self
+            .position
+            .saturating_sub(1)
+            .min(spans.len().saturating_sub(1));
+        self.origins
+            .record_label(name, Span::new(first.source, first.start, spans[end].end));
     }
 
     fn parse_memory_declaration(&mut self) -> Result<MemoryDeclaration, String> {

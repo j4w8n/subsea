@@ -9,18 +9,133 @@ static CLI_LOCK: Mutex<()> = Mutex::new(());
 fn emit_asm_annotation_includes_source_statement() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "--annotate", "tests/fixtures/indexed_memory.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    let assembly = String::from_utf8_lossy(&output.stdout);
+    assert!(assembly.contains("/tests/fixtures/indexed_memory.ss:5"));
+    assert!(assembly.contains("# values[0] = 10"));
+    assert!(
+        assembly.find("# values[0] = 10").unwrap()
+            < assembly.find("mov qword ptr [values + 0], 10").unwrap()
+    );
+}
+
+#[test]
+fn annotated_assembly_marks_declarations_and_generated_regions() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "--annotate", "tests/fixtures/indexed_memory.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    let assembly = String::from_utf8_lossy(&output.stdout);
+    assert!(assembly.contains("# mem values:u64(3)"));
+    assert!(assembly.contains("# mem bytes:u8(8)"));
+    assert!(assembly.contains("# compiler-generated: static data and text setup"));
+    assert!(assembly.contains("# compiler-generated: function prologue"));
+
+    let stack_output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "--annotate", "tests/fixtures/stack_buffer.ss"])
+        .output()
+        .expect("failed to start subsea");
+    assert!(stack_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&stack_output.stdout)
+            .contains("# compiler-generated: stack buffer initialization")
+    );
+}
+
+#[test]
+fn annotated_aarch64_assembly_uses_aarch64_comments() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
         .args([
             "emit-asm",
+            "--target",
+            "aarch",
             "--annotate",
-            "examples/x86-vs-subsea/02_arithmetic.ss",
+            "tests/fixtures/aarch_core.ss",
         ])
         .output()
         .expect("failed to start subsea");
 
     assert!(output.status.success());
     let assembly = String::from_utf8_lossy(&output.stdout);
-    assert!(assembly.contains("/examples/x86-vs-subsea/02_arithmetic.ss:2"));
-    assert!(assembly.contains("# rax = 10"));
+    assert!(assembly.contains("// /"));
+    assert!(assembly.contains("// x0 = 2"));
+    assert!(assembly.contains("// compiler-generated: function prologue"));
+    assert!(!assembly.contains("# x0 = 2"));
+}
+
+#[test]
+fn annotated_imports_retain_imported_source_locations() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--annotate",
+            "tests/fixtures/imports/use_qemu_debug.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    let assembly = String::from_utf8_lossy(&output.stdout);
+    assert!(assembly.contains("use_qemu_debug.ss:3"));
+    assert!(assembly.contains("qemu_debug.ss:1"));
+    assert!(assembly.contains("qemu_debug.ss:16"));
+}
+
+#[test]
+fn annotated_multiline_source_preserves_all_source_lines() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "--annotate",
+            "tests/fixtures/annotated_multiline.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(output.status.success());
+    let assembly = String::from_utf8_lossy(&output.stdout);
+    assert!(assembly.contains("# rax = ("));
+    assert!(assembly.contains("# 1 + 2"));
+    assert!(assembly.contains("# )"));
+}
+
+#[test]
+fn annotated_x86_output_is_accepted_by_as() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "--annotate", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+    assert!(output.status.success());
+
+    let base = std::env::temp_dir().join(format!("subsea-annotated-{}", std::process::id()));
+    let source_path = base.with_extension("s");
+    let object_path = base.with_extension("o");
+    std::fs::write(&source_path, &output.stdout).expect("failed to write annotated assembly");
+    let assembled = Command::new("as")
+        .args(["--64"])
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&object_path)
+        .output()
+        .expect("failed to start assembler");
+    let _ = std::fs::remove_file(&source_path);
+    let _ = std::fs::remove_file(&object_path);
+    assert!(
+        assembled.status.success(),
+        "annotated assembly failed to assemble:\n{}",
+        String::from_utf8_lossy(&assembled.stderr)
+    );
 }
 
 #[test]

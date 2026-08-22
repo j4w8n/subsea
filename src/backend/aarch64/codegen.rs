@@ -1,5 +1,5 @@
 use crate::ast::{BitwiseUnaryOp, CompareOp, ExprOp, MathOp};
-use crate::backend::{BackendError, RuntimeEmitter};
+use crate::backend::{AnnotationCollector, BackendError, RuntimeEmitter};
 use crate::diagnostic::ProgramOrigins;
 use crate::ir;
 use std::collections::HashMap;
@@ -37,7 +37,9 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
 ) -> Result<String, BackendError> {
     const FRAME_PREFIX: usize = 48;
     let mut asm = String::new();
-    emit_data(&mut asm, program, entry_symbol)?;
+    let mut annotations = AnnotationCollector::new(annotate);
+    annotations.generated(&asm, "// compiler-generated: static data and text setup");
+    emit_data(&mut asm, program, entry_symbol, &mut annotations, origins)?;
     asm::text(&mut asm);
     asm::global(&mut asm, entry_symbol);
     asm.push('\n');
@@ -54,6 +56,7 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
+        annotations.source_label(&asm, "//", origins, &label.name);
         asm::label(
             &mut asm,
             if label.name == program.entry {
@@ -62,15 +65,26 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
                 &label.name
             },
         );
+        annotations.generated(&asm, "// compiler-generated: function prologue");
         asm::instruction(
             &mut asm,
             format_args!(
                 "sub sp, sp, #{frame_size}\n  stp x29, x30, [sp]\n  mov x29, sp\n  stp x19, x20, [sp, #16]\n  str x21, [sp, #32]"
             ),
         );
-        emit_stack_buffer_initializers(&mut asm, &label.stack, &slots);
+        emit_stack_buffer_initializers(
+            &mut asm,
+            &label.stack,
+            &slots,
+            &label.name,
+            &label.instructions,
+            &mut annotations,
+            origins,
+        );
         for (index, instruction) in label.instructions.iter().enumerate() {
-            let assembly_start = asm.len();
+            if !matches!(instruction, ir::Instruction::StackBuffer { .. }) {
+                annotations.source_instruction(&asm, "//", origins, &label.name, index);
+            }
             emit_instruction(
                 &mut asm,
                 instruction,
@@ -81,21 +95,13 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
                 target,
             )
             .map_err(|message| BackendError::new(message).at(&label.name, index))?;
-            if annotate && asm.len() > assembly_start {
-                crate::backend::append_source_annotation(
-                    &mut asm,
-                    "//",
-                    origins,
-                    &label.name,
-                    index,
-                );
-            }
         }
         if !label
             .instructions
             .iter()
             .any(|instruction| matches!(instruction, ir::Instruction::Ret))
         {
+            annotations.generated(&asm, "// compiler-generated: function epilogue");
             asm::instruction(
                 &mut asm,
                 &format!(
@@ -105,6 +111,7 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
         }
     }
 
+    annotations.apply(&mut asm);
     Ok(asm)
 }
 
@@ -112,12 +119,22 @@ fn emit_stack_buffer_initializers(
     asm: &mut String,
     layout: &ir::StackLayout,
     slots: &HashMap<String, usize>,
+    label_name: &str,
+    instructions: &[ir::Instruction],
+    annotations: &mut AnnotationCollector,
+    origins: &ProgramOrigins,
 ) {
     for slot in &layout.slots {
         let ir::StackSlot::Buffer { name, count } = slot else {
             continue;
         };
         let offset = slots[name];
+        if let Some(index) = instructions.iter().position(|instruction| {
+            matches!(instruction, ir::Instruction::StackBuffer { name: instruction_name, .. } if instruction_name == name)
+        }) {
+            annotations.source_instruction(asm, "//", origins, label_name, index);
+        }
+        annotations.generated(asm, "// compiler-generated: stack buffer initialization");
         let loop_label = format!(".L.__subsea.stack_buffer_zero_{}", asm.len());
         asm::mov(asm, "x16", format_args!("#{offset}"));
         asm::instruction(asm, "add x16, x29, x16");
@@ -129,9 +146,16 @@ fn emit_stack_buffer_initializers(
     }
 }
 
-fn emit_data(asm: &mut String, program: &ir::Program, entry_symbol: &str) -> Result<(), String> {
+fn emit_data(
+    asm: &mut String,
+    program: &ir::Program,
+    entry_symbol: &str,
+    annotations: &mut AnnotationCollector,
+    origins: &ProgramOrigins,
+) -> Result<(), String> {
     if !program.data.is_empty() {
         for declaration in &program.data {
+            annotations.source_declaration(asm, "//", origins, &declaration.name);
             if declaration.keep {
                 asm::top_level_directive(
                     asm,
@@ -166,6 +190,7 @@ fn emit_data(asm: &mut String, program: &ir::Program, entry_symbol: &str) -> Res
     }
 
     for memory in &program.memory {
+        annotations.source_declaration(asm, "//", origins, memory_name(memory));
         if let ir::MemoryDeclaration::Aligned { align, .. } = memory {
             asm::top_level_directive(asm, format_args!(".balign {align}"));
         }
@@ -173,7 +198,7 @@ fn emit_data(asm: &mut String, program: &ir::Program, entry_symbol: &str) -> Res
             ir::MemoryDeclaration::Aligned { declaration, .. } => {
                 let mut nested = program.clone();
                 nested.memory = vec![declaration.as_ref().clone()];
-                emit_data(asm, &nested, entry_symbol)?;
+                emit_data(asm, &nested, entry_symbol, annotations, origins)?;
             }
             ir::MemoryDeclaration::Buffer { name, width, count } => {
                 asm::section(asm, "bss");
@@ -235,6 +260,17 @@ fn emit_memory_value(
         ),
     }
     Ok(())
+}
+
+fn memory_name(declaration: &ir::MemoryDeclaration) -> &str {
+    match declaration {
+        ir::MemoryDeclaration::Aligned { declaration, .. } => memory_name(declaration),
+        ir::MemoryDeclaration::Scalar { name, .. }
+        | ir::MemoryDeclaration::FloatScalar { name, .. }
+        | ir::MemoryDeclaration::Buffer { name, .. }
+        | ir::MemoryDeclaration::Array { name, .. }
+        | ir::MemoryDeclaration::Repeat { name, .. } => name,
+    }
 }
 
 fn remap_entry(target: &str, program: &ir::Program, entry_symbol: &str) -> String {
