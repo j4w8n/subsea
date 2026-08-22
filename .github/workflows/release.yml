@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Static x86-64 Linux release
+    runs-on: ubuntu-24.04
+    env:
+      SUBSEA_REQUIRE_AARCH64_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+      - name: Install build and validation tools
+        run: sudo apt-get update && sudo apt-get install --yes binutils binutils-aarch64-linux-gnu file musl-tools qemu-user
+      - name: Install Rust 1.85 and musl target
+        run: rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt && rustup +1.85.0 target add x86_64-unknown-linux-musl
+      - name: Validate tag, history, and release documents
+        id: package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="$(cargo +1.85.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "subsea") | .version')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          test -f "docs/releases/$version.md"
+          grep -Fxq "# Subsea $version" "docs/releases/$version.md"
+          grep -Eq "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md
+          grep -Fq "subsea-${version}-x86_64-linux.tar.gz" README.md
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Run release gates
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo +1.85.0 fmt --all -- --check
+          cargo +1.85.0 clippy --all-targets --locked -- -D warnings
+          cargo +1.85.0 test --locked
+          cargo +1.85.0 doc --locked --no-deps --document-private-items
+      - name: Build static musl binary
+        run: cargo +1.85.0 build --locked --release --target x86_64-unknown-linux-musl
+      - name: Verify binary and host-tool example
+        shell: bash
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euxo pipefail
+          binary=target/x86_64-unknown-linux-musl/release/subsea
+          file "$binary" | grep -Eq 'ELF 64-bit LSB.*x86-64.*(statically linked|static-pie linked)'
+          ! readelf -l "$binary" | grep -q INTERP
+          ! readelf -d "$binary" | grep -q NEEDED
+          test "$("$binary" --version)" = "subsea $VERSION"
+          "$binary" --help | grep -q 'compile and run Subsea programs'
+          test "$("$binary" run examples/subsea-vs-x86/01_hello.ss)" = 'Hello from Subsea!'
+      - name: Package release assets
+        id: assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euxo pipefail
+          archive="subsea-$VERSION-x86_64-linux.tar.gz"
+          stage="$RUNNER_TEMP/subsea-package"
+          mkdir "$stage"
+          install -m 0755 target/x86_64-unknown-linux-musl/release/subsea "$stage/subsea"
+          install -m 0644 README.md LICENSE "$stage/"
+          tar -C "$stage" -czf "$archive" subsea README.md LICENSE
+          test "$(tar -tzf "$archive" | wc -l)" -eq 3
+          tar -tzf "$archive" | grep -Fxq subsea
+          tar -tzf "$archive" | grep -Fxq README.md
+          tar -tzf "$archive" | grep -Fxq LICENSE
+          sha256sum "$archive" > "$archive.sha256"
+          sha256sum --check "$archive.sha256"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ARCHIVE: ${{ steps.assets.outputs.archive }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          "$ARCHIVE" "$ARCHIVE.sha256"
+          --verify-tag
+          --title "Subsea $VERSION"
+          --notes-file "docs/releases/$VERSION.md"

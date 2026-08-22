@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - run: cargo +stable fmt --check
+      - run: cargo +stable clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests (Rust ${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [1.85.0, stable]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install GNU x86 tools
+        run: sudo apt-get update && sudo apt-get install --yes binutils
+      - name: Install Rust ${{ matrix.rust }}
+        run: rustup toolchain install '${{ matrix.rust }}' --profile minimal
+      - name: Run complete unit, integration, and x86 example suite
+        run: cargo +${{ matrix.rust }} test --locked
+
+  aarch64-regression:
+    name: AArch64 cross-binutils and QEMU
+    runs-on: ubuntu-latest
+    env:
+      SUBSEA_REQUIRE_AARCH64_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install AArch64 tools and QEMU user emulator
+        run: sudo apt-get update && sudo apt-get install --yes binutils binutils-aarch64-linux-gnu qemu-user
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: Run tests with mandatory cross tools
+        run: cargo +stable test --locked
+
+  docs:
+    name: Documentation and local links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - run: cargo +stable test --locked --test docs_links
+      - name: Build Rust documentation without warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --locked --no-deps --document-private-items
+
+  static-musl:
+    name: Static musl install smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Install validation tools
+        run: sudo apt-get update && sudo apt-get install --yes binutils file musl-tools
+      - name: Install Rust 1.85 and musl target
+        run: rustup toolchain install 1.85.0 --profile minimal && rustup +1.85.0 target add x86_64-unknown-linux-musl
+      - name: Install static compiler
+        run: cargo +1.85.0 install --locked --path . --target x86_64-unknown-linux-musl --root "$RUNNER_TEMP/subsea-install"
+      - name: Validate installed compiler
+        shell: bash
+        run: |
+          set -euxo pipefail
+          binary="$RUNNER_TEMP/subsea-install/bin/subsea"
+          version="$(cargo +1.85.0 metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "subsea") | .version')"
+          file "$binary" | grep -Eq 'ELF 64-bit LSB.*x86-64.*(statically linked|static-pie linked)'
+          ! readelf -l "$binary" | grep -q INTERP
+          ! readelf -d "$binary" | grep -q NEEDED
+          test "$("$binary" --version)" = "subsea $version"
+          "$binary" --help | grep -q 'compile and run Subsea programs'
+          test "$("$binary" run examples/subsea-vs-x86/01_hello.ss)" = 'Hello from Subsea!'

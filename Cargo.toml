@@ -2,5 +2,21 @@
 name = "subsea"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+autolib = false
+publish = false
+authors = ["subsea contributors"]
+description = "A readable low-level language with direct register and memory access"
+license = "MIT"
+repository = "https://github.com/j4crev/subsea"
+homepage = "https://github.com/j4crev/subsea"
+documentation = "https://github.com/j4crev/subsea/tree/main/docs"
+readme = "README.md"
+keywords = ["compiler", "assembly", "low-level", "x86-64"]
+categories = ["compilers", "command-line-utilities"]
 
 [dependencies]
+
+[[test]]
+name = "examples"
+path = "tests/examples.rs"
