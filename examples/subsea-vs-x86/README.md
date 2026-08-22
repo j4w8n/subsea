@@ -20,18 +20,18 @@ The goal is not only fewer lines of code. The goal is to show where Subsea keeps
 From the repository root:
 
 ```bash
-subsea run examples/x86-vs-subsea/01_hello.ss
-subsea run examples/x86-vs-subsea/02_arithmetic.ss
-subsea run examples/x86-vs-subsea/03_array_sum.ss
-subsea run examples/x86-vs-subsea/04_function_compare.ss
-subsea run examples/x86-vs-subsea/05_dispatch_table.ss
-subsea run examples/x86-vs-subsea/06_layout.ss
+subsea run examples/subsea-vs-x86/01_hello.ss
+subsea run examples/subsea-vs-x86/02_arithmetic.ss
+subsea run examples/subsea-vs-x86/03_array_sum.ss
+subsea run examples/subsea-vs-x86/04_function_compare.ss
+subsea run examples/subsea-vs-x86/05_dispatch_table.ss
+subsea run examples/subsea-vs-x86/06_layout.ss
 ```
 
 If you are developing Subsea from this checkout, use Cargo:
 
 ```bash
-cargo run -- run examples/x86-vs-subsea/01_hello.ss
+cargo run -- run examples/subsea-vs-x86/01_hello.ss
 ```
 
 ## Reading Notes

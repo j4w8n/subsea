@@ -2,27 +2,27 @@
 
 This example is a minimal Limine-oriented x86-64 kernel built from subsea source. The Limine request start/end markers are declared with subsea `data` blocks.
 
-The `iso_root` directory should contain the Limine boot files, `limine.conf`, and the built kernel at `iso_root/boot/kernel.elf`.
+The `examples/limine/iso_root` directory should contain the external Limine boot files, `limine.conf`, and the built kernel at `examples/limine/iso_root/boot/kernel.elf`. Run the commands below from the repository root.
 
 Build the kernel ELF into the ISO staging tree:
 
 ```sh
- subsea build -t x86-free -T kernel.ld -o iso_root/boot/kernel.elf kernel.ss
+subsea build -t x86-free -T examples/limine/kernel.ld -o examples/limine/iso_root/boot/kernel.elf examples/limine/kernel.ss
 ```
 
 Build the kernel object only:
 
 ```sh
- subsea build -t x86-free -o kernel.o examples/limine/kernel.ss
+subsea build -t x86-free -o kernel.o examples/limine/kernel.ss
 ```
 
 Inspect the Limine request section:
 
 ```sh
-readelf -S iso_root/boot/kernel.elf | grep limine_requests
+readelf -S examples/limine/iso_root/boot/kernel.elf | grep limine_requests
 ```
 
-Build the ISO:
+Build the ISO from the staging tree:
 
 ```sh
 xorriso -as mkisofs -R -r -J \
@@ -36,7 +36,7 @@ xorriso -as mkisofs -R -r -J \
   -efi-boot-part \
   --efi-boot-image \
   --protective-msdos-label \
-  iso_root \
+  examples/limine/iso_root \
   -o subsea.iso
 ```
 
@@ -54,4 +54,4 @@ qemu-system-x86_64 -M q35 -m 256M -cdrom subsea.iso -debugcon stdio -global isa-
 
 Bytes written by `asm.x86 "out 0xe9, al"` appear in the terminal where QEMU is running. The display window may stay blank because this example does not write to the framebuffer.
 
-This example is a manual QEMU smoke test. It is not run by `cargo test` because it requires external Limine binaries, ISO creation tools, and QEMU.
+`cargo test --test examples` builds the kernel ELF and inspects its request section without external Limine assets. ISO creation and this QEMU smoke test remain manual because they require Limine binaries, ISO creation tools, and QEMU.
