@@ -109,9 +109,34 @@ impl Parser {
             } else if matches!(self.peek(), Some(Token::Layout)) {
                 self.parse_layout_declaration()?;
             } else if matches!(self.peek(), Some(Token::Export)) {
-                let label = self.parse_exported_top_level_label()?;
-                exports.push(label.name.clone());
-                labels.push(label);
+                match self.tokens.get(self.position + 1) {
+                    Some(Token::Mem) => {
+                        self.advance();
+                        let declaration = self.parse_memory_declaration()?;
+                        self.record_named_span(
+                            memory_declaration_name(&declaration),
+                            declaration_start,
+                        );
+                        exports.push(memory_declaration_name(&declaration).clone());
+                        memory.push(declaration);
+                    }
+                    Some(Token::Data) => {
+                        self.advance();
+                        let declaration = self.parse_data_declaration()?;
+                        self.record_named_span(&declaration.name, declaration_start);
+                        exports.push(declaration.name.clone());
+                        data.push(declaration);
+                    }
+                    _ if matches!(self.tokens.get(self.position + 2), Some(Token::Colon)) => {
+                        let label = self.parse_exported_top_level_label()?;
+                        exports.push(label.name.clone());
+                        labels.push(label);
+                    }
+                    _ => {
+                        self.expect(Token::Export, "Expected export")?;
+                        exports.push(self.expect_ident("exported symbol name")?);
+                    }
+                }
             } else {
                 labels.push(self.parse_top_level_label()?);
             }
@@ -120,6 +145,7 @@ impl Parser {
         validate_data_names(&data)?;
         validate_memory_names(&memory)?;
         validate_label_storage_names(&data, &memory, &labels)?;
+        validate_exports(&exports, &data, &memory, &labels)?;
         if require_main {
             validate_main_label(&labels)?;
         }
@@ -197,7 +223,7 @@ impl Parser {
 
         let mut names = Vec::new();
         loop {
-            names.push(self.expect_ident("imported function name")?);
+            names.push(self.expect_ident("imported symbol name")?);
 
             match self.peek() {
                 Some(Token::Comma) => {
@@ -206,12 +232,12 @@ impl Parser {
                 Some(Token::From) => break,
                 Some(token) => {
                     return Err(format!(
-                        "Expected ',' or from after imported function name, found {token:?}"
+                        "Expected ',' or from after imported symbol name, found {token:?}"
                     ));
                 }
                 None => {
                     return Err(String::from(
-                        "Expected ',' or from after imported function name, found end of input",
+                        "Expected ',' or from after imported symbol name, found end of input",
                     ));
                 }
             }
@@ -2572,6 +2598,36 @@ fn validate_memory_names(memory: &[MemoryDeclaration]) -> Result<(), String> {
 
         if !names.insert(name) {
             return Err(format!("Memory name {name:?} is already defined"));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_exports(
+    exports: &[String],
+    data: &[DataDeclaration],
+    memory: &[MemoryDeclaration],
+    labels: &[Label],
+) -> Result<(), String> {
+    let symbols: HashSet<&str> = labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .chain(data.iter().map(|declaration| declaration.name.as_str()))
+        .chain(
+            memory
+                .iter()
+                .map(|declaration| memory_declaration_name(declaration).as_str()),
+        )
+        .collect();
+    let mut seen = HashSet::new();
+
+    for name in exports {
+        if !seen.insert(name.as_str()) {
+            return Err(format!("Symbol {name:?} is exported more than once"));
+        }
+        if !symbols.contains(name.as_str()) {
+            return Err(format!("Cannot export unknown top-level symbol {name:?}"));
         }
     }
 

@@ -295,10 +295,25 @@ fn unique_build_id() -> Result<String, String> {
     Ok(format!("build-{}-{nanos}-{counter}", process::id()))
 }
 
-pub fn run_executable(path: &Path) -> Result<ExitStatus, String> {
-    Command::new(path)
-        .status()
-        .map_err(|error| format!("Failed to run executable: {error}"))
+pub fn run_executable(
+    path: &Path,
+    args: &[String],
+    runner: Option<&str>,
+) -> Result<ExitStatus, String> {
+    let mut command = match runner {
+        Some(runner) => {
+            let mut command = Command::new(runner);
+            command.arg(path);
+            command
+        }
+        None => Command::new(path),
+    };
+    command.args(args).status().map_err(|error| match runner {
+        Some(runner) if error.kind() == ErrorKind::NotFound => {
+            format!("Failed to run executable: runner `{runner}` was not found")
+        }
+        _ => format!("Failed to run executable: {error}"),
+    })
 }
 
 fn run_command(command: &mut Command, label: &str, program: &str) -> Result<(), String> {

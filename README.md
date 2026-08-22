@@ -515,7 +515,7 @@ Indirect call targets must be 64-bit integer registers or memory operands. They 
 
 ## Imports
 
-Reusable functions can be imported explicitly from another `.ss` file. Import paths are relative to the file that contains the import. Imported files must mark public functions with `export`; private helper functions remain callable inside the imported file but cannot be imported directly.
+Reusable functions and static declarations can be imported explicitly from another `.ss` file. Import paths are relative to the file that contains the import. Imported symbols must be marked with `export`; private helpers and storage remain usable inside the imported file but cannot be imported directly.
 
 ```ss
 import debug_write from "lib/qemu_debug.ss"
@@ -549,7 +549,28 @@ export debug_write: {
 }
 ```
 
-Imports are intentionally narrow: only explicitly listed exported functions can be imported. Memory, data blocks, constants, and private helper functions are not importable API surface yet.
+Imports are intentionally narrow: only explicitly listed exported symbols can be imported. Prefix a declaration with `export`, or use a standalone `export <name>` declaration after it:
+
+```ss
+// lib/tables.ss
+export mem lookup:u8 = [10, 20, 30]
+
+export data metadata section ".metadata" {
+  u64 1
+}
+```
+
+```ss
+import lookup, metadata from "lib/tables.ss"
+
+main: {
+  al = [lookup]
+  rax = &metadata
+  linux.exit 0
+}
+```
+
+Unrequested exports remain private to the imported module. A data block's `export` option still controls its ELF visibility; module exports are controlled separately with `export <name>`. Compile-time `const` bindings are function-local and are not importable.
 
 ## Local Labels
 
@@ -1407,6 +1428,7 @@ rax = 2147483648
 
 ```sh
 subsea run main.ss        // Build and execute the program
+subsea run -t aarch --runner qemu-aarch64 main.ss // Cross-run with an explicit runner
 subsea build main.ss      // Compile, assemble, and link an executable
 subsea emit-asm main.ss   // Compile to target assembly and print it
 subsea emit-asm --annotate main.ss // Include source locations and statements
@@ -1415,6 +1437,12 @@ subsea emit-asm --annotate main.ss // Include source locations and statements
 `--annotate` adds source comments to emitted assembly. Comments appear before the assembly they describe, imported instructions retain their source file locations, and compiler-generated regions are marked explicitly. This makes the output useful when learning or auditing the generated machine code.
 
 > `run` exits with the compiled program's exit code.
+
+`run` accepts Linux targets (`x86` and `aarch`). It executes the output directly by default; use `--runner <program>` for an explicit cross-target runner such as `qemu-aarch64`. Arguments after `--` are passed to the compiled program unchanged:
+
+```sh
+subsea run -t aarch --runner qemu-aarch64 main.ss -- argument-one --flag
+```
 
 ### targets
 

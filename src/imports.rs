@@ -58,33 +58,7 @@ impl ImportResolver {
         origins: &mut ProgramOrigins,
         source_path: &Path,
     ) -> Result<(), String> {
-        let imports = std::mem::take(&mut program.imports);
-        let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
-        let local_labels: HashSet<String> = program
-            .labels
-            .iter()
-            .map(|label| label.name.clone())
-            .collect();
-        let mut imported_names = HashSet::new();
-        let mut merged_modules = HashSet::new();
-
-        for import in imports {
-            let import_path = canonical_path(&base_dir.join(&import.path))?;
-            let module = self.load_module(&import_path)?;
-            validate_import(&module.program, &import, &local_labels, &mut imported_names)?;
-
-            if merged_modules.insert(import_path) {
-                merge_module(
-                    program,
-                    origins,
-                    &module.program,
-                    &module.origins,
-                    module.module_id,
-                );
-            }
-        }
-
-        Ok(())
+        self.resolve_imports(program, origins, source_path)
     }
 
     fn load_module(&mut self, path: &Path) -> Result<ResolvedModule, String> {
@@ -114,30 +88,48 @@ impl ImportResolver {
         origins: &mut ProgramOrigins,
         source_path: &Path,
     ) -> Result<(), String> {
+        self.resolve_imports(program, origins, source_path)
+    }
+
+    fn resolve_imports(
+        &mut self,
+        program: &mut Program,
+        origins: &mut ProgramOrigins,
+        source_path: &Path,
+    ) -> Result<(), String> {
         let imports = std::mem::take(&mut program.imports);
         let base_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
-        let local_labels: HashSet<String> = program
-            .labels
-            .iter()
-            .map(|label| label.name.clone())
-            .collect();
+        let local_symbols = program_symbol_names(program);
         let mut imported_names = HashSet::new();
-        let mut merged_modules = HashSet::new();
+        let mut imports_by_path: Vec<(PathBuf, Vec<ImportDeclaration>)> = Vec::new();
 
         for import in imports {
             let import_path = canonical_path(&base_dir.join(&import.path))?;
-            let module = self.load_module(&import_path)?;
-            validate_import(&module.program, &import, &local_labels, &mut imported_names)?;
-
-            if merged_modules.insert(import_path) {
-                merge_module(
-                    program,
-                    origins,
-                    &module.program,
-                    &module.origins,
-                    module.module_id,
-                );
+            if let Some((_, grouped_imports)) = imports_by_path
+                .iter_mut()
+                .find(|(path, _)| *path == import_path)
+            {
+                grouped_imports.push(import);
+            } else {
+                imports_by_path.push((import_path, vec![import]));
             }
+        }
+
+        for (import_path, imports) in imports_by_path {
+            let module = self.load_module(&import_path)?;
+            let mut requested_symbols = HashSet::new();
+            for import in &imports {
+                validate_import(&module.program, import, &local_symbols, &mut imported_names)?;
+                requested_symbols.extend(import.names.iter().cloned());
+            }
+            merge_module(
+                program,
+                origins,
+                &module.program,
+                &module.origins,
+                module.module_id,
+                &requested_symbols,
+            );
         }
 
         Ok(())
@@ -180,21 +172,21 @@ fn parse_file(
 fn validate_import(
     imported: &Program,
     import: &ImportDeclaration,
-    local_labels: &HashSet<String>,
+    local_symbols: &HashSet<String>,
     imported_names: &mut HashSet<String>,
 ) -> Result<(), String> {
     let exports: HashSet<&str> = imported.exports.iter().map(String::as_str).collect();
     for name in &import.names {
         if !exports.contains(name.as_str()) {
             return Err(format!(
-                "Function {name:?} is not exported by {:?}",
+                "Symbol {name:?} is not exported by {:?}",
                 import.path
             ));
         }
 
-        if local_labels.contains(name) || !imported_names.insert(name.clone()) {
+        if local_symbols.contains(name) || !imported_names.insert(name.clone()) {
             return Err(format!(
-                "Imported function {name:?} conflicts with an existing function"
+                "Imported symbol {name:?} conflicts with an existing top-level symbol"
             ));
         }
     }
@@ -208,8 +200,9 @@ fn merge_module(
     imported: &Program,
     imported_origins: &ProgramOrigins,
     module_id: usize,
+    requested_symbols: &HashSet<String>,
 ) {
-    let symbol_map = build_symbol_map(imported, module_id);
+    let symbol_map = build_symbol_map(imported, module_id, requested_symbols);
     origins.merge_label_origins(imported_origins, &symbol_map);
 
     for declaration in &imported.data {
@@ -254,12 +247,16 @@ fn merge_module(
     }
 }
 
-fn build_symbol_map(imported: &Program, module_id: usize) -> HashMap<String, String> {
+fn build_symbol_map(
+    imported: &Program,
+    module_id: usize,
+    requested_symbols: &HashSet<String>,
+) -> HashMap<String, String> {
     let exports: HashSet<&str> = imported.exports.iter().map(String::as_str).collect();
     let mut symbol_map = HashMap::new();
 
     for label in &imported.labels {
-        if exports.contains(label.name.as_str()) {
+        if exports.contains(label.name.as_str()) && requested_symbols.contains(&label.name) {
             symbol_map.insert(label.name.clone(), label.name.clone());
         } else {
             symbol_map.insert(
@@ -270,9 +267,15 @@ fn build_symbol_map(imported: &Program, module_id: usize) -> HashMap<String, Str
     }
 
     for declaration in &imported.data {
+        let exported = exports.contains(declaration.name.as_str())
+            && requested_symbols.contains(&declaration.name);
         symbol_map.insert(
             declaration.name.clone(),
-            private_import_name(module_id, &declaration.name),
+            if exported {
+                declaration.name.clone()
+            } else {
+                private_import_name(module_id, &declaration.name)
+            },
         );
         for item in &declaration.items {
             if let DataItem::Label { name } = item {
@@ -290,10 +293,39 @@ fn build_symbol_map(imported: &Program, module_id: usize) -> HashMap<String, Str
             | MemoryDeclaration::Array { name, .. }
             | MemoryDeclaration::Repeat { name, .. } => name,
         };
-        symbol_map.insert(name.clone(), private_import_name(module_id, name));
+        let exported = exports.contains(name.as_str()) && requested_symbols.contains(name);
+        symbol_map.insert(
+            name.clone(),
+            if exported {
+                name.clone()
+            } else {
+                private_import_name(module_id, name)
+            },
+        );
     }
 
     symbol_map
+}
+
+fn program_symbol_names(program: &Program) -> HashSet<String> {
+    let mut symbols = HashSet::new();
+    symbols.extend(program.labels.iter().map(|label| label.name.clone()));
+    symbols.extend(program.data.iter().flat_map(|declaration| {
+        std::iter::once(declaration.name.clone()).chain(declaration.items.iter().filter_map(
+            |item| match item {
+                DataItem::Label { name } => Some(name.clone()),
+                _ => None,
+            },
+        ))
+    }));
+    symbols.extend(program.memory.iter().map(|declaration| {
+        memory_declaration_name(match declaration {
+            MemoryDeclaration::Aligned { declaration, .. } => declaration,
+            declaration => declaration,
+        })
+        .clone()
+    }));
+    symbols
 }
 
 fn rewrite_memory_declaration_symbols(

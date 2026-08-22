@@ -466,6 +466,55 @@ fn imports_exported_function() {
 }
 
 #[test]
+fn imports_exported_static_memory_and_data() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/imports/use_static_exports.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = String::from_utf8_lossy(&output.stdout);
+    assert!(asm.contains("shared:\n"));
+    assert!(asm.contains("metadata:\n"));
+    assert!(asm.contains("__import_0_hidden:\n"));
+    assert!(asm.contains("__import_0_hidden_metadata:\n"));
+}
+
+#[test]
+fn keeps_unrequested_static_exports_private() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args([
+            "emit-asm",
+            "tests/fixtures/imports/use_unrequested_static_export.ss",
+        ])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown address symbol"));
+}
+
+#[test]
+fn run_rejects_freestanding_targets() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "--target", "x86-free", "tests/fixtures/main.ss"])
+        .output()
+        .expect("failed to start subsea");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("subsea run only supports Linux targets")
+    );
+}
+
+#[test]
 fn rejects_importing_private_function() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))

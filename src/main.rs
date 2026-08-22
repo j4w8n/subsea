@@ -8,7 +8,7 @@ use std::{
 use subsea::codegen::Target;
 use subsea::codegen::emit_target_asm_with_origins_options;
 use subsea::driver::{
-    self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat, build_executable,
+    self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat,
     build_executable_for_target, build_freestanding_executable, build_object_for_target,
     run_executable,
 };
@@ -73,11 +73,16 @@ fn main() {
                 Err(error) => exit_with_error(error),
             }
         }
-        Ok(CommandLine::Run { source_path }) => {
-            match compile_to_asm(&source_path, Target::X86_64, None, false)
-                .and_then(|asm| build_executable(&asm, None))
+        Ok(CommandLine::Run {
+            source_path,
+            target,
+            runner,
+            args,
+        }) => {
+            match compile_to_asm(&source_path, target, None, false)
+                .and_then(|asm| build_executable_for_target(&asm, target, None))
             {
-                Ok(output) => match run_executable(&output.output_path) {
+                Ok(output) => match run_executable(&output.output_path, &args, runner.as_deref()) {
                     Ok(status) => {
                         if let Err(error) = driver::remove_build_dir(&output.build_dir) {
                             eprintln!("Warning: {error}");
@@ -118,6 +123,9 @@ enum CommandLine {
     Help,
     Run {
         source_path: String,
+        target: Target,
+        runner: Option<String>,
+        args: Vec<String>,
     },
 }
 
@@ -131,13 +139,73 @@ fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
     match args.as_slice() {
         [flag] if flag == "--help" || flag == "-h" => Ok(CommandLine::Help),
         [command, rest @ ..] if command == "emit-asm" => parse_emit_asm_command(rest),
-        [command, source_path] if command == "run" => Ok(CommandLine::Run {
-            source_path: source_path.clone(),
-        }),
+        [command, rest @ ..] if command == "run" => parse_run_command(rest),
         [command, rest @ ..] if command == "build" => parse_build_command(rest),
         [command, ..] => Err(format!("Unknown or invalid command {command:?}")),
         [] => Err(String::from("Missing command")),
     }
+}
+
+fn parse_run_command(args: &[String]) -> Result<CommandLine, String> {
+    let mut source_path = None;
+    let mut target = Target::X86_64;
+    let mut target_provided = false;
+    let mut runner = None;
+    let mut program_args = Vec::new();
+    let mut position = 0;
+
+    while position < args.len() {
+        match args[position].as_str() {
+            "--" => {
+                program_args.extend_from_slice(&args[position + 1..]);
+                break;
+            }
+            "--target" | "-t" => {
+                position += 1;
+                let target_name = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected target after --target/-t"))?;
+                if target_provided {
+                    return Err(String::from("Target was already provided"));
+                }
+                target = Target::parse(target_name)?;
+                target_provided = true;
+            }
+            "--runner" => {
+                position += 1;
+                let program = args
+                    .get(position)
+                    .ok_or_else(|| String::from("Expected runner program after --runner"))?;
+                if runner.is_some() {
+                    return Err(String::from("Runner was already provided"));
+                }
+                validate_program_name(program, "Runner")?;
+                runner = Some(program.clone());
+            }
+            flag if flag.starts_with('-') => return Err(format!("Unknown run flag {flag:?}")),
+            path => {
+                if source_path.is_some() {
+                    return Err(String::from("Source path was already provided"));
+                }
+                source_path = Some(path.to_owned());
+            }
+        }
+        position += 1;
+    }
+
+    let source_path = source_path.ok_or_else(|| String::from("Missing run source path"))?;
+    if target.is_freestanding() {
+        return Err(String::from(
+            "subsea run only supports Linux targets; use build for freestanding targets",
+        ));
+    }
+
+    Ok(CommandLine::Run {
+        source_path,
+        target,
+        runner,
+        args: program_args,
+    })
 }
 
 fn parse_emit_asm_command(args: &[String]) -> Result<CommandLine, String> {
@@ -635,7 +703,7 @@ fn exit_with_error(error: String) -> ! {
 
 fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("Usage:");
-    eprintln!("  subsea run <file.ss>");
+    eprintln!("  subsea run [--target|-t x86|aarch] [--runner program] <file.ss> [-- <args>...]");
     eprintln!(
         "  subsea build [--target|-t x86|x86-free|aarch] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
     );
@@ -643,4 +711,42 @@ fn print_usage_and_exit(code: i32) -> ! {
         "  subsea emit-asm [--annotate] [--target|-t x86|x86-free|aarch] [--entry symbol] <file.ss>"
     );
     process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_parses_target_runner_and_program_arguments() {
+        let args = [
+            "run",
+            "-t",
+            "aarch",
+            "--runner",
+            "qemu-aarch64",
+            "main.ss",
+            "--",
+            "argument",
+            "--program-flag",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let CommandLine::Run {
+            source_path,
+            target,
+            runner,
+            args,
+        } = parse_cli(args).unwrap()
+        else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(source_path, "main.ss");
+        assert_eq!(target, Target::AArch64Linux);
+        assert_eq!(runner.as_deref(), Some("qemu-aarch64"));
+        assert_eq!(args, ["argument", "--program-flag"]);
+    }
 }
