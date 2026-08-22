@@ -85,7 +85,6 @@ pub enum Token {
     LocalIdent(String),
     Mem,
     Out,
-    Pointer(String),
     Pop,
     Print,
     Push,

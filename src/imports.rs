@@ -9,10 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn load_program(path: &Path) -> Result<Program, String> {
-    Ok(load_program_with_origins(path)?.program)
-}
-
 pub struct LoadedProgram {
     pub program: Program,
     pub origins: ProgramOrigins,
@@ -47,9 +43,14 @@ impl ImportResolver {
 
     fn load_root(&mut self, path: &Path) -> Result<LoadedProgram, String> {
         let path = canonical_path(path)?;
-        let (mut program, mut origins) = parse_file(&path, true, &mut self.loading)?;
-        self.resolve_imports_into_root(&mut program, &mut origins, &path)?;
-        Ok(LoadedProgram { program, origins })
+        self.begin_loading(&path)?;
+        let result = (|| {
+            let (mut program, mut origins) = parse_file(&path, true)?;
+            self.resolve_imports_into_root(&mut program, &mut origins, &path)?;
+            Ok(LoadedProgram { program, origins })
+        })();
+        self.loading.pop();
+        result
     }
 
     fn resolve_imports_into_root(
@@ -67,19 +68,34 @@ impl ImportResolver {
             return Ok(module.clone());
         }
 
+        self.begin_loading(&path)?;
+        let result = self.load_uncached_module(&path);
+        self.loading.pop();
+        result
+    }
+
+    fn load_uncached_module(&mut self, path: &Path) -> Result<ResolvedModule, String> {
         let module_id = self.next_module_id;
         self.next_module_id += 1;
 
-        let (mut program, mut origins) = parse_file(&path, false, &mut self.loading)?;
-        self.resolve_module_imports(&mut program, &mut origins, &path)?;
+        let (mut program, mut origins) = parse_file(path, false)?;
+        self.resolve_module_imports(&mut program, &mut origins, path)?;
         let module = ResolvedModule {
             program,
             module_id,
             origins,
         };
-        self.modules.insert(path, module.clone());
+        self.modules.insert(path.to_path_buf(), module.clone());
 
         Ok(module)
+    }
+
+    fn begin_loading(&mut self, path: &Path) -> Result<(), String> {
+        if self.loading.iter().any(|loading| loading == path) {
+            return Err(format!("Import cycle involving {}", path.display()));
+        }
+        self.loading.push(path.to_path_buf());
+        Ok(())
     }
 
     fn resolve_module_imports(
@@ -136,18 +152,8 @@ impl ImportResolver {
     }
 }
 
-fn parse_file(
-    path: &Path,
-    require_main: bool,
-    loading: &mut Vec<PathBuf>,
-) -> Result<(Program, ProgramOrigins), String> {
-    let path = canonical_path(path)?;
-    if loading.contains(&path) {
-        return Err(format!("Import cycle involving {}", path.display()));
-    }
-
-    loading.push(path.clone());
-    let source = fs::read_to_string(&path)
+fn parse_file(path: &Path, require_main: bool) -> Result<(Program, ProgramOrigins), String> {
+    let source = fs::read_to_string(path)
         .map_err(|error| format!("Failed to read {:?}: {error}", path.display().to_string()))?;
     let mut sources = SourceMap::default();
     let source_id = sources.add(path.display().to_string(), source.clone());
@@ -163,8 +169,6 @@ fn parse_file(
             .parse_library_with_diagnostics()
             .map_err(|diagnostic| diagnostic.render(&sources))?
     };
-    loading.pop();
-
     let origins = parser.take_origins().with_sources(sources);
     Ok((program, origins))
 }

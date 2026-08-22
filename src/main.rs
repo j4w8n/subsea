@@ -5,14 +5,109 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subsea::codegen::Target;
-use subsea::codegen::emit_target_asm_with_origins_options;
-use subsea::driver::{
-    self, BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat,
+mod analysis;
+mod ast;
+mod backend;
+mod codegen;
+mod diagnostic;
+mod driver;
+mod grammar;
+mod imports;
+mod ir;
+mod lexer;
+mod lower;
+mod parser;
+mod platform;
+mod register;
+
+#[cfg(test)]
+mod internal_tests;
+
+use crate::codegen::Target;
+use crate::codegen::emit_target_asm_with_origins_options;
+use crate::driver::{
+    BuildOutputKind, FreestandingLinkOptions, FreestandingOutputFormat,
     build_executable_for_target, build_freestanding_executable, build_object_for_target,
-    run_executable,
+    build_run_executable, run_executable,
 };
-use subsea::imports;
+
+const TOP_LEVEL_HELP: &str = "subsea - compile and run Subsea programs
+
+Usage:
+  subsea <COMMAND> [OPTIONS]
+  subsea --help
+  subsea --version
+
+Commands:
+  run       Compile and run a Linux program
+  build     Compile and build an executable, object file, or binary
+  emit-asm  Compile and write assembly to stdout
+  help      Print top-level or command-specific help
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Targets:
+  x86         Stable x86-64 Linux target (default)
+  x86-free    Experimental x86-64 freestanding target
+  aarch       Experimental AArch64 Linux target
+  aarch-free  Experimental AArch64 freestanding target
+
+Run `subsea help <COMMAND>` for command-specific help.
+";
+
+const RUN_HELP: &str = "Compile and run a Subsea program
+
+Usage:
+  subsea run [OPTIONS] <file.ss> [-- <args>...]
+
+Options:
+  -t, --target <TARGET>  Linux target: x86 (stable, default) or aarch (experimental)
+      --runner <PROGRAM> Run the executable through PROGRAM (for example, qemu-aarch64)
+  -h, --help             Print help
+
+Restrictions:
+  run accepts only Linux targets; x86-free and aarch-free must be built instead.
+  Arguments for the compiled program must follow `--`.
+";
+
+const BUILD_HELP: &str = "Compile and build a Subsea program
+
+Usage:
+  subsea build [OPTIONS] <file.ss>
+
+Options:
+  -t, --target <TARGET>       x86 (stable, default), x86-free (experimental),
+                              aarch (experimental), or aarch-free (experimental)
+  -o <PATH>                   Write output to PATH
+      --timings               Print phase timings
+      --entry <SYMBOL>        Set the entry symbol (freestanding targets only)
+  -T, --linker-script <PATH>  Link with a script (freestanding targets only)
+      --link-input <PATH>     Add an object to the link; repeatable (freestanding only)
+      --format <FORMAT>       Output format: elf (default) or binary
+      --linker <PROGRAM>      Use PROGRAM to link (freestanding targets only)
+  -h, --help                  Print help
+
+Restrictions:
+  Linux targets produce an executable and reject freestanding-only options.
+  A freestanding build without --linker-script produces an object file.
+  --link-input requires --linker-script.
+  --format binary requires a freestanding target and --linker-script; objcopy is run.
+";
+
+const EMIT_ASM_HELP: &str = "Compile a Subsea program and write assembly to stdout
+
+Usage:
+  subsea emit-asm [OPTIONS] <file.ss>
+
+Options:
+  -t, --target <TARGET>  x86 (stable, default), x86-free (experimental),
+                         aarch (experimental), or aarch-free (experimental)
+      --entry <SYMBOL>   Set the entry symbol (freestanding targets only)
+      --annotate         Include source and generated-region comments
+  -h, --help             Print help
+";
 
 fn main() {
     match parse_cli(env::args().skip(1).collect()) {
@@ -25,7 +120,8 @@ fn main() {
             Ok(asm) => print!("{asm}"),
             Err(error) => exit_with_error(error),
         },
-        Ok(CommandLine::Help) => print_usage_and_exit(0),
+        Ok(CommandLine::Help(topic)) => print_help(topic),
+        Ok(CommandLine::Version) => println!("subsea {}", env!("CARGO_PKG_VERSION")),
         Ok(CommandLine::Build {
             source_path,
             output_path,
@@ -80,24 +176,34 @@ fn main() {
             args,
         }) => {
             match compile_to_asm(&source_path, target, None, false)
-                .and_then(|asm| build_executable_for_target(&asm, target, None))
+                .and_then(|asm| build_run_executable(&asm, target))
             {
-                Ok(output) => match run_executable(&output.output_path, &args, runner.as_deref()) {
-                    Ok(status) => {
-                        if let Err(error) = driver::remove_build_dir(&output.build_dir) {
-                            eprintln!("Warning: {error}");
-                        }
+                Ok(output) => {
+                    let run_result = run_executable(&output.output_path, &args, runner.as_deref());
+                    let cleanup_result = driver::remove_build_dir(&output.build_dir);
 
-                        process::exit(status.code().unwrap_or(1));
+                    match run_result {
+                        Ok(status) => {
+                            if let Err(error) = cleanup_result {
+                                eprintln!("Warning: {error}");
+                            }
+                            process::exit(status.code().unwrap_or(1));
+                        }
+                        Err(error) => match cleanup_result {
+                            Ok(()) => exit_with_error(error),
+                            Err(cleanup_error) => {
+                                exit_with_error(format!("{error}\n{cleanup_error}"))
+                            }
+                        },
                     }
-                    Err(error) => exit_with_error(error),
-                },
+                }
                 Err(error) => exit_with_error(error),
             }
         }
         Err(error) => {
             eprintln!("Error: {error}");
-            print_usage_and_exit(1);
+            print_usage_to_stderr();
+            process::exit(1);
         }
     }
 }
@@ -120,13 +226,22 @@ enum CommandLine {
         output_format: BuildOutputFormat,
         linker: String,
     },
-    Help,
+    Help(HelpTopic),
     Run {
         source_path: String,
         target: Target,
         runner: Option<String>,
         args: Vec<String>,
     },
+    Version,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelpTopic {
+    TopLevel,
+    Run,
+    Build,
+    EmitAsm,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,12 +252,32 @@ enum BuildOutputFormat {
 
 fn parse_cli(args: Vec<String>) -> Result<CommandLine, String> {
     match args.as_slice() {
-        [flag] if flag == "--help" || flag == "-h" => Ok(CommandLine::Help),
+        [flag] if is_help_flag(flag) => Ok(CommandLine::Help(HelpTopic::TopLevel)),
+        [flag] if flag == "--version" || flag == "-V" => Ok(CommandLine::Version),
+        [command] if command == "help" => Ok(CommandLine::Help(HelpTopic::TopLevel)),
+        [command, topic] if command == "help" => help_topic(topic).map(CommandLine::Help),
+        [command, flag] if is_help_flag(flag) => help_topic(command).map(CommandLine::Help),
+        [command, ..] if command == "help" => {
+            Err(String::from("Usage: subsea help [run|build|emit-asm]"))
+        }
         [command, rest @ ..] if command == "emit-asm" => parse_emit_asm_command(rest),
         [command, rest @ ..] if command == "run" => parse_run_command(rest),
         [command, rest @ ..] if command == "build" => parse_build_command(rest),
         [command, ..] => Err(format!("Unknown or invalid command {command:?}")),
         [] => Err(String::from("Missing command")),
+    }
+}
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
+fn help_topic(command: &str) -> Result<HelpTopic, String> {
+    match command {
+        "run" => Ok(HelpTopic::Run),
+        "build" => Ok(HelpTopic::Build),
+        "emit-asm" => Ok(HelpTopic::EmitAsm),
+        _ => Err(format!("Unknown help topic {command:?}")),
     }
 }
 
@@ -631,9 +766,7 @@ struct CompilationOutput {
 }
 
 struct CompileTimings {
-    read_source: Duration,
-    lex: Duration,
-    parse_ast: Duration,
+    load_parse: Duration,
     codegen: Duration,
 }
 
@@ -643,17 +776,11 @@ fn compile_to_asm_with_timings(
     entry_symbol: Option<&str>,
     annotate: bool,
 ) -> Result<CompilationOutput, String> {
-    let read_started = Instant::now();
     let source_path = PathBuf::from(source_path);
-    let read_source = read_started.elapsed();
-
-    let lex_started = Instant::now();
-    let lex = lex_started.elapsed();
-
-    let parse_started = Instant::now();
+    let load_started = Instant::now();
     let loaded = imports::load_program_with_origins(&source_path)?;
     let program = loaded.program;
-    let parse_ast = parse_started.elapsed();
+    let load_parse = load_started.elapsed();
 
     let codegen_started = Instant::now();
     let entry_symbol = entry_symbol.unwrap_or("_start");
@@ -670,9 +797,7 @@ fn compile_to_asm_with_timings(
     Ok(CompilationOutput {
         asm,
         timings: CompileTimings {
-            read_source,
-            lex,
-            parse_ast,
+            load_parse,
             codegen,
         },
     })
@@ -684,15 +809,16 @@ fn print_build_timings(
     total: Duration,
 ) {
     println!("Build timings:");
-    println!("  read source: {:?}", compile_timings.read_source);
-    println!("  lex:         {:?}", compile_timings.lex);
-    println!("  parse/AST:   {:?}", compile_timings.parse_ast);
-    println!("  codegen:     {:?}", compile_timings.codegen);
-    println!("  assemble:    {:?}", build_timings.assemble);
+    println!("  load/lex/parse/imports: {:?}", compile_timings.load_parse);
+    println!("  codegen:                {:?}", compile_timings.codegen);
+    println!("  assemble:               {:?}", build_timings.assemble);
     if let Some(link) = build_timings.link {
-        println!("  link:        {link:?}");
+        println!("  link:                   {link:?}");
     }
-    println!("  total:       {total:?}");
+    if let Some(objcopy) = build_timings.objcopy {
+        println!("  objcopy:                {objcopy:?}");
+    }
+    println!("  total:                  {total:?}");
 }
 
 fn exit_with_error(error: String) -> ! {
@@ -701,16 +827,19 @@ fn exit_with_error(error: String) -> ! {
     process::exit(1);
 }
 
-fn print_usage_and_exit(code: i32) -> ! {
-    eprintln!("Usage:");
-    eprintln!("  subsea run [--target|-t x86|aarch] [--runner program] <file.ss> [-- <args>...]");
-    eprintln!(
-        "  subsea build [--target|-t x86|x86-free|aarch] [--entry symbol] [--linker-script|-T script.ld] [--link-input object.o]... [--format elf|binary] [--linker program] [--timings] [-o output] <file.ss>"
-    );
-    eprintln!(
-        "  subsea emit-asm [--annotate] [--target|-t x86|x86-free|aarch] [--entry symbol] <file.ss>"
-    );
-    process::exit(code);
+fn print_help(topic: HelpTopic) {
+    let help = match topic {
+        HelpTopic::TopLevel => TOP_LEVEL_HELP,
+        HelpTopic::Run => RUN_HELP,
+        HelpTopic::Build => BUILD_HELP,
+        HelpTopic::EmitAsm => EMIT_ASM_HELP,
+    };
+    print!("{help}");
+}
+
+fn print_usage_to_stderr() {
+    eprintln!("Usage: subsea <run|build|emit-asm> [OPTIONS]");
+    eprintln!("Try `subsea --help` for more information.");
 }
 
 #[cfg(test)]
@@ -748,5 +877,39 @@ mod tests {
         assert_eq!(target, Target::AArch64Linux);
         assert_eq!(runner.as_deref(), Some("qemu-aarch64"));
         assert_eq!(args, ["argument", "--program-flag"]);
+    }
+
+    #[test]
+    fn parses_help_and_version_forms() {
+        for (args, topic) in [
+            (vec!["--help"], HelpTopic::TopLevel),
+            (vec!["-h"], HelpTopic::TopLevel),
+            (vec!["help"], HelpTopic::TopLevel),
+            (vec!["run", "--help"], HelpTopic::Run),
+            (vec!["build", "-h"], HelpTopic::Build),
+            (vec!["help", "emit-asm"], HelpTopic::EmitAsm),
+        ] {
+            let command = parse_cli(args.into_iter().map(String::from).collect()).unwrap();
+            assert!(matches!(command, CommandLine::Help(actual) if actual == topic));
+        }
+
+        for flag in ["--version", "-V"] {
+            assert!(matches!(
+                parse_cli(vec![String::from(flag)]).unwrap(),
+                CommandLine::Version
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_help_and_version_forms() {
+        for args in [
+            vec!["--help", "run"],
+            vec!["--version", "extra"],
+            vec!["help", "unknown"],
+            vec!["help", "run", "extra"],
+        ] {
+            assert!(parse_cli(args.into_iter().map(String::from).collect()).is_err());
+        }
     }
 }

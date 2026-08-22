@@ -154,11 +154,6 @@ impl Diagnostic {
         self
     }
 
-    pub fn note(mut self, note: impl Into<String>) -> Self {
-        self.notes.push(note.into());
-        self
-    }
-
     pub fn render(&self, sources: &SourceMap) -> String {
         let Some(span) = self.span else {
             return self.message.clone();
@@ -182,9 +177,13 @@ impl Diagnostic {
             + 1;
         let column = file.text[line_start..start].chars().count() + 1;
         let source_line = &file.text[line_start..line_end];
-        let marker_end = span.end.min(line_end).max(start);
+        let mut marker_end = span.end.min(line_end).max(start);
+        while marker_end > start && !file.text.is_char_boundary(marker_end) {
+            marker_end -= 1;
+        }
         let width = file.text[start..marker_end].chars().count().max(1);
 
+        let marker = format!("^{}", "~".repeat(width.saturating_sub(1)));
         let mut rendered = format!(
             "error: {}\n --> {}:{}:{}\n  |\n{} | {}\n  | {}{}",
             self.message,
@@ -194,7 +193,7 @@ impl Diagnostic {
             line_number,
             source_line,
             " ".repeat(column.saturating_sub(1)),
-            format!("^{}", "~".repeat(width.saturating_sub(1))),
+            marker,
         );
         for note in &self.notes {
             rendered.push_str(&format!("\nnote: {note}"));

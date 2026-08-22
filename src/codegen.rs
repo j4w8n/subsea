@@ -6,10 +6,9 @@ use crate::lower;
 use crate::parser::validate_program_symbols;
 use std::collections::HashSet;
 
-pub use crate::backend::{
-    Architecture, BackendError, EntryConvention, Environment, FramePointerPolicy, RuntimeOperation,
-    Target, TargetSpec,
-};
+pub use crate::backend::{Architecture, BackendError, Target};
+#[cfg(test)]
+pub use crate::backend::{EntryConvention, Environment, FramePointerPolicy, RuntimeOperation};
 
 pub fn validate_program_with_diagnostics_for_target(
     program: &Program,
@@ -31,6 +30,7 @@ pub fn validate_program_with_diagnostics_for_target(
         );
         crate::analysis::validate_label(
             label,
+            label.name == program.entry,
             &top_level_labels,
             &stack,
             target.spec().frame_pointer,
@@ -49,19 +49,19 @@ fn validate_target_registers(
 ) -> Result<(), Diagnostic> {
     for label in &program.labels {
         for (index, instruction) in label.instructions.iter().enumerate() {
-            if let Instruction::InlineAsm { architecture, .. } = instruction
-                && !inline_asm_matches_target(*architecture, target)
-            {
-                return Err(at_instruction(
-                    Diagnostic::new(format!(
-                        "{} inline assembly cannot be used with target {}",
-                        inline_asm_name(*architecture),
-                        target.name()
-                    )),
-                    origins,
-                    &label.name,
-                    index,
-                ));
+            if let Instruction::InlineAsm { architecture, .. } = instruction {
+                if !inline_asm_matches_target(*architecture, target) {
+                    return Err(at_instruction(
+                        Diagnostic::new(format!(
+                            "{} inline assembly cannot be used with target {}",
+                            inline_asm_name(*architecture),
+                            target.name()
+                        )),
+                        origins,
+                        &label.name,
+                        index,
+                    ));
+                }
             }
 
             let mut invalid = None;
@@ -97,11 +97,13 @@ fn validate_target_registers(
                 }
             }
 
-            if invalid.is_none()
-                && let Instruction::Assign {
+            if let (
+                None,
+                Instruction::Assign {
                     value: AssignmentValue::PairBinary { lhs, rhs, .. },
                     ..
-                } = instruction
+                },
+            ) = (&invalid, instruction)
             {
                 for register in [&lhs.high, &lhs.low, &rhs.high, &rhs.low] {
                     if !target.is_register(register) {
@@ -154,6 +156,7 @@ fn at_instruction(
         .map_or(diagnostic.clone(), |span| diagnostic.at(span))
 }
 
+#[cfg(test)]
 pub fn emit_target_asm_with_origins(
     program: &Program,
     target: Target,
@@ -209,10 +212,12 @@ fn render_backend_diagnostic(error: &BackendError, origins: &ProgramOrigins) -> 
     }
 }
 
+#[cfg(test)]
 pub fn emit_x86_64_asm(program: &Program, target: Target) -> Result<String, String> {
     crate::backend::x86_64::codegen::emit_x86_64_asm(program, target)
 }
 
+#[cfg(test)]
 pub fn emit_x86_64_asm_with_entry_symbol(
     program: &Program,
     target: Target,
@@ -225,22 +230,7 @@ pub fn emit_x86_64_asm_with_entry_symbol(
     )
 }
 
-pub fn emit_x86_64_asm_with_origins(
-    program: &Program,
-    target: Target,
-    entry_symbol: &str,
-    origins: &ProgramOrigins,
-) -> Result<String, Diagnostic> {
-    validate_program_with_diagnostics_for_target(program, origins, target)?;
-    crate::backend::x86_64::codegen::emit_x86_64_asm_with_origins(
-        program,
-        target,
-        entry_symbol,
-        origins,
-    )
-    .map_err(|error| render_backend_diagnostic(&error, origins))
-}
-
+#[cfg(test)]
 pub fn emit_x86_64_linux_asm(program: &Program) -> Result<String, String> {
     emit_x86_64_asm(program, Target::X86_64)
 }

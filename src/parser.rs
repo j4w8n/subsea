@@ -27,6 +27,7 @@ struct LayoutInfo {
 }
 
 impl Parser {
+    #[cfg(test)]
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
             tokens,
@@ -376,11 +377,9 @@ impl Parser {
                 let count = self.parse_usize_literal("zero byte count")?;
                 Ok(DataItem::Zero { count })
             }
-            Some(token) => {
-                return Err(format!(
-                    "Expected data item width, addr, zero, or label in data block {data_name:?}, found {token:?}"
-                ));
-            }
+            Some(token) => Err(format!(
+                "Expected data item width, addr, zero, or label in data block {data_name:?}, found {token:?}"
+            )),
             None => Err(format!(
                 "Expected data item in data block {data_name:?}, found end of input"
             )),
@@ -878,11 +877,9 @@ impl Parser {
             Some(token) => Err(format!(
                 "Expected string literal after asm architecture, found {token:?}"
             )),
-            None => {
-                return Err(String::from(
-                    "Expected string literal after asm architecture, found end of input",
-                ));
-            }
+            None => Err(String::from(
+                "Expected string literal after asm architecture, found end of input",
+            )),
         }
     }
 
@@ -907,8 +904,7 @@ impl Parser {
                     operand: Operand::Register(name),
                 }],
             }),
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<i128>()
+            Some(Token::NumberLiteral(value)) => parse_integer_value(&value, false)
                 .map(|value| Instruction::Print {
                     parts: vec![PrintPart::FormattedOperand {
                         format: PrintFormat::SignedDecimal(MemoryWidth::I64),
@@ -1270,11 +1266,11 @@ impl Parser {
                 _ => {}
             }
 
-            if let Expression::Operand(lhs) = &expression
-                && let Some(AssignmentOp::FloatBinary(_, _) | AssignmentOp::UnsupportedDivision) =
-                    self.peek().and_then(assignment_op)
+            if let (
+                Expression::Operand(lhs),
+                Some(op @ (AssignmentOp::FloatBinary(_, _) | AssignmentOp::UnsupportedDivision)),
+            ) = (&expression, self.peek().and_then(assignment_op))
             {
-                let op = self.peek().and_then(assignment_op).unwrap();
                 if matches!(op, AssignmentOp::UnsupportedDivision) {
                     self.advance();
                     return Err(String::from(
@@ -1588,14 +1584,14 @@ impl Parser {
     }
 
     fn parse_print_arg(&mut self) -> Result<PrintArg, String> {
-        if let Some(Token::Ident(name)) = self.peek().cloned()
-            && !matches!(
+        if let Some(Token::Ident(name)) = self.peek().cloned() {
+            if !matches!(
                 self.tokens.get(self.position + 1),
                 Some(Token::LBracket | Token::LocalIdent(_))
-            )
-        {
-            self.advance();
-            return Ok(PrintArg::Ident(name));
+            ) {
+                self.advance();
+                return Ok(PrintArg::Ident(name));
+            }
         }
 
         self.parse_operand().map(PrintArg::Operand)
@@ -1719,8 +1715,8 @@ impl Parser {
 
     fn parse_usize_literal(&mut self, context: &str) -> Result<usize, String> {
         match self.advance() {
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<usize>()
+            Some(Token::NumberLiteral(value)) => parse_unsigned_integer(&value)
+                .and_then(|value| usize::try_from(value).map_err(|_| ()))
                 .map_err(|_| format!("Invalid {context} {value:?}")),
             Some(Token::Ident(name)) => self.parse_layout_member_value(&name, context),
             Some(Token::Minus) => Err(format!("{context} cannot be negative")),
@@ -1731,8 +1727,8 @@ impl Parser {
 
     fn parse_buffer_count(&mut self) -> Result<usize, String> {
         let value = match self.advance() {
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<usize>()
+            Some(Token::NumberLiteral(value)) => parse_unsigned_integer(&value)
+                .and_then(|value| usize::try_from(value).map_err(|_| ()))
                 .map_err(|_| format!("Invalid buffer count {value:?}"))?,
             Some(Token::Ident(name)) => self.parse_layout_member_value(&name, "buffer count")?,
             Some(Token::Minus) => return Err(String::from("Buffer count must be greater than 0")),
@@ -1789,8 +1785,8 @@ impl Parser {
 
     fn parse_exit_code(&mut self) -> Result<u8, String> {
         let code = match self.advance() {
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<u16>()
+            Some(Token::NumberLiteral(value)) => parse_unsigned_integer(&value)
+                .and_then(|value| u16::try_from(value).map_err(|_| ()))
                 .map_err(|_| format!("Invalid exit code {value:?}"))?,
             Some(Token::Minus) => return Err(String::from("Exit code must be between 0 and 255")),
             Some(token) => return Err(format!("Expected exit code, found {token:?}")),
@@ -1845,8 +1841,7 @@ impl Parser {
                     "Expected number after '-', found end of input",
                 )),
             },
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<i128>()
+            Some(Token::NumberLiteral(value)) => parse_integer_value(&value, false)
                 .map(Operand::Immediate)
                 .map_err(|_| format!("Invalid integer literal {value:?}")),
             Some(Token::FloatLiteral(value)) => Ok(Operand::FloatLiteral(value)),
@@ -1857,15 +1852,6 @@ impl Parser {
                 Ok(Operand::Dereference { address, width })
             }
             Some(Token::Ident(name)) => self.parse_ident_operand(name),
-            Some(Token::Pointer(name)) => {
-                if is_register_name(&name) {
-                    Err(format!(
-                        "Cannot take the address of register {name}; expected a label after '&'"
-                    ))
-                } else {
-                    Ok(Operand::Pointer(name))
-                }
-            }
             Some(token) => Err(format!("Expected operand, found {token:?}")),
             None => Err(String::from("Expected operand, found end of input")),
         }?;
@@ -2017,8 +2003,7 @@ impl Parser {
                     ));
                 }
 
-                value
-                    .parse::<i128>()
+                parse_integer_value(&value, false)
                     .map(AddressTerm::Immediate)
                     .map_err(|_| format!("Invalid integer literal {value:?}"))
             }
@@ -2072,7 +2057,7 @@ impl Parser {
                 }
             }
             Some(Token::LBracket) => Err(String::from("Nested dereference is not supported yet")),
-            Some(Token::Ampersand | Token::Pointer(_)) => Err(String::from(
+            Some(Token::Ampersand) => Err(String::from(
                 "Address-of syntax is not valid inside a memory operand",
             )),
             Some(token) => Err(format!("Expected address term, found {token:?}")),
@@ -2082,8 +2067,8 @@ impl Parser {
 
     fn parse_address_scale(&mut self) -> Result<i64, String> {
         let scale = match self.advance() {
-            Some(Token::NumberLiteral(value)) => value
-                .parse::<i64>()
+            Some(Token::NumberLiteral(value)) => parse_unsigned_integer(&value)
+                .and_then(|value| i64::try_from(value).map_err(|_| ()))
                 .map_err(|_| format!("Invalid address scale {value:?}"))?,
             Some(token) => {
                 return Err(format!("Expected address scale after '*', found {token:?}"));
@@ -2396,17 +2381,28 @@ fn parse_signed_integer(value: &str, negative: bool) -> Result<i128, ()> {
 }
 
 fn parse_integer_value(value: &str, negative: bool) -> Result<i128, ()> {
-    let parsed = if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        let parsed = u128::from_str_radix(hex, 16).map_err(|_| ())?;
-        i128::try_from(parsed).map_err(|_| ())?
+    let parsed = if value.starts_with("0x") || value.starts_with("0X") {
+        i128::try_from(parse_unsigned_integer(value)?).map_err(|_| ())?
     } else {
         value.parse::<i128>().map_err(|_| ())?
     };
 
-    if negative { Ok(-parsed) } else { Ok(parsed) }
+    if negative {
+        parsed.checked_neg().ok_or(())
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn parse_unsigned_integer(value: &str) -> Result<u128, ()> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u128::from_str_radix(hex, 16).map_err(|_| ())
+    } else {
+        value.parse::<u128>().map_err(|_| ())
+    }
 }
 
 fn parse_integer_value_for_width(
@@ -2498,10 +2494,11 @@ fn validate_function_contract(
         let mut invalid = None;
         instruction.visit_operands(|operand| {
             if invalid.is_none() {
-                if let Operand::Register(name) = operand
-                    && !allowed.contains(name.as_str())
-                {
-                    invalid = Some(name.clone());
+                match operand {
+                    Operand::Register(name) if !allowed.contains(name.as_str()) => {
+                        invalid = Some(name.clone());
+                    }
+                    _ => {}
                 }
             }
         });
@@ -2572,10 +2569,10 @@ fn validate_data_names(data: &[DataDeclaration]) -> Result<(), String> {
         }
 
         for item in &declaration.items {
-            if let DataItem::Label { name } = item
-                && !names.insert(name.as_str())
-            {
-                return Err(format!("Data label {name:?} is already defined"));
+            if let DataItem::Label { name } = item {
+                if !names.insert(name.as_str()) {
+                    return Err(format!("Data label {name:?} is already defined"));
+                }
             }
         }
     }
@@ -2735,12 +2732,12 @@ fn validate_memory_address_target(
     value: &MemoryValue,
     global_symbols: &HashSet<&str>,
 ) -> Result<(), String> {
-    if let MemoryValue::Addr { target } = value
-        && !global_symbols.contains(target.as_str())
-    {
-        return Err(format!(
-            "Unknown address target {target:?} in memory declaration {declaration_name:?}"
-        ));
+    if let MemoryValue::Addr { target } = value {
+        if !global_symbols.contains(target.as_str()) {
+            return Err(format!(
+                "Unknown address target {target:?} in memory declaration {declaration_name:?}"
+            ));
+        }
     }
 
     Ok(())
@@ -2822,13 +2819,13 @@ pub fn validate_program_symbols(program: &Program) -> Result<(), String> {
 
     for declaration in data {
         for item in &declaration.items {
-            if let DataItem::Addr { target } = item
-                && !global_symbols.contains(target.as_str())
-            {
-                return Err(format!(
-                    "Unknown address target {target:?} in data block {:?}",
-                    declaration.name
-                ));
+            if let DataItem::Addr { target } = item {
+                if !global_symbols.contains(target.as_str()) {
+                    return Err(format!(
+                        "Unknown address target {target:?} in data block {:?}",
+                        declaration.name
+                    ));
+                }
             }
         }
     }
@@ -2957,51 +2954,50 @@ fn validate_instruction_symbols(
     current_label: &str,
 ) -> Result<(), String> {
     match instruction {
-        Instruction::Call { target } => {
-            if let ControlTarget::Label(target) = target
-                && !top_level_labels.contains(target.as_str())
-            {
+        Instruction::Call {
+            target: ControlTarget::Label(target),
+        } => {
+            if !top_level_labels.contains(target.as_str()) {
                 return Err(format!(
                     "call target {target:?} in label {current_label:?} must be a top-level function"
                 ));
             }
         }
-        Instruction::Jmp { target, .. } => {
-            if let ControlTarget::Label(target) = target {
-                if !labels.contains(target.as_str()) {
-                    return Err(format!(
-                        "Unknown label {target:?} in label {current_label:?}"
-                    ));
-                }
+        Instruction::Jmp {
+            target: ControlTarget::Label(target),
+            ..
+        } => {
+            if !labels.contains(target.as_str()) {
+                return Err(format!(
+                    "Unknown label {target:?} in label {current_label:?}"
+                ));
+            }
 
-                // keep top_level_labels check for defensive AST invariants
-                if !is_local_label_name(target) || top_level_labels.contains(target.as_str()) {
-                    return Err(format!(
-                        "jmp target {target:?} in label {current_label:?} must be a local label"
-                    ));
-                }
+            // keep top_level_labels check for defensive AST invariants
+            if !is_local_label_name(target) || top_level_labels.contains(target.as_str()) {
+                return Err(format!(
+                    "jmp target {target:?} in label {current_label:?} must be a local label"
+                ));
             }
         }
         Instruction::Print { parts } => {
             for part in parts {
-                if let PrintPart::Binding(name) = part
-                    && !bindings.contains(name.as_str())
-                {
-                    return Err(format!(
-                        "Unknown binding {name:?} in label {current_label:?}"
-                    ));
+                if let PrintPart::Binding(name) = part {
+                    if !bindings.contains(name.as_str()) {
+                        return Err(format!(
+                            "Unknown binding {name:?} in label {current_label:?}"
+                        ));
+                    }
                 }
             }
         }
-        Instruction::Read { dst, .. } => {
-            if let Operand::Pointer(name) = dst
-                && !memory.contains(name.as_str())
-                && !stack_buffers.contains_key(name.as_str())
-            {
-                return Err(format!(
-                    "Read destination {name:?} in label {current_label:?} must be memory or a stack buffer"
-                ));
-            }
+        Instruction::Read {
+            dst: Operand::Pointer(name),
+            ..
+        } if !memory.contains(name.as_str()) && !stack_buffers.contains_key(name.as_str()) => {
+            return Err(format!(
+                "Read destination {name:?} in label {current_label:?} must be memory or a stack buffer"
+            ));
         }
         _ => {}
     }
@@ -3180,14 +3176,15 @@ fn validate_operand_symbol(
             for term in
                 std::iter::once(&address.first).chain(address.rest.iter().map(|(_, term)| term))
             {
-                if let AddressTerm::Ident(name) = term
-                    && !memory.contains(name.as_str())
-                    && !labels.contains(name.as_str())
-                    && !stack_buffers.contains_key(name.as_str())
-                {
-                    return Err(format!(
-                        "Unknown address symbol {name:?} in label {current_label:?}"
-                    ));
+                if let AddressTerm::Ident(name) = term {
+                    if !memory.contains(name.as_str())
+                        && !labels.contains(name.as_str())
+                        && !stack_buffers.contains_key(name.as_str())
+                    {
+                        return Err(format!(
+                            "Unknown address symbol {name:?} in label {current_label:?}"
+                        ));
+                    }
                 }
             }
             Ok(())
@@ -3276,10 +3273,6 @@ fn split_format_literal(value: &str) -> Result<Vec<FormatSegment>, String> {
     segments.push(FormatSegment::Literal(current));
 
     Ok(segments)
-}
-
-fn is_register_name(s: &str) -> bool {
-    crate::register::is_lexical_register(s)
 }
 
 fn is_vector_register_name(s: &str) -> bool {

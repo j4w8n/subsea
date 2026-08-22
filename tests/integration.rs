@@ -1,9 +1,12 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static CLI_LOCK: Mutex<()> = Mutex::new(());
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn emit_asm_annotation_includes_source_statement() {
@@ -142,7 +145,7 @@ fn annotated_x86_output_is_accepted_by_as() {
 fn layouts_contracts_and_memory_alignment_run() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
-        .args(["run", "examples/layout-contract-demo.ss"])
+        .args(["run", "examples/layout-contract.ss"])
         .output()
         .expect("failed to start subsea");
 
@@ -166,22 +169,14 @@ fn compiles_and_runs_example_program() {
 }
 
 #[test]
-fn builds_aarch_core_fixture_when_cross_toolchain_is_available() {
+fn aarch64_cross_toolchain_build_objcopy_and_qemu_regression() {
     let _guard = CLI_LOCK.lock().unwrap();
-    if Command::new("aarch64-linux-gnu-as")
-        .arg("--version")
-        .output()
-        .is_err()
-        || Command::new("aarch64-linux-gnu-ld")
-            .arg("--version")
-            .output()
-            .is_err()
-    {
+    if !aarch64_tools_available() {
         return;
     }
 
-    let output_path =
-        std::env::temp_dir().join(format!("subsea-aarch-core-{}", std::process::id()));
+    let temp = TestDir::new("aarch64-regression");
+    let output_path = temp.path().join("aarch-core");
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
         .args(["build", "--target", "aarch", "-o"])
         .arg(&output_path)
@@ -195,7 +190,61 @@ fn builds_aarch_core_fixture_when_cross_toolchain_is_available() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output_path.exists());
-    let _ = std::fs::remove_file(output_path);
+
+    let copied_path = temp.path().join("aarch-core.bin");
+    let objcopy = Command::new("aarch64-linux-gnu-objcopy")
+        .args(["-O", "binary"])
+        .arg(&output_path)
+        .arg(&copied_path)
+        .output()
+        .expect("failed to start AArch64 objcopy");
+    assert!(
+        objcopy.status.success(),
+        "objcopy stderr:\n{}",
+        String::from_utf8_lossy(&objcopy.stderr)
+    );
+    assert!(!std::fs::read(copied_path).unwrap().is_empty());
+
+    let run = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["run", "--target", "aarch", "--runner", "qemu-aarch64"])
+        .arg(repo_path("tests/fixtures/main.ss"))
+        .output()
+        .expect("failed to run AArch64 regression");
+    assert!(
+        run.status.success(),
+        "AArch64 run stderr:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        run.stdout,
+        b"Hello World!\nPrinted directly!\nHello from the stack!\n"
+    );
+}
+
+fn aarch64_tools_available() -> bool {
+    let required = std::env::var("SUBSEA_REQUIRE_AARCH64_TOOLS").as_deref() == Ok("1");
+    let mut missing = Vec::new();
+    for tool in [
+        "aarch64-linux-gnu-as",
+        "aarch64-linux-gnu-ld",
+        "aarch64-linux-gnu-objcopy",
+        "qemu-aarch64",
+    ] {
+        let available = Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !available {
+            missing.push(tool);
+        }
+    }
+
+    assert!(
+        !required || missing.is_empty(),
+        "SUBSEA_REQUIRE_AARCH64_TOOLS=1 but required tools are missing: {}",
+        missing.join(", ")
+    );
+    missing.is_empty()
 }
 
 #[test]
@@ -466,6 +515,34 @@ fn imports_exported_function() {
 }
 
 #[test]
+fn rejects_direct_import_cycle() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/imports/cycle_direct.ss"])
+        .output()
+        .expect("failed to start subsea");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Import cycle involving"), "{error}");
+    assert!(error.contains("cycle_direct.ss"), "{error}");
+}
+
+#[test]
+fn rejects_indirect_import_cycle() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .args(["emit-asm", "tests/fixtures/imports/cycle_indirect_a.ss"])
+        .output()
+        .expect("failed to start subsea");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(error.contains("Import cycle involving"), "{error}");
+    assert!(error.contains("cycle_indirect_a.ss"), "{error}");
+}
+
+#[test]
 fn imports_exported_static_memory_and_data() {
     let _guard = CLI_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
@@ -624,15 +701,89 @@ fn compiles_and_runs_indexed_memory_features() {
 }
 
 #[test]
-fn help_exits_successfully() {
+fn top_level_help_and_version_use_stdout() {
     let _guard = CLI_LOCK.lock().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
-        .arg("--help")
-        .output()
-        .expect("failed to start subsea");
+    for flag in ["--help", "-h"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+            .arg(flag)
+            .output()
+            .expect("failed to start subsea");
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("x86         Stable"));
+        assert!(stdout.contains("x86-free    Experimental"));
+        assert!(stdout.contains("aarch       Experimental"));
+        assert!(stdout.contains("aarch-free  Experimental"));
+    }
+
+    for flag in ["--version", "-V"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+            .arg(flag)
+            .output()
+            .expect("failed to start subsea");
+
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("subsea {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn command_help_uses_stdout_and_documents_accepted_options() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    for (command, expected) in [
+        ("run", ["--target", "--runner", "Linux targets"]),
+        ("build", ["--timings", "--link-input", "--format binary"]),
+        ("emit-asm", ["--annotate", "--entry", "aarch-free"]),
+    ] {
+        for args in [
+            vec![command, "--help"],
+            vec![command, "-h"],
+            vec!["help", command],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+                .args(args)
+                .output()
+                .expect("failed to start subsea");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            assert!(
+                output.status.success(),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            for text in expected {
+                assert!(stdout.contains(text), "missing {text:?} in:\n{stdout}");
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_help_and_version_forms_fail_on_stderr() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    for args in [
+        vec!["--version", "extra"],
+        vec!["--help", "extra"],
+        vec!["help", "unknown"],
+        vec!["help", "run", "extra"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+            .args(args)
+            .output()
+            .expect("failed to start subsea");
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Error:"));
+    }
 }
 
 #[test]
@@ -662,6 +813,10 @@ fn build_accepts_flags_before_source_path() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Build timings:"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("load/lex/parse/imports:"));
+    assert!(!stdout.contains("  read source:"));
+    assert!(!stdout.contains("  lex:"));
 }
 
 #[test]
@@ -674,6 +829,43 @@ fn build_rejects_duplicate_timings_flag() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Timings flag was already provided"));
+}
+
+#[test]
+fn binary_build_timings_include_objcopy() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("objcopy-timings");
+    let tools = temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    write_output_tool(&tools.join("as"), "assembled");
+    write_output_tool(&tools.join("linker"), "linked");
+    write_tool(
+        &tools.join("objcopy"),
+        "for arg do out=$arg; done\nprintf 'binary' > \"$out\"",
+    );
+    let output_path = temp.path().join("kernel.bin");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .env("PATH", &tools)
+        .args(["build", "--timings", "-t", "x86-free", "--linker"])
+        .arg(tools.join("linker"))
+        .arg("-T")
+        .arg(repo_path("tests/fixtures/kernel.ld"))
+        .args(["--format", "binary", "-o"])
+        .arg(&output_path)
+        .arg(repo_path("tests/fixtures/hlt.ss"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("  objcopy:"), "stdout:\n{stdout}");
+    assert_eq!(std::fs::read(output_path).unwrap(), b"binary");
 }
 
 #[test]
@@ -1224,6 +1416,196 @@ fn run_removes_its_build_directory() {
 }
 
 #[test]
+fn failed_assembly_removes_workspace_and_preserves_output() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("assembly-failure");
+    let tools = temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    write_tool(
+        &tools.join("as"),
+        r#"out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out=$1; fi
+  shift
+done
+printf 'partial assembly' > "$out"
+printf 'assembly sentinel\n' >&2
+exit 17"#,
+    );
+    let output_path = temp.path().join("program");
+    std::fs::write(&output_path, b"original output").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .env("PATH", &tools)
+        .args(["build", "-o"])
+        .arg(&output_path)
+        .arg(repo_path("tests/fixtures/main.ss"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("assembler stage `as` failed: assembly sentinel"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), b"original output");
+    assert_no_build_or_staged_output(temp.path());
+}
+
+#[test]
+fn failed_link_removes_workspace_and_preserves_output() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("link-failure");
+    let tools = temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    write_output_tool(&tools.join("as"), "assembled");
+    let linker = tools.join("failing-linker");
+    write_tool(
+        &linker,
+        r#"out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out=$1; fi
+  shift
+done
+printf 'partial link' > "$out"
+printf 'link sentinel\n' >&2
+exit 19"#,
+    );
+    let output_path = temp.path().join("kernel.elf");
+    std::fs::write(&output_path, b"original output").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .env("PATH", &tools)
+        .args(["build", "-t", "x86-free", "--linker"])
+        .arg(&linker)
+        .arg("-T")
+        .arg(repo_path("tests/fixtures/kernel.ld"))
+        .arg("-o")
+        .arg(&output_path)
+        .arg(repo_path("tests/fixtures/hlt.ss"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains(&format!(
+            "link stage `{}` failed: link sentinel",
+            linker.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), b"original output");
+    assert_no_build_or_staged_output(temp.path());
+}
+
+#[test]
+fn failed_objcopy_removes_workspace_and_preserves_output() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("objcopy-failure");
+    let tools = temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    write_output_tool(&tools.join("as"), "assembled");
+    write_output_tool(&tools.join("linker"), "linked");
+    write_tool(
+        &tools.join("objcopy"),
+        r#"for arg do out=$arg; done
+printf 'partial binary' > "$out"
+printf 'objcopy sentinel\n' >&2
+exit 23"#,
+    );
+    let output_path = temp.path().join("kernel.bin");
+    std::fs::write(&output_path, b"original output").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .env("PATH", &tools)
+        .args(["build", "-t", "x86-free", "--linker"])
+        .arg(tools.join("linker"))
+        .arg("-T")
+        .arg(repo_path("tests/fixtures/kernel.ld"))
+        .args(["--format", "binary", "-o"])
+        .arg(&output_path)
+        .arg(repo_path("tests/fixtures/hlt.ss"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("objcopy stage `objcopy` failed: objcopy sentinel"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), b"original output");
+    assert_no_build_or_staged_output(temp.path());
+}
+
+#[test]
+fn failed_output_publication_removes_workspace_and_preserves_destination() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("publish-failure");
+    let tools = temp.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    write_output_tool(&tools.join("as"), "assembled");
+    write_output_tool(&tools.join("ld"), "linked");
+    let output_path = temp.path().join("existing-destination");
+    std::fs::create_dir(&output_path).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .env("PATH", &tools)
+        .args(["build", "-o"])
+        .arg(&output_path)
+        .arg(repo_path("tests/fixtures/main.ss"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("Failed to publish output"), "{stderr}");
+    assert!(output_path.is_dir());
+    assert_no_build_or_staged_output(temp.path());
+}
+
+#[test]
+fn run_removes_workspace_for_all_runner_results() {
+    let _guard = CLI_LOCK.lock().unwrap();
+    let temp = TestDir::new("runner-cleanup");
+    let successful_runner = temp.path().join("successful-runner");
+    let failing_runner = temp.path().join("failing-runner");
+    write_tool(&successful_runner, "exit 0");
+    write_tool(&failing_runner, "exit 29");
+
+    for (runner, expected_code) in [(&successful_runner, 0), (&failing_runner, 29)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+            .current_dir(temp.path())
+            .args(["run", "--runner"])
+            .arg(runner)
+            .arg(repo_path("tests/fixtures/main.ss"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_code));
+        assert_no_build_or_staged_output(temp.path());
+    }
+
+    let missing_runner = temp.path().join("missing-runner");
+    let output = Command::new(env!("CARGO_BIN_EXE_subsea"))
+        .current_dir(temp.path())
+        .args(["run", "--runner"])
+        .arg(&missing_runner)
+        .arg(repo_path("tests/fixtures/main.ss"))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("runner"));
+    assert_no_build_or_staged_output(temp.path());
+}
+
+#[test]
 fn rejects_unknown_symbols_before_assembly() {
     let _guard = CLI_LOCK.lock().unwrap();
     let source = "main: { jmp missing }\n";
@@ -1264,4 +1646,86 @@ fn remove_build_dirs<'a>(names: impl Iterator<Item = &'a String>) {
         let path = Path::new("target").join("subsea").join(name);
         let _ = std::fs::remove_dir_all(path);
     }
+}
+
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new(label: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "subsea-{label}-{}-{nanos}-{counter}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn repo_path(path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+}
+
+fn write_output_tool(path: &Path, contents: &str) {
+    write_tool(
+        path,
+        &format!(
+            r#"out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then shift; out=$1; fi
+  shift
+done
+printf '{contents}' > "$out""#
+        ),
+    );
+}
+
+fn write_tool(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+fn assert_no_build_or_staged_output(path: &Path) {
+    assert!(build_dirs_in(path).is_empty());
+    let entries = std::fs::read_dir(path).unwrap();
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        assert!(
+            !name.to_string_lossy().contains(".subsea-build-"),
+            "staged output remained at {}",
+            entry.path().display()
+        );
+    }
+}
+
+fn build_dirs_in(path: &Path) -> Vec<PathBuf> {
+    let path = path.join("target").join("subsea");
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("build-"))
+        .map(|entry| entry.path())
+        .collect()
 }

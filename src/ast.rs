@@ -343,14 +343,6 @@ fn visit_assignment_value_operands_mut(
 }
 
 impl Operand {
-    pub fn unconverted(&self) -> &Operand {
-        match self {
-            Operand::Converted { operand, .. } => operand.unconverted(),
-            Operand::Cast { operand, .. } => operand.unconverted(),
-            operand => operand,
-        }
-    }
-
     pub fn visit_registers(&self, mut visit: impl FnMut(&str)) {
         match self {
             Self::Register(name) => visit(name),

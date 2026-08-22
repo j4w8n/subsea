@@ -1,16 +1,16 @@
-use subsea::ast::{
+use crate::ast::{
     AssignmentTarget, AssignmentValue, BindingValue, CompareOp, Condition, ConditionExpr,
     ControlTarget, DataDeclaration, DataItem, ExprOp, Expression, FloatMathOp,
     InlineAsmArchitecture, Instruction, IntrinsicOp, MathOp, MemoryDeclaration, MemoryValue,
     MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart, ReadSource, RegisterPair,
     StringInitializer, StringProperty, WidthConversion,
 };
-use subsea::diagnostic::SourceId;
-use subsea::grammar::Token;
-use subsea::lexer::lex_with_spans;
-use subsea::parser::{Parser, validate_program_symbols};
+use crate::diagnostic::SourceId;
+use crate::grammar::Token;
+use crate::lexer::lex_with_spans;
+use crate::parser::{Parser, validate_program_symbols};
 
-fn parse(tokens: Vec<Token>) -> Result<subsea::ast::Program, String> {
+fn parse(tokens: Vec<Token>) -> Result<crate::ast::Program, String> {
     Parser::new(tokens).parse_program()
 }
 
@@ -58,10 +58,6 @@ fn tfloat(value: &str) -> Token {
 
 fn text(value: &str) -> Token {
     Token::Text(s(value))
-}
-
-fn tptr(value: &str) -> Token {
-    Token::Pointer(s(value))
 }
 
 fn treg(value: &str) -> Token {
@@ -276,6 +272,85 @@ fn parses_integer_binding() {
                 width: None,
             },
         }
+    );
+}
+
+#[test]
+fn parses_hex_literals_in_integer_contexts() {
+    let program = parse(vec![
+        Token::Data,
+        tid("bytes"),
+        Token::Section,
+        text(".data"),
+        Token::Align,
+        tnum("0x8"),
+        Token::LBrace,
+        Token::Zero,
+        tnum("0x10"),
+        Token::RBrace,
+        Token::Mem,
+        tid("buffer"),
+        Token::Colon,
+        tid("u8"),
+        Token::LParen,
+        tnum("0x20"),
+        Token::RParen,
+        tid("main"),
+        Token::Colon,
+        Token::LBrace,
+        treg("rax"),
+        Token::Equals,
+        tnum("0x2a"),
+        treg("rbx"),
+        Token::Equals,
+        Token::LBracket,
+        treg("rax"),
+        Token::Plus,
+        tnum("0x10"),
+        Token::RBracket,
+        treg("rcx"),
+        Token::Equals,
+        Token::LBracket,
+        treg("rax"),
+        Token::Plus,
+        treg("rbx"),
+        Token::Star,
+        tnum("0x8"),
+        Token::RBracket,
+        tid("linux"),
+        tlocal("print"),
+        tnum("0x2a"),
+        tid("linux"),
+        tlocal("exit"),
+        tnum("0xff"),
+        Token::RBrace,
+    ])
+    .unwrap();
+
+    assert_eq!(program.data[0].align, Some(8));
+    assert_eq!(program.data[0].items, vec![DataItem::Zero { count: 16 }]);
+    assert!(matches!(
+        program.memory[0],
+        MemoryDeclaration::Buffer { count: 32, .. }
+    ));
+    assert!(matches!(
+        program.labels[0].instructions[0],
+        Instruction::Assign {
+            value: AssignmentValue::Operand(Operand::Immediate(42)),
+            ..
+        }
+    ));
+    assert!(matches!(
+        program.labels[0].instructions[3],
+        Instruction::Print { ref parts }
+            if parts == &vec![PrintPart::FormattedOperand {
+                format: PrintFormat::SignedDecimal(MemoryWidth::I64),
+                operand: Operand::Immediate(42),
+            }]
+    ));
+    assert_eq!(
+        program.labels[0].instructions[4],
+        Instruction::Exit { code: 255 }
     );
 }
 
@@ -597,7 +672,8 @@ fn parses_stack_string_slice() {
         Token::Equals,
         Token::Slice,
         Token::LParen,
-        tptr("buf"),
+        Token::Ampersand,
+        tid("buf"),
         Token::Comma,
         treg("rax"),
         Token::RParen,
@@ -681,7 +757,8 @@ fn parses_read_from_stdin() {
         Token::LParen,
         Token::Stdin,
         Token::Comma,
-        tptr("buf"),
+        Token::Ampersand,
+        tid("buf"),
         Token::Comma,
         tnum("1024"),
         Token::RParen,
@@ -826,7 +903,7 @@ fn parses_unary_bitwise_not_assignment() {
         Instruction::Assign {
             dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::BitwiseUnary {
-                op: subsea::ast::BitwiseUnaryOp::Not,
+                op: crate::ast::BitwiseUnaryOp::Not,
                 operand: reg("rbx"),
             },
         }
@@ -1004,11 +1081,11 @@ fn parses_indexed_memory_operand() {
         Instruction::Assign {
             dst: AssignmentTarget::Operand(reg("rax")),
             value: AssignmentValue::Operand(Operand::Dereference {
-                address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Ident(s("values")),
+                address: crate::ast::Address {
+                    first: crate::ast::AddressTerm::Ident(s("values")),
                     rest: vec![(
-                        subsea::ast::AddressOperator::Add,
-                        subsea::ast::AddressTerm::ScaledRegister {
+                        crate::ast::AddressOperator::Add,
+                        crate::ast::AddressTerm::ScaledRegister {
                             register: s("r8"),
                             scale: 8,
                         },
@@ -1134,8 +1211,8 @@ fn parses_string_bytes_assignment_to_raw_memory() {
         program.labels[0].instructions,
         vec![Instruction::Assign {
             dst: AssignmentTarget::Operand(Operand::Dereference {
-                address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Register(s("rax")),
+                address: crate::ast::Address {
+                    first: crate::ast::AddressTerm::Register(s("rax")),
                     rest: Vec::new(),
                 },
                 width: None,
@@ -1163,11 +1240,11 @@ fn parses_string_bytes_assignment_to_declared_memory_index() {
         program.labels[0].instructions,
         vec![Instruction::Assign {
             dst: AssignmentTarget::Operand(Operand::Dereference {
-                address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Ident(s("buf")),
+                address: crate::ast::Address {
+                    first: crate::ast::AddressTerm::Ident(s("buf")),
                     rest: vec![(
-                        subsea::ast::AddressOperator::Add,
-                        subsea::ast::AddressTerm::Immediate(0)
+                        crate::ast::AddressOperator::Add,
+                        crate::ast::AddressTerm::Immediate(0)
                     )],
                 },
                 width: None,
@@ -1451,11 +1528,11 @@ fn parses_indirect_jump_memory_operand() {
         program.labels[0].instructions,
         vec![Instruction::Jmp {
             target: ControlTarget::Operand(Operand::Dereference {
-                address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Ident(s("handlers")),
+                address: crate::ast::Address {
+                    first: crate::ast::AddressTerm::Ident(s("handlers")),
                     rest: vec![(
-                        subsea::ast::AddressOperator::Add,
-                        subsea::ast::AddressTerm::ScaledRegister {
+                        crate::ast::AddressOperator::Add,
+                        crate::ast::AddressTerm::ScaledRegister {
                             register: s("rax"),
                             scale: 8,
                         }
@@ -1843,7 +1920,7 @@ fn parses_top_level_bare_label() {
 
     assert_eq!(
         program.labels[1],
-        subsea::ast::Label {
+        crate::ast::Label {
             name: s("skip"),
             instructions: Vec::new(),
         }
@@ -2231,8 +2308,8 @@ fn parses_xmm_float_memory_assignment() {
         Instruction::Assign {
             dst: AssignmentTarget::Operand(reg("xmm0")),
             value: AssignmentValue::Operand(Operand::Dereference {
-                address: subsea::ast::Address {
-                    first: subsea::ast::AddressTerm::Ident(s("ratio")),
+                address: crate::ast::Address {
+                    first: crate::ast::AddressTerm::Ident(s("ratio")),
                     rest: Vec::new(),
                 },
                 width: Some(MemoryWidth::F64),
@@ -2548,11 +2625,11 @@ fn rejects_label_that_conflicts_with_memory_name() {
     ])
     .unwrap();
 
-    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+    let error = crate::parser::validate_program_symbols(&program).unwrap_err();
 
     assert_eq!(error, "Label \"count\" conflicts with top-level memory");
     program.labels.pop();
-    subsea::parser::validate_program_symbols(&program).unwrap();
+    crate::parser::validate_program_symbols(&program).unwrap();
 }
 
 #[test]
@@ -2571,7 +2648,7 @@ fn rejects_binding_that_conflicts_with_top_level_label() {
     ])
     .unwrap();
 
-    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+    let error = crate::parser::validate_program_symbols(&program).unwrap_err();
 
     assert_eq!(
         error,
@@ -2597,7 +2674,7 @@ fn rejects_stack_variable_that_conflicts_with_top_level_label() {
     ])
     .unwrap();
 
-    let error = subsea::parser::validate_program_symbols(&program).unwrap_err();
+    let error = crate::parser::validate_program_symbols(&program).unwrap_err();
 
     assert_eq!(
         error,

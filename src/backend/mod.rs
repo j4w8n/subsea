@@ -18,7 +18,7 @@ impl AnnotationCollector {
 
     pub(crate) fn source_instruction(
         &mut self,
-        asm: &String,
+        asm: &str,
         comment: &str,
         origins: &ProgramOrigins,
         label: &str,
@@ -35,7 +35,7 @@ impl AnnotationCollector {
 
     pub(crate) fn source_declaration(
         &mut self,
-        asm: &String,
+        asm: &str,
         comment: &str,
         origins: &ProgramOrigins,
         name: &str,
@@ -51,7 +51,7 @@ impl AnnotationCollector {
 
     pub(crate) fn source_label(
         &mut self,
-        asm: &String,
+        asm: &str,
         comment: &str,
         origins: &ProgramOrigins,
         label: &str,
@@ -65,7 +65,7 @@ impl AnnotationCollector {
         self.source_span(asm, comment, origins, span);
     }
 
-    pub(crate) fn generated(&mut self, asm: &String, comment: &str) {
+    pub(crate) fn generated(&mut self, asm: &str, comment: &str) {
         if self.enabled {
             self.events
                 .push((asm.len(), self.events.len(), format!("{comment}\n")));
@@ -83,7 +83,7 @@ impl AnnotationCollector {
         }
     }
 
-    fn source_span(&mut self, asm: &String, comment: &str, origins: &ProgramOrigins, span: Span) {
+    fn source_span(&mut self, asm: &str, comment: &str, origins: &ProgramOrigins, span: Span) {
         let Some(file) = origins.sources().get(span.source) else {
             return;
         };

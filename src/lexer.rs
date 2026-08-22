@@ -164,7 +164,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Token::ISlash,
                     Token::IPercent,
                 )
-                .or_else(|| Some(Token::Ident(s))),
+                .or(Some(Token::Ident(s))),
                 "call" => Some(Token::Call),
                 "const" => Some(Token::Const),
                 "addr" => Some(Token::Addr),
@@ -172,10 +172,12 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                 "data" => Some(Token::Data),
                 "exit" => Some(Token::Exit),
                 "export" => Some(Token::Export),
-                "f32" => prefixed_float_operator(chars, MemoryWidthTokens::F32)
-                    .or_else(|| Some(Token::Ident(s))),
-                "f64" => prefixed_float_operator(chars, MemoryWidthTokens::F64)
-                    .or_else(|| Some(Token::Ident(s))),
+                "f32" => {
+                    prefixed_float_operator(chars, MemoryWidthTokens::F32).or(Some(Token::Ident(s)))
+                }
+                "f64" => {
+                    prefixed_float_operator(chars, MemoryWidthTokens::F64).or(Some(Token::Ident(s)))
+                }
                 "from" => Some(Token::From),
                 "in" => Some(Token::In),
                 "import" => Some(Token::Import),
@@ -207,7 +209,7 @@ pub fn get_next_token(chars: &mut Peekable<Chars>) -> Result<Option<Token>, Stri
                     Token::USlash,
                     Token::UPercent,
                 )
-                .or_else(|| Some(Token::Ident(s))),
+                .or(Some(Token::Ident(s))),
                 register if is_lexical_register(register) => Some(Token::Register(s)),
                 _ => Some(Token::Ident(s)),
             }
@@ -259,9 +261,10 @@ fn leading_ignored_len(source: &str) -> usize {
     let mut offset = 0;
 
     loop {
-        while let Some(character) = source[offset..].chars().next()
-            && character.is_whitespace()
-        {
+        while let Some(character) = source[offset..].chars().next() {
+            if !character.is_whitespace() {
+                break;
+            }
             offset += character.len_utf8();
         }
 
@@ -469,9 +472,7 @@ fn lex_number(first: char, chars: &mut Peekable<Chars<'_>>) -> Result<Token, Str
         let mut clone = chars.clone();
         clone.next();
 
-        if let Some(next_after_dot) = clone.peek()
-            && next_after_dot.is_ascii_digit()
-        {
+        if clone.peek().is_some_and(|next| next.is_ascii_digit()) {
             num_str.push(chars.next().unwrap());
 
             while let Some(&c) = chars.peek() {

@@ -3,15 +3,18 @@ use super::{
     family as register_family, is_extended as is_extended_register,
     is_high_byte as is_high_byte_register, is_xmm as is_xmm_register, width as register_width,
 };
+#[cfg(test)]
+use crate::analysis::validate_label;
 use crate::analysis::{
     FloatBinding, ImmediateDestination, StackFrame, StackSlot, StringBinding, StringTable, Width,
     build_stack_frame_from_layout, collect_ir_string_bindings, memory_width_bits,
     stack_buffer_slot, stack_scalar_slot, stack_string_slot, validate_float_literal,
-    validate_float_width, validate_label,
+    validate_float_width,
 };
+#[cfg(test)]
+use crate::ast::Program;
 use crate::ast::{
     BitwiseUnaryOp, CompareOp, ExprOp, FloatMathOp, IntrinsicOp, MathOp, MemoryWidth, PairBinaryOp,
-    Program,
 };
 use crate::backend::{
     AnnotationCollector, Architecture, BackendError, RuntimeEmitter, RuntimeOperation, Target,
@@ -19,16 +22,19 @@ use crate::backend::{
 };
 use crate::diagnostic::ProgramOrigins;
 use crate::ir;
+#[cfg(test)]
 use crate::lower;
 use crate::platform::linux;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 
 struct LabelSymbols<'a> {
     source_entry: &'a str,
     entry_symbol: &'a str,
 }
 
-impl<'a> LabelSymbols<'a> {
+impl LabelSymbols<'_> {
     fn emit_label(&self, source_label: &str) -> String {
         if source_label == self.source_entry {
             self.entry_symbol.to_string()
@@ -207,27 +213,18 @@ impl RuntimeEmitter for X86RuntimeEmitter<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn emit_x86_64_asm(program: &Program, target: Target) -> Result<String, String> {
     emit_x86_64_asm_with_entry_symbol(program, target, "_start")
 }
 
+#[cfg(test)]
 pub(crate) fn emit_x86_64_asm_with_entry_symbol(
     program: &Program,
     target: Target,
     entry_symbol: &str,
 ) -> Result<String, String> {
     emit_x86_64_asm_impl(program, target, entry_symbol, None).map_err(|error| error.message)
-}
-
-pub(crate) fn emit_x86_64_asm_with_origins(
-    program: &Program,
-    target: Target,
-    entry_symbol: &str,
-    origins: &ProgramOrigins,
-) -> Result<String, BackendError> {
-    let semantic_ir = lower::lower_program(program)
-        .map_err(|error| BackendError::new(error.message).at(error.label, error.instruction))?;
-    emit_ir_x86_64_asm_with_origins(&semantic_ir, target, entry_symbol, origins, false)
 }
 
 #[cfg(test)]
@@ -239,6 +236,7 @@ pub(crate) fn emit_ir_x86_64_asm(
     emit_ir_x86_64_asm_impl(program, target, entry_symbol, None, false)
 }
 
+#[cfg(test)]
 fn emit_x86_64_asm_impl(
     program: &Program,
     target: Target,
@@ -252,6 +250,7 @@ fn emit_x86_64_asm_impl(
     Ok(assembly)
 }
 
+#[cfg(test)]
 fn validate_x86_ast_labels(program: &Program, target: Target) -> Result<(), BackendError> {
     let top_level_labels: HashSet<&str> = program
         .labels
@@ -266,6 +265,7 @@ fn validate_x86_ast_labels(program: &Program, target: Target) -> Result<(), Back
         );
         validate_label(
             label,
+            label.name == program.entry,
             &top_level_labels,
             &stack,
             target.spec().frame_pointer,
@@ -1498,15 +1498,16 @@ fn emit_data(
             asm::top_level_directive(asm, format_args!(".balign {align}"));
         }
         match declaration {
-            ir::MemoryDeclaration::Aligned { declaration, .. } => match declaration.as_ref() {
-                inner => emit_data(
+            ir::MemoryDeclaration::Aligned { declaration, .. } => {
+                let inner = declaration.as_ref();
+                emit_data(
                     asm,
                     std::slice::from_ref(inner),
                     labels,
                     annotations,
                     origins,
-                ),
-            },
+                )
+            }
             ir::MemoryDeclaration::Scalar { name, width, value } => {
                 asm::label(asm, name);
                 asm::scalar(asm, width.directive(), format_data_scalar(*width, *value));
@@ -2681,19 +2682,18 @@ fn emit_ir_operand_assignment(
 ) -> Result<(), String> {
     if let ir::Operand::Name(name) = src {
         let key = (label_name.to_owned(), name.clone());
-        if !strings.integers.contains_key(&key)
-            && !strings.float_bindings.contains_key(&key)
-            && let Some(binding) = strings.bindings.get(&key)
-        {
-            if !matches!(dst, ir::Operand::Memory { .. }) {
-                return Err(format!(
-                    "String binding {name:?} in label {label_name:?} cannot be used as an operand"
-                ));
+        if !strings.integers.contains_key(&key) && !strings.float_bindings.contains_key(&key) {
+            if let Some(binding) = strings.bindings.get(&key) {
+                if !matches!(dst, ir::Operand::Memory { .. }) {
+                    return Err(format!(
+                        "String binding {name:?} in label {label_name:?} cannot be used as an operand"
+                    ));
+                }
+                if binding.value.is_empty() {
+                    return Err(String::from("String byte assignment cannot be empty"));
+                }
+                return emit_ir_string_bytes_assignment(asm, dst, &binding.value, stack);
             }
-            if binding.value.is_empty() {
-                return Err(String::from("String byte assignment cannot be empty"));
-            }
-            return emit_ir_string_bytes_assignment(asm, dst, &binding.value, stack);
         }
     }
     if matches!(
@@ -2892,7 +2892,7 @@ fn emit_ir_special_copy(
                     ));
                 }
                 let src_width = ir_operand_memory_width(operand, strings, stack)
-                    .or_else(|| match &**operand {
+                    .or(match &**operand {
                         ir::Operand::TargetRegister(_) => Some(MemoryWidth::F64),
                         _ => None,
                     })
@@ -3915,33 +3915,35 @@ fn validate_ir_copy_assignment(
         ));
     }
 
-    if let (Some(src_width), Some(dst_width)) = (
+    match (
         ir_operand_width(src, strings, label_name, stack),
         ir_operand_width(dst, strings, label_name, stack),
-    ) && src_width != dst_width
-    {
-        if matches!(src, ir::Operand::TargetRegister(_))
-            && matches!(dst, ir::Operand::TargetRegister(_))
-        {
-            if src_width.bits() < dst_width.bits() {
+    ) {
+        (Some(src_width), Some(dst_width)) if src_width != dst_width => {
+            if matches!(src, ir::Operand::TargetRegister(_))
+                && matches!(dst, ir::Operand::TargetRegister(_))
+            {
+                if src_width.bits() < dst_width.bits() {
+                    return Err(format!(
+                        "Cannot use {}-bit source with {}-bit destination",
+                        src_width.bits(),
+                        dst_width.bits()
+                    ));
+                }
+            } else if src_width.bits() > dst_width.bits()
+                && matches!(src, ir::Operand::TargetRegister(_))
+            {
+                // Register and explicit-memory destinations use the source's
+                // narrow alias for the same truncating move as the AST backend.
+            } else {
                 return Err(format!(
                     "Cannot use {}-bit source with {}-bit destination",
                     src_width.bits(),
                     dst_width.bits()
                 ));
             }
-        } else if src_width.bits() > dst_width.bits()
-            && matches!(src, ir::Operand::TargetRegister(_))
-        {
-            // Register and explicit-memory destinations use the source's
-            // narrow alias for the same truncating move as the AST backend.
-        } else {
-            return Err(format!(
-                "Cannot use {}-bit source with {}-bit destination",
-                src_width.bits(),
-                dst_width.bits()
-            ));
         }
+        _ => {}
     }
     if let Some(value) = ir_operand_immediate_value(src, strings, label_name) {
         if matches!(dst, ir::Operand::Memory { width: None, .. })
@@ -4634,16 +4636,18 @@ fn validate_ir_compare_operands(
             "Comparison cannot use memory for both operands",
         ));
     }
-    if let (Some(lhs_width), Some(rhs_width)) = (
+    match (
         ir_operand_width(lhs, strings, label_name, stack),
         ir_operand_width(rhs, strings, label_name, stack),
-    ) && lhs_width != rhs_width
-    {
-        return Err(format!(
-            "Cannot compare {}-bit operand with {}-bit operand",
-            lhs_width.bits(),
-            rhs_width.bits()
-        ));
+    ) {
+        (Some(lhs_width), Some(rhs_width)) if lhs_width != rhs_width => {
+            return Err(format!(
+                "Cannot compare {}-bit operand with {}-bit operand",
+                lhs_width.bits(),
+                rhs_width.bits()
+            ));
+        }
+        _ => {}
     }
     if let (Some(value), Some(width)) = (
         ir_operand_immediate_value(rhs, strings, label_name),
@@ -4719,11 +4723,11 @@ fn emit_ir_setcc_result(
     let width = ir_operand_width(dst, strings, label_name, stack).ok_or_else(|| {
         String::from("Boolean assignment destination must have a known integer width")
     })?;
-    if let ir::Operand::TargetRegister(register) = dst
-        && width == Width::Bits8
-    {
-        asm::instruction(asm, format_args!("{set_opcode} {register}"));
-        return Ok(());
+    if width == Width::Bits8 {
+        if let ir::Operand::TargetRegister(register) = dst {
+            asm::instruction(asm, format_args!("{set_opcode} {register}"));
+            return Ok(());
+        }
     }
 
     let temp = if !ir_operand_address_uses_register_family(
@@ -4918,14 +4922,15 @@ fn emit_ir_integer_sqrt_intrinsic(
             "Integer sqrt intrinsic operand must be an integer operand",
         ));
     }
-    if let Some(src_width) = ir_operand_width(src, strings, label_name, stack)
-        && src_width != expected
-    {
-        return Err(format!(
-            "Integer sqrt intrinsic operand must be {}-bit, found {}-bit operand",
-            expected.bits(),
-            src_width.bits()
-        ));
+    match ir_operand_width(src, strings, label_name, stack) {
+        Some(src_width) if src_width != expected => {
+            return Err(format!(
+                "Integer sqrt intrinsic operand must be {}-bit, found {}-bit operand",
+                expected.bits(),
+                src_width.bits()
+            ));
+        }
+        _ => {}
     }
 
     if let Some(value) = ir_operand_immediate_value(src, strings, label_name) {
@@ -5381,14 +5386,15 @@ fn validate_ir_integer_min_max_operand(
     {
         return Err(format!("{name} must be an integer operand"));
     }
-    if let Some(width) = ir_operand_width(operand, strings, label_name, stack)
-        && width != expected
-    {
-        return Err(format!(
-            "{name} must be {}-bit, found {}-bit operand",
-            expected.bits(),
-            width.bits()
-        ));
+    match ir_operand_width(operand, strings, label_name, stack) {
+        Some(width) if width != expected => {
+            return Err(format!(
+                "{name} must be {}-bit, found {}-bit operand",
+                expected.bits(),
+                width.bits()
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -5403,13 +5409,14 @@ fn validate_ir_wide_math_operand(
     if matches!(operand, ir::Operand::Pointer(_)) {
         return Err(format!("{name} cannot be an address-of operand"));
     }
-    if let Some(width) = ir_operand_width(operand, strings, label_name, stack)
-        && width != Width::Bits64
-    {
-        return Err(format!(
-            "{name} must be 64-bit, found {}-bit operand",
-            width.bits()
-        ));
+    match ir_operand_width(operand, strings, label_name, stack) {
+        Some(width) if width != Width::Bits64 => {
+            return Err(format!(
+                "{name} must be 64-bit, found {}-bit operand",
+                width.bits()
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }

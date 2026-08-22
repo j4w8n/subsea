@@ -309,7 +309,7 @@ fn lower_value(
 ) -> Result<ir::Value, LoweringError> {
     match value {
         AssignmentValue::Operand(operand) => Ok(ir::Value::Operand(lower_operand(operand))),
-        AssignmentValue::Expression(expression) => lower_expression(expression, label, index),
+        AssignmentValue::Expression(expression) => lower_expression(expression),
         AssignmentValue::Binary { op, lhs, rhs } => Ok(ir::Value::Binary {
             op: *op,
             lhs: lower_operand(lhs),
@@ -389,17 +389,13 @@ fn lower_print_part(part: &crate::ast::PrintPart) -> ir::PrintPart {
     }
 }
 
-fn lower_expression(
-    expression: &Expression,
-    label: &str,
-    index: usize,
-) -> Result<ir::Value, LoweringError> {
+fn lower_expression(expression: &Expression) -> Result<ir::Value, LoweringError> {
     match expression {
         Expression::Operand(operand) => Ok(ir::Value::Operand(lower_operand(operand))),
         Expression::Binary { op, lhs, rhs } => Ok(ir::Value::Expression {
             op: *op,
-            lhs: Box::new(lower_expression(lhs, label, index)?),
-            rhs: Box::new(lower_expression(rhs, label, index)?),
+            lhs: Box::new(lower_expression(lhs)?),
+            rhs: Box::new(lower_expression(rhs)?),
         }),
     }
 }

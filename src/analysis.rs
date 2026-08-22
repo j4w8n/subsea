@@ -130,15 +130,16 @@ pub(crate) fn collect_ir_string_bindings(
                         }
                     }
                 }
-                crate::ir::Instruction::StackString { name, value } => {
-                    if let crate::ir::StringInitializer::Literal(value) = value {
-                        let binding = StringBinding {
-                            asm_label: format!(".Lstr_{}_{}", label.name, name),
-                            value: value.clone(),
-                        };
-                        all.push(binding.clone());
-                        stack_strings.insert((label.name.clone(), name.clone()), binding);
-                    }
+                crate::ir::Instruction::StackString {
+                    name,
+                    value: crate::ir::StringInitializer::Literal(value),
+                } => {
+                    let binding = StringBinding {
+                        asm_label: format!(".Lstr_{}_{}", label.name, name),
+                        value: value.clone(),
+                    };
+                    all.push(binding.clone());
+                    stack_strings.insert((label.name.clone(), name.clone()), binding);
                 }
                 _ => {}
             }
@@ -212,9 +213,7 @@ fn collect_ir_instruction_float_literals(
         _ => {}
     }
     for operand in operands {
-        if let crate::ir::Operand::FloatLiteral(value) = operand
-            && let Some(width) = width
-        {
+        if let (crate::ir::Operand::FloatLiteral(value), Some(width)) = (operand, width) {
             collect_float_literal_value(floats, float_literals, label_name, width, value)?;
         }
     }
@@ -442,17 +441,19 @@ pub(crate) fn build_stack_frame_from_layout(
 
 pub(crate) fn validate_label(
     label: &Label,
+    is_entry: bool,
     top_level_labels: &HashSet<&str>,
     stack: &StackFrame,
     frame_pointer: &str,
     exit_syscall: Option<(u64, &str, &str)>,
 ) -> Result<(), String> {
     validate_stack_register_use(label, stack, frame_pointer)?;
-    validate_label_control_flow(label, top_level_labels, exit_syscall)
+    validate_label_control_flow(label, is_entry, top_level_labels, exit_syscall)
 }
 
 fn validate_label_control_flow(
     label: &Label,
+    is_entry: bool,
     top_level_labels: &HashSet<&str>,
     exit_syscall: Option<(u64, &str, &str)>,
 ) -> Result<(), String> {
@@ -477,13 +478,14 @@ fn validate_label_control_flow(
             ));
         }
 
-        if let Some(previous_depth) = instruction_depths.insert(index, depth)
-            && previous_depth != depth
-        {
-            return Err(format!(
-                "Function {:?} reaches instruction {index} with conflicting stack depths {previous_depth} and {depth}",
-                label.name
-            ));
+        match instruction_depths.insert(index, depth) {
+            Some(previous_depth) if previous_depth != depth => {
+                return Err(format!(
+                    "Function {:?} reaches instruction {index} with conflicting stack depths {previous_depth} and {depth}",
+                    label.name
+                ));
+            }
+            _ => {}
         }
 
         if !visited.insert((index, depth)) {
@@ -492,23 +494,39 @@ fn validate_label_control_flow(
 
         let Some(instruction) = label.instructions.get(index) else {
             if depth != 0 {
-                return Err(format!(
-                    "Function {:?} can fall through with unbalanced manual stack depth {depth}. Pop pushed values before the function ends, or use `exit` if this path terminates the process.",
-                    label.name
-                ));
+                return Err(if is_entry {
+                    format!(
+                        "Process entry {:?} can fall through with unbalanced manual stack depth {depth}. Pop pushed values before the entry ends, or use `exit` if this path terminates the process.",
+                        label.name
+                    )
+                } else {
+                    format!(
+                        "Function {:?} can fall through with unbalanced manual stack depth {depth}. Pop pushed values before the function ends, or use `exit` if this path terminates the process.",
+                        label.name
+                    )
+                });
             }
 
-            return Err(format!(
-                "Function {:?} can fall through. End this path with `ret`, `exit`, or an unconditional local `jmp` to code that does.",
-                label.name
-            ));
+            return Err(if is_entry {
+                format!(
+                    "Process entry {:?} can fall through. End this path with `exit` or an unconditional local `jmp` to code that does.",
+                    label.name
+                )
+            } else {
+                format!(
+                    "Function {:?} can fall through. End this path with `ret`, `exit`, or an unconditional local `jmp` to code that does.",
+                    label.name
+                )
+            });
         };
 
         match instruction {
             Instruction::Call { target } => {
-                if let ControlTarget::Label(target) = target
-                    && !top_level_labels.contains(target.as_str())
-                {
+                if let ControlTarget::Label(target) = target {
+                    if top_level_labels.contains(target.as_str()) {
+                        pending.push_back((index + 1, depth));
+                        continue;
+                    }
                     return Err(format!(
                         "call target {target:?} in function {:?} must be a top-level function",
                         label.name
@@ -517,6 +535,12 @@ fn validate_label_control_flow(
                 pending.push_back((index + 1, depth));
             }
             Instruction::Ret => {
+                if is_entry {
+                    return Err(format!(
+                        "Process entry {:?} cannot return. End this path with `exit` or an unconditional local `jmp` to code that does.",
+                        label.name
+                    ));
+                }
                 if depth != 0 {
                     return Err(format!(
                         "Function {:?} cannot ret with unbalanced manual stack depth {depth}. Pop pushed values before the function ends, or use `exit` if this path terminates the process.",
@@ -624,24 +648,28 @@ fn validate_instruction_does_not_use_frame_pointer(
     label_name: &str,
     frame_pointer: &str,
 ) -> Result<(), String> {
-    if let Instruction::Assign {
-        dst: AssignmentTarget::RegisterPair(RegisterPair { high, low }),
-        ..
-    } = instruction
-        && (high == frame_pointer || low == frame_pointer)
-    {
+    let destination_uses_frame_pointer = matches!(
+        instruction,
+        Instruction::Assign {
+            dst: AssignmentTarget::RegisterPair(RegisterPair { high, low }),
+            ..
+        } if high == frame_pointer || low == frame_pointer
+    );
+    if destination_uses_frame_pointer {
         return Err(format!(
             "Label {label_name:?} declares stack variables, so {frame_pointer} is reserved"
         ));
     }
 
-    if let Instruction::Assign {
-        value: AssignmentValue::PairBinary { lhs, rhs, .. },
-        ..
-    } = instruction
-        && (register_pair_uses_frame_pointer(lhs, frame_pointer)
-            || register_pair_uses_frame_pointer(rhs, frame_pointer))
-    {
+    let value_uses_frame_pointer = matches!(
+        instruction,
+        Instruction::Assign {
+            value: AssignmentValue::PairBinary { lhs, rhs, .. },
+            ..
+        } if register_pair_uses_frame_pointer(lhs, frame_pointer)
+            || register_pair_uses_frame_pointer(rhs, frame_pointer)
+    );
+    if value_uses_frame_pointer {
         return Err(format!(
             "Label {label_name:?} declares stack variables, so {frame_pointer} is reserved"
         ));

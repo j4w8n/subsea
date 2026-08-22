@@ -1,4 +1,4 @@
-use subsea::codegen::{
+use crate::codegen::{
     Architecture, EntryConvention, Environment, FramePointerPolicy, RuntimeOperation, Target,
 };
 

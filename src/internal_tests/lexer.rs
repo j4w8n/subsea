@@ -1,6 +1,6 @@
-use subsea::diagnostic::{SourceId, SourceMap, Span};
-use subsea::grammar::Token;
-use subsea::lexer::{get_next_token, lex_with_spans};
+use crate::diagnostic::{SourceId, SourceMap, Span};
+use crate::grammar::Token;
+use crate::lexer::{get_next_token, lex_with_spans};
 
 fn lex_one(source: &str) -> Result<Option<Token>, String> {
     get_next_token(&mut source.chars().peekable())
@@ -60,7 +60,7 @@ fn renders_a_source_diagnostic() {
     let mut sources = SourceMap::default();
     let source = "rax = sqrt(9:u64\n";
     let source_id = sources.add("main.ss", source);
-    let diagnostic = subsea::diagnostic::Diagnostic::new("expected ')' after intrinsic argument")
+    let diagnostic = crate::diagnostic::Diagnostic::new("expected ')' after intrinsic argument")
         .at(Span::new(source_id, 15, 15));
 
     assert_eq!(
@@ -75,11 +75,24 @@ fn renders_unicode_columns_and_multiline_spans_safely() {
     let source = "// café\nrax = rdx\n";
     let source_id = sources.add("main.ss", source);
     let diagnostic =
-        subsea::diagnostic::Diagnostic::new("invalid instruction").at(Span::new(source_id, 9, 18));
+        crate::diagnostic::Diagnostic::new("invalid instruction").at(Span::new(source_id, 9, 18));
 
     assert_eq!(
         diagnostic.render(&sources),
         "error: invalid instruction\n --> main.ss:2:1\n  |\n2 | rax = rdx\n  | ^~~~~~~~~"
+    );
+}
+
+#[test]
+fn renders_span_ending_inside_unicode_character_safely() {
+    let mut sources = SourceMap::default();
+    let source_id = sources.add("main.ss", "aéz\n");
+    let diagnostic =
+        crate::diagnostic::Diagnostic::new("invalid text").at(Span::new(source_id, 0, 2));
+
+    assert_eq!(
+        diagnostic.render(&sources),
+        "error: invalid text\n --> main.ss:1:1\n  |\n1 | aéz\n  | ^"
     );
 }
 

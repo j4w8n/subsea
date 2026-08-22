@@ -13,6 +13,21 @@ enum StackSlotKind {
     String,
 }
 
+struct LabelSymbols<'a> {
+    source_entry: &'a str,
+    entry_symbol: &'a str,
+}
+
+impl LabelSymbols<'_> {
+    fn emit_label(&self, source_label: &str) -> String {
+        if source_label == self.source_entry {
+            self.entry_symbol.to_owned()
+        } else {
+            source_label.to_owned()
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn emit_for_target_with_entry(
     program: &ir::Program,
@@ -38,6 +53,10 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
     const FRAME_PREFIX: usize = 48;
     let mut asm = String::new();
     let mut annotations = AnnotationCollector::new(annotate);
+    let labels = LabelSymbols {
+        source_entry: &program.entry,
+        entry_symbol,
+    };
     annotations.generated(&asm, "// compiler-generated: static data and text setup");
     emit_data(&mut asm, program, entry_symbol, &mut annotations, origins)?;
     asm::text(&mut asm);
@@ -57,14 +76,7 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
             })
             .collect::<HashMap<_, _>>();
         annotations.source_label(&asm, "//", origins, &label.name);
-        asm::label(
-            &mut asm,
-            if label.name == program.entry {
-                entry_symbol
-            } else {
-                &label.name
-            },
-        );
+        asm::label(&mut asm, &labels.emit_label(&label.name));
         annotations.generated(&asm, "// compiler-generated: function prologue");
         asm::instruction(
             &mut asm,
@@ -85,9 +97,10 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
             if !matches!(instruction, ir::Instruction::StackBuffer { .. }) {
                 annotations.source_instruction(&asm, "//", origins, &label.name, index);
             }
+            let instruction = remap_instruction_symbols(instruction, &labels);
             emit_instruction(
                 &mut asm,
-                instruction,
+                &instruction,
                 &slots,
                 &slot_kinds,
                 &constants,
@@ -104,7 +117,7 @@ pub(crate) fn emit_for_target_with_entry_and_origins(
             annotations.generated(&asm, "// compiler-generated: function epilogue");
             asm::instruction(
                 &mut asm,
-                &format!(
+                format!(
                     "ldp x19, x20, [sp, #16]\n  ldr x21, [sp, #32]\n  ldp x29, x30, [sp]\n  add sp, sp, #{frame_size}"
                 ),
             );
@@ -274,10 +287,157 @@ fn memory_name(declaration: &ir::MemoryDeclaration) -> &str {
 }
 
 fn remap_entry(target: &str, program: &ir::Program, entry_symbol: &str) -> String {
-    if target == program.entry {
-        entry_symbol.to_owned()
-    } else {
-        target.to_owned()
+    LabelSymbols {
+        source_entry: &program.entry,
+        entry_symbol,
+    }
+    .emit_label(target)
+}
+
+fn remap_instruction_symbols(
+    instruction: &ir::Instruction,
+    labels: &LabelSymbols,
+) -> ir::Instruction {
+    let mut instruction = instruction.clone();
+    match &mut instruction {
+        ir::Instruction::Assign { dst, value } => {
+            remap_operand_symbols(dst, labels);
+            remap_value_symbols(value, labels);
+        }
+        ir::Instruction::AssignIf {
+            dst,
+            value,
+            condition,
+        } => {
+            remap_operand_symbols(dst, labels);
+            remap_value_symbols(value, labels);
+            remap_condition_symbols(condition, labels);
+        }
+        ir::Instruction::WideAssign { lhs, rhs, .. } => {
+            remap_operand_symbols(lhs, labels);
+            remap_operand_symbols(rhs, labels);
+        }
+        ir::Instruction::Call { target } | ir::Instruction::Jmp { target, .. } => {
+            remap_control_target_symbols(target, labels);
+            if let ir::Instruction::Jmp {
+                condition: Some(condition),
+                ..
+            } = &mut instruction
+            {
+                remap_condition_symbols(condition, labels);
+            }
+        }
+        ir::Instruction::Stack { value, .. } => remap_operand_symbols(value, labels),
+        ir::Instruction::StackString { value, .. } => {
+            if let ir::StringInitializer::Slice { ptr, len } = value {
+                remap_operand_symbols(ptr, labels);
+                remap_operand_symbols(len, labels);
+            }
+        }
+        ir::Instruction::Push { src } => remap_operand_symbols(src, labels),
+        ir::Instruction::Pop { dst } => remap_operand_symbols(dst, labels),
+        ir::Instruction::Runtime(operation) => remap_runtime_symbols(operation, labels),
+        ir::Instruction::PairAssign { .. }
+        | ir::Instruction::Const { .. }
+        | ir::Instruction::Exit { .. }
+        | ir::Instruction::Label { .. }
+        | ir::Instruction::Nop
+        | ir::Instruction::Ret
+        | ir::Instruction::StackBuffer { .. }
+        | ir::Instruction::Syscall
+        | ir::Instruction::InlineAsm { .. } => {}
+    }
+    instruction
+}
+
+fn remap_control_target_symbols(target: &mut ir::ControlTarget, labels: &LabelSymbols) {
+    match target {
+        ir::ControlTarget::Label(target) => *target = labels.emit_label(target),
+        ir::ControlTarget::Operand(operand) => remap_operand_symbols(operand, labels),
+    }
+}
+
+fn remap_runtime_symbols(operation: &mut ir::RuntimeOperation, labels: &LabelSymbols) {
+    match operation {
+        ir::RuntimeOperation::Print { parts } => {
+            for part in parts {
+                match part {
+                    ir::PrintPart::FormattedOperand { operand, .. }
+                    | ir::PrintPart::Operand(operand) => remap_operand_symbols(operand, labels),
+                    ir::PrintPart::Binding(_) | ir::PrintPart::Literal(_) => {}
+                }
+            }
+        }
+        ir::RuntimeOperation::Read { dst, len, .. } => {
+            remap_operand_symbols(dst, labels);
+            remap_operand_symbols(len, labels);
+        }
+        ir::RuntimeOperation::Release { ptr, len } => {
+            remap_operand_symbols(ptr, labels);
+            remap_operand_symbols(len, labels);
+        }
+    }
+}
+
+fn remap_value_symbols(value: &mut ir::Value, labels: &LabelSymbols) {
+    match value {
+        ir::Value::Operand(operand) | ir::Value::BitwiseUnary { operand, .. } => {
+            remap_operand_symbols(operand, labels);
+        }
+        ir::Value::Binary { lhs, rhs, .. } | ir::Value::FloatBinary { lhs, rhs, .. } => {
+            remap_operand_symbols(lhs, labels);
+            remap_operand_symbols(rhs, labels);
+        }
+        ir::Value::Expression { lhs, rhs, .. } => {
+            remap_value_symbols(lhs, labels);
+            remap_value_symbols(rhs, labels);
+        }
+        ir::Value::Condition(condition) => remap_condition_symbols(condition, labels),
+        ir::Value::IntrinsicCall { args, .. } => {
+            for operand in args {
+                remap_operand_symbols(operand, labels);
+            }
+        }
+        ir::Value::PlatformReserve { len } => remap_operand_symbols(len, labels),
+        ir::Value::StringBytes { .. } => {}
+    }
+}
+
+fn remap_condition_symbols(condition: &mut ir::Condition, labels: &LabelSymbols) {
+    let (lhs, rhs) = match condition {
+        ir::Condition::Compare { lhs, rhs, .. }
+        | ir::Condition::BitwiseAndZero { lhs, rhs, .. } => (lhs, rhs),
+    };
+    remap_operand_symbols(lhs, labels);
+    remap_operand_symbols(rhs, labels);
+}
+
+fn remap_operand_symbols(operand: &mut ir::Operand, labels: &LabelSymbols) {
+    match operand {
+        ir::Operand::Pointer(name) => *name = labels.emit_label(name),
+        ir::Operand::Memory { address, .. } | ir::Operand::AddressOf(address) => {
+            remap_address_symbols(address, labels);
+        }
+        ir::Operand::Converted { operand, .. } | ir::Operand::Cast { operand, .. } => {
+            remap_operand_symbols(operand, labels);
+        }
+        ir::Operand::Immediate(_)
+        | ir::Operand::FloatLiteral(_)
+        | ir::Operand::Name(_)
+        | ir::Operand::StringProperty { .. }
+        | ir::Operand::TargetRegister(_) => {}
+    }
+}
+
+fn remap_address_symbols(address: &mut ir::Address, labels: &LabelSymbols) {
+    let remap = |term: &mut ir::AddressTerm| {
+        if let ir::AddressTerm::Name(name) = term {
+            *name = labels.emit_label(name);
+        }
+    };
+    remap(&mut address.first);
+    for (_, term) in &mut address.rest {
+        remap(term);
     }
 }
 
@@ -845,6 +1005,7 @@ fn emit_integer_print(
     let done_label = format!(".L.__subsea.aarch64.print_done_{id}");
     let zero_label = format!(".L.__subsea.aarch64.print_zero_{id}");
     let sign_label = format!(".L.__subsea.aarch64.print_sign_{id}");
+    let sign_done_label = format!(".L.__subsea.aarch64.print_sign_done_{id}");
     let buffer = format!(".L.__subsea.aarch64.print_buffer_{id}");
     asm::section(asm, "bss");
     asm::label(asm, &buffer);
@@ -853,7 +1014,7 @@ fn emit_integer_print(
     asm::instruction(
         asm,
         format_args!(
-            "adrp x17, {buffer}\n  add x17, x17, :lo12:{buffer}\n  add x17, x17, #128\n  mov x18, #{base}\n  cbz x16, {zero_label}"
+            "adrp x17, {buffer}\n  add x17, x17, :lo12:{buffer}\n  add x17, x17, #128\n  mov x18, #{base}\n  mov x21, #0\n  cbz x16, {zero_label}"
         ),
     );
     if signed {
@@ -882,14 +1043,17 @@ fn emit_integer_print(
         asm::label(asm, &sign_label);
         asm::instruction(
             asm,
-            format_args!(
-                "neg x16, x16\n  bl {loop_label}\n  mov w20, #45\n  strb w20, [x17, #-1]!\n  b {done_label}"
-            ),
+            format_args!("neg x16, x16\n  mov x21, #1\n  b {loop_label}"),
         );
     }
     asm::label(asm, &zero_label);
     asm::instruction(asm, "mov w20, #48\n  strb w20, [x17, #-1]!");
     asm::label(asm, &done_label);
+    if signed {
+        asm::instruction(asm, format_args!("cbz x21, {sign_done_label}"));
+        asm::instruction(asm, "mov w20, #45\n  strb w20, [x17, #-1]!");
+        asm::label(asm, &sign_done_label);
+    }
     for byte in prefix.as_bytes().iter().rev() {
         asm::instruction(
             asm,
@@ -2200,19 +2364,17 @@ fn emit_cast(
         let source_register = match source {
             ir::Operand::TargetRegister(register) if register.starts_with('w') => "w16",
             ir::Operand::Memory {
-                width: Some(width), ..
-            } if matches!(
-                width,
-                crate::ast::MemoryWidth::I8
-                    | crate::ast::MemoryWidth::U8
-                    | crate::ast::MemoryWidth::I16
-                    | crate::ast::MemoryWidth::U16
-                    | crate::ast::MemoryWidth::I32
-                    | crate::ast::MemoryWidth::U32
-            ) =>
-            {
-                "w16"
-            }
+                width:
+                    Some(
+                        crate::ast::MemoryWidth::I8
+                        | crate::ast::MemoryWidth::U8
+                        | crate::ast::MemoryWidth::I16
+                        | crate::ast::MemoryWidth::U16
+                        | crate::ast::MemoryWidth::I32
+                        | crate::ast::MemoryWidth::U32,
+                    ),
+                ..
+            } => "w16",
             _ => "x16",
         };
         emit_value(asm, source_register, source, slots)?;
@@ -2505,11 +2667,7 @@ fn stack_slots(layout: &ir::StackLayout, base: usize) -> HashMap<String, usize> 
             | ir::StackSlot::String { name } => name,
         };
         slots.insert(name.clone(), offset);
-        offset += if matches!(slot, ir::StackSlot::String { .. }) {
-            16
-        } else {
-            8
-        };
+        offset += stack_slot_size(slot);
     }
     slots
 }
@@ -2527,16 +2685,16 @@ fn stack_slot_kinds(layout: &ir::StackLayout) -> HashMap<String, StackSlotKind> 
 }
 
 fn stack_frame_size(layout: &ir::StackLayout) -> usize {
-    let size = layout
-        .slots
-        .iter()
-        .map(|slot| match slot {
-            ir::StackSlot::Scalar { .. } => 8,
-            ir::StackSlot::Buffer { count, .. } => *count,
-            ir::StackSlot::String { .. } => 16,
-        })
-        .sum::<usize>();
+    let size = layout.slots.iter().map(stack_slot_size).sum::<usize>();
     size.div_ceil(16) * 16
+}
+
+fn stack_slot_size(slot: &ir::StackSlot) -> usize {
+    match slot {
+        ir::StackSlot::Scalar { .. } => 8,
+        ir::StackSlot::Buffer { count, .. } => *count,
+        ir::StackSlot::String { .. } => 16,
+    }
 }
 
 fn stack_operand(
@@ -2643,10 +2801,10 @@ fn memory_address_or_materialize(
     address: &ir::Address,
     slots: &HashMap<String, usize>,
 ) -> Result<String, String> {
-    if matches!(address.first, ir::AddressTerm::TargetRegister(_))
-        && let Ok(address) = memory_address(address)
-    {
-        return Ok(address);
+    if matches!(address.first, ir::AddressTerm::TargetRegister(_)) {
+        if let Ok(address) = memory_address(address) {
+            return Ok(address);
+        }
     }
 
     const SCRATCH: &str = "x15";

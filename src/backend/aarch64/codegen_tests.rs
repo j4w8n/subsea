@@ -83,6 +83,83 @@ fn aarch64_freestanding_codegen_supports_custom_entry_symbols() {
 }
 
 #[test]
+fn aarch64_remaps_all_source_entry_symbol_references() {
+    let program = crate::ir::Program {
+        entry: "main".to_owned(),
+        data: vec![crate::ir::DataDeclaration {
+            name: "static_entry".to_owned(),
+            section: "rodata".to_owned(),
+            align: None,
+            export: false,
+            keep: false,
+            items: vec![crate::ir::DataItem::Address {
+                target: "main".to_owned(),
+            }],
+        }],
+        memory: vec![
+            crate::ir::MemoryDeclaration::Array {
+                name: "entry_array".to_owned(),
+                width: crate::ast::MemoryWidth::Ptr,
+                values: vec![crate::ir::MemoryValue::Address {
+                    target: "main".to_owned(),
+                }],
+            },
+            crate::ir::MemoryDeclaration::Repeat {
+                name: "entry_repeat".to_owned(),
+                width: crate::ast::MemoryWidth::Ptr,
+                count: 1,
+                value: crate::ir::MemoryValue::Address {
+                    target: "main".to_owned(),
+                },
+            },
+        ],
+        labels: vec![crate::ir::Label {
+            name: "main".to_owned(),
+            stack: crate::ir::StackLayout { slots: Vec::new() },
+            instructions: vec![
+                crate::ir::Instruction::Call {
+                    target: crate::ir::ControlTarget::Label("main".to_owned()),
+                },
+                crate::ir::Instruction::Jmp {
+                    target: crate::ir::ControlTarget::Label("main".to_owned()),
+                    condition: None,
+                },
+                crate::ir::Instruction::Assign {
+                    dst: crate::ir::Operand::TargetRegister("x0".to_owned()),
+                    value: crate::ir::Value::Operand(crate::ir::Operand::Pointer(
+                        "main".to_owned(),
+                    )),
+                },
+                crate::ir::Instruction::Assign {
+                    dst: crate::ir::Operand::TargetRegister("x1".to_owned()),
+                    value: crate::ir::Value::Operand(crate::ir::Operand::AddressOf(
+                        crate::ir::Address {
+                            first: crate::ir::AddressTerm::Name("main".to_owned()),
+                            rest: vec![(
+                                crate::ir::AddressOperator::Add,
+                                crate::ir::AddressTerm::Name("main".to_owned()),
+                            )],
+                        },
+                    )),
+                },
+            ],
+        }],
+    };
+
+    let asm =
+        super::emit_for_target_with_entry(&program, Target::AArch64Free, "kernel_entry").unwrap();
+
+    assert_eq!(asm.matches(".quad kernel_entry").count(), 3);
+    assert!(asm.contains("bl kernel_entry"));
+    assert!(asm.contains("b kernel_entry"));
+    assert!(asm.contains("adrp x0, kernel_entry"));
+    assert!(asm.contains("adrp x1, kernel_entry"));
+    assert!(asm.contains("adrp x14, kernel_entry"));
+    assert!(!asm.contains(" main"));
+    assert!(!asm.contains("main:"));
+}
+
+#[test]
 fn aarch64_emits_core_semantic_ir() {
     let program = crate::ir::Program {
         entry: "main".to_owned(),
@@ -702,6 +779,54 @@ fn aarch64_lowers_scalar_stack_slots() {
 }
 
 #[test]
+fn aarch64_mixed_stack_layout_uses_variable_slot_sizes_without_overlap() {
+    let program = crate::ir::Program {
+        entry: "main".to_owned(),
+        data: Vec::new(),
+        memory: Vec::new(),
+        labels: vec![crate::ir::Label {
+            name: "main".to_owned(),
+            stack: crate::ir::StackLayout {
+                slots: vec![
+                    crate::ir::StackSlot::Buffer {
+                        name: "bytes".to_owned(),
+                        count: 24,
+                    },
+                    crate::ir::StackSlot::Scalar {
+                        name: "number".to_owned(),
+                        width: crate::ast::MemoryWidth::U64,
+                    },
+                    crate::ir::StackSlot::String {
+                        name: "text".to_owned(),
+                    },
+                ],
+            },
+            instructions: vec![
+                crate::ir::Instruction::Stack {
+                    name: "number".to_owned(),
+                    width: crate::ast::MemoryWidth::U64,
+                    value: crate::ir::Operand::Immediate(9),
+                },
+                crate::ir::Instruction::StackString {
+                    name: "text".to_owned(),
+                    value: crate::ir::StringInitializer::Literal("ok".to_owned()),
+                },
+                crate::ir::Instruction::Ret,
+            ],
+        }],
+    };
+
+    let asm = super::emit_for_target_with_entry(&program, Target::AArch64Linux, "_start").unwrap();
+
+    assert!(asm.contains("sub sp, sp, #96"));
+    assert!(asm.contains("mov x16, #48\n  add x16, x29, x16"));
+    assert!(asm.contains("str x16, [x29, #72]"));
+    assert!(asm.contains("str x16, [x29, #80]"));
+    assert!(asm.contains("str x16, [x29, #88]"));
+    assert!(asm.contains("add sp, sp, #96"));
+}
+
+#[test]
 fn aarch64_emits_linux_write_runtime_operation() {
     let program = crate::ir::Program {
         entry: "main".to_owned(),
@@ -951,6 +1076,113 @@ fn aarch64_qemu_runtime_output_when_available() {
     let _ = std::fs::remove_file(asm_path);
     let _ = std::fs::remove_file(obj_path);
     let _ = std::fs::remove_file(bin_path);
+}
+
+#[test]
+fn aarch64_signed_integer_print_has_forward_control_flow_and_min_safe_magnitude() {
+    let program = signed_integer_print_program();
+    let asm = super::emit_for_target_with_entry(&program, Target::AArch64Linux, "_start").unwrap();
+
+    assert!(asm.contains("neg x16, x16\n  mov x21, #1\n  b .L.__subsea.aarch64.print_loop_"));
+    assert!(asm.contains("cbz x21, .L.__subsea.aarch64.print_sign_done_"));
+    assert!(asm.contains("mov w20, #45\n  strb w20, [x17, #-1]!"));
+    assert!(!asm.contains("bl .L.__subsea.aarch64.print_loop_"));
+    assert!(asm.contains("udiv x19, x16, x18"));
+}
+
+#[test]
+fn aarch64_signed_integer_print_runtime_when_cross_tools_are_available() {
+    for tool in [
+        "aarch64-linux-gnu-as",
+        "aarch64-linux-gnu-ld",
+        "qemu-aarch64",
+    ] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("skipping AArch64 runtime test: {tool} is unavailable");
+            return;
+        }
+    }
+
+    let program = signed_integer_print_program();
+    let asm = super::emit_for_target_with_entry(&program, Target::AArch64Linux, "_start").unwrap();
+    let base = format!("/tmp/subsea-aarch64-signed-print-{}", std::process::id());
+    let asm_path = format!("{base}.s");
+    let obj_path = format!("{base}.o");
+    let bin_path = format!("{base}.elf");
+    std::fs::write(&asm_path, asm).unwrap();
+    assert!(
+        Command::new("aarch64-linux-gnu-as")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&obj_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("aarch64-linux-gnu-ld")
+            .arg(&obj_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new("qemu-aarch64")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"-42,-9223372036854775808\n");
+    let _ = std::fs::remove_file(asm_path);
+    let _ = std::fs::remove_file(obj_path);
+    let _ = std::fs::remove_file(bin_path);
+}
+
+fn signed_integer_print_program() -> crate::ir::Program {
+    let signed = crate::ir::PrintFormat::SignedDecimal(crate::ast::MemoryWidth::I64);
+    crate::ir::Program {
+        entry: "main".to_owned(),
+        data: Vec::new(),
+        memory: Vec::new(),
+        labels: vec![crate::ir::Label {
+            name: "main".to_owned(),
+            stack: crate::ir::StackLayout { slots: Vec::new() },
+            instructions: vec![
+                crate::ir::Instruction::Assign {
+                    dst: crate::ir::Operand::TargetRegister("x22".to_owned()),
+                    value: crate::ir::Value::Operand(crate::ir::Operand::Immediate(-42)),
+                },
+                crate::ir::Instruction::Assign {
+                    dst: crate::ir::Operand::TargetRegister("x23".to_owned()),
+                    value: crate::ir::Value::Operand(crate::ir::Operand::Immediate(1)),
+                },
+                crate::ir::Instruction::Assign {
+                    dst: crate::ir::Operand::TargetRegister("x24".to_owned()),
+                    value: crate::ir::Value::Binary {
+                        op: crate::ast::MathOp::ShiftLeft,
+                        lhs: crate::ir::Operand::TargetRegister("x23".to_owned()),
+                        rhs: crate::ir::Operand::Immediate(63),
+                    },
+                },
+                crate::ir::Instruction::Runtime(crate::ir::RuntimeOperation::Print {
+                    parts: vec![
+                        crate::ir::PrintPart::FormattedOperand {
+                            format: signed,
+                            operand: crate::ir::Operand::TargetRegister("x22".to_owned()),
+                        },
+                        crate::ir::PrintPart::Literal(",".to_owned()),
+                        crate::ir::PrintPart::FormattedOperand {
+                            format: signed,
+                            operand: crate::ir::Operand::TargetRegister("x24".to_owned()),
+                        },
+                        crate::ir::PrintPart::Literal("\n".to_owned()),
+                    ],
+                }),
+                crate::ir::Instruction::Exit { code: 0 },
+            ],
+        }],
+    }
 }
 
 #[test]
@@ -1543,13 +1775,12 @@ fn aarch64_emits_and_validates_indirect_control_flow() {
 
     assert!(asm.contains("mov x16, x3\n  blr x16\n"));
     assert!(asm.contains("ldr x16, [x15]\n  br x16\n"));
-    if let Some(mut child) = Command::new("aarch64-linux-gnu-as")
+    if let Ok(mut child) = Command::new("aarch64-linux-gnu-as")
         .arg("-o")
         .arg("/tmp/subsea-aarch64-control.o")
         .arg("-")
         .stdin(Stdio::piped())
         .spawn()
-        .ok()
     {
         child
             .stdin
@@ -1683,13 +1914,12 @@ fn aarch64_emits_pair_arithmetic_and_rejects_narrow_pairs() {
     let asm = super::emit_for_target_with_entry(&program, Target::AArch64Linux, "_start").unwrap();
 
     assert!(asm.contains("adds x0, x0, x2\n  adc x1, x1, x3\n"));
-    if let Some(mut child) = Command::new("aarch64-linux-gnu-as")
+    if let Ok(mut child) = Command::new("aarch64-linux-gnu-as")
         .arg("-o")
         .arg("/tmp/subsea-aarch64-pair.o")
         .arg("-")
         .stdin(Stdio::piped())
         .spawn()
-        .ok()
     {
         child
             .stdin

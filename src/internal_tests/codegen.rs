@@ -1,17 +1,17 @@
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-use subsea::ast::{
+use crate::ast::{
     Address, AddressOperator, AddressTerm, AssignmentTarget, AssignmentValue, BindingValue,
     CompareOp, Condition, ConditionExpr, ControlTarget, DataDeclaration, DataItem, ExprOp,
     Expression, FloatMathOp, InlineAsmArchitecture, Instruction, IntrinsicOp, Label, MathOp,
     MemoryDeclaration, MemoryValue, MemoryWidth, Operand, PairBinaryOp, PrintFormat, PrintPart,
     Program, ReadSource, RegisterPair, StringInitializer, StringProperty, WidthConversion,
 };
-use subsea::codegen::{
+use crate::codegen::{
     Target, emit_target_asm_with_origins, emit_x86_64_asm, emit_x86_64_asm_with_entry_symbol,
     emit_x86_64_linux_asm,
 };
-use subsea::diagnostic::ProgramOrigins;
+use crate::diagnostic::ProgramOrigins;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn s(value: &str) -> String {
     value.to_string()
@@ -210,7 +210,7 @@ fn assembles_aarch64_source_level_addressing_when_available() {
 
 fn emit_aarch64_source(
     mut instructions: Vec<Instruction>,
-) -> Result<String, subsea::diagnostic::Diagnostic> {
+) -> Result<String, crate::diagnostic::Diagnostic> {
     instructions.push(Instruction::Exit { code: 0 });
     let program = Program {
         imports: Vec::new(),
@@ -1030,14 +1030,18 @@ fn rejects_string_bytes_assignment_with_explicit_width() {
 
 #[test]
 fn emits_stack_cleanup_before_ret() {
-    let program = main_program(vec![
-        Instruction::Stack {
-            name: s("value"),
-            width: MemoryWidth::U64,
-            value: Operand::Immediate(1),
-        },
-        Instruction::Ret,
-    ]);
+    let mut program = main_program(Vec::new());
+    program.labels.push(Label {
+        name: s("helper"),
+        instructions: vec![
+            Instruction::Stack {
+                name: s("value"),
+                width: MemoryWidth::U64,
+                value: Operand::Immediate(1),
+            },
+            Instruction::Ret,
+        ],
+    });
 
     let asm = emit_x86_64_linux_asm(&program).unwrap();
 
@@ -1313,7 +1317,7 @@ fn emits_bitwise_not() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
         value: AssignmentValue::BitwiseUnary {
-            op: subsea::ast::BitwiseUnaryOp::Not,
+            op: crate::ast::BitwiseUnaryOp::Not,
             operand: reg("rbx"),
         },
     }]);
@@ -1526,11 +1530,11 @@ fn emits_indexed_memory_load_and_store() {
                 Instruction::Assign {
                     dst: AssignmentTarget::Operand(reg("rax")),
                     value: AssignmentValue::Operand(Operand::Dereference {
-                        address: subsea::ast::Address {
-                            first: subsea::ast::AddressTerm::Ident(s("values")),
+                        address: crate::ast::Address {
+                            first: crate::ast::AddressTerm::Ident(s("values")),
                             rest: vec![(
-                                subsea::ast::AddressOperator::Add,
-                                subsea::ast::AddressTerm::ScaledRegister {
+                                crate::ast::AddressOperator::Add,
+                                crate::ast::AddressTerm::ScaledRegister {
                                     register: s("r8"),
                                     scale: 8,
                                 },
@@ -1541,11 +1545,11 @@ fn emits_indexed_memory_load_and_store() {
                 },
                 Instruction::Assign {
                     dst: AssignmentTarget::Operand(Operand::Dereference {
-                        address: subsea::ast::Address {
-                            first: subsea::ast::AddressTerm::Ident(s("values")),
+                        address: crate::ast::Address {
+                            first: crate::ast::AddressTerm::Ident(s("values")),
                             rest: vec![(
-                                subsea::ast::AddressOperator::Add,
-                                subsea::ast::AddressTerm::ScaledRegister {
+                                crate::ast::AddressOperator::Add,
+                                crate::ast::AddressTerm::ScaledRegister {
                                     register: s("r8"),
                                     scale: 8,
                                 },
@@ -1583,11 +1587,11 @@ fn emits_address_of_indexed_memory() {
             instructions: vec![
                 Instruction::Assign {
                     dst: AssignmentTarget::Operand(reg("rsi")),
-                    value: AssignmentValue::Operand(Operand::AddressOf(subsea::ast::Address {
-                        first: subsea::ast::AddressTerm::Ident(s("buf")),
+                    value: AssignmentValue::Operand(Operand::AddressOf(crate::ast::Address {
+                        first: crate::ast::AddressTerm::Ident(s("buf")),
                         rest: vec![(
-                            subsea::ast::AddressOperator::Add,
-                            subsea::ast::AddressTerm::Register(s("rax")),
+                            crate::ast::AddressOperator::Add,
+                            crate::ast::AddressTerm::Register(s("rax")),
                         )],
                     })),
                 },
@@ -1605,19 +1609,19 @@ fn emits_address_of_indexed_memory() {
 fn emits_address_of_raw_address_expression() {
     let program = main_program(vec![Instruction::Assign {
         dst: AssignmentTarget::Operand(reg("rax")),
-        value: AssignmentValue::Operand(Operand::AddressOf(subsea::ast::Address {
-            first: subsea::ast::AddressTerm::Register(s("rbx")),
+        value: AssignmentValue::Operand(Operand::AddressOf(crate::ast::Address {
+            first: crate::ast::AddressTerm::Register(s("rbx")),
             rest: vec![
                 (
-                    subsea::ast::AddressOperator::Add,
-                    subsea::ast::AddressTerm::ScaledRegister {
+                    crate::ast::AddressOperator::Add,
+                    crate::ast::AddressTerm::ScaledRegister {
                         register: s("rcx"),
                         scale: 4,
                     },
                 ),
                 (
-                    subsea::ast::AddressOperator::Add,
-                    subsea::ast::AddressTerm::Immediate(8),
+                    crate::ast::AddressOperator::Add,
+                    crate::ast::AddressTerm::Immediate(8),
                 ),
             ],
         })),
@@ -2312,7 +2316,7 @@ fn emits_call_and_ret() {
                     Instruction::Call {
                         target: ControlTarget::Label(s("helper")),
                     },
-                    Instruction::Ret,
+                    Instruction::Exit { code: 0 },
                 ],
             },
             Label {
@@ -2477,18 +2481,28 @@ fn emits_push_and_pop() {
 }
 
 #[test]
-fn rejects_ret_with_unbalanced_manual_stack() {
-    let program = main_program(vec![
-        Instruction::Push { src: reg("rax") },
-        Instruction::Ret,
-    ]);
+fn rejects_ret_in_process_entry() {
+    let program = main_program(vec![Instruction::Ret]);
 
     let error = emit_x86_64_linux_asm(&program).unwrap_err();
 
     assert_eq!(
         error,
-        "Function \"main\" cannot ret with unbalanced manual stack depth 1. Pop pushed values before the function ends, or use `exit` if this path terminates the process."
+        "Process entry \"main\" cannot return. End this path with `exit` or an unconditional local `jmp` to code that does."
     );
+}
+
+#[test]
+fn allows_ret_in_helper_function() {
+    let mut program = main_program(Vec::new());
+    program.labels.push(Label {
+        name: s("helper"),
+        instructions: vec![Instruction::Ret],
+    });
+
+    let asm = emit_x86_64_linux_asm(&program).unwrap();
+
+    assert!(asm.contains("helper:\n  ret\n"));
 }
 
 #[test]
@@ -2731,7 +2745,7 @@ fn rejects_function_fallthrough() {
 
     assert_eq!(
         error,
-        "Function \"main\" can fall through. End this path with `ret`, `exit`, or an unconditional local `jmp` to code that does."
+        "Process entry \"main\" can fall through. End this path with `exit` or an unconditional local `jmp` to code that does."
     );
 }
 
@@ -3058,7 +3072,7 @@ fn infers_memory_width_from_declared_base() {
                         address: Address {
                             first: AddressTerm::Ident(s("buf")),
                             rest: vec![(
-                                subsea::ast::AddressOperator::Add,
+                                crate::ast::AddressOperator::Add,
                                 AddressTerm::Immediate(1),
                             )],
                         },
